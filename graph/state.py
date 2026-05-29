@@ -1,0 +1,73 @@
+from typing import TypedDict, List, Optional, Annotated, Any
+
+# LangGraph状态合并函数
+def merge_lists(old_list: Optional[Any], new_list: Optional[Any]) -> List[Any]:
+    if new_list is not None and len(new_list) == 0:
+        return []   
+    old = list(old_list) if old_list is not None else []
+    new = list(new_list) if new_list is not None else []
+    return old + new
+
+# 文档Chunk元数据
+class DocMeta(TypedDict):
+    chunk_index: int    # 当前Chunk在原文中的序号
+    source: str         # 来源文件名
+    page: int           # PDF页码
+    score: float        # 检索/Rerank相关度得分
+    origin: str         # 来源渠道(vector/bm25/web)
+
+
+# 检索得到的文档片段
+class RetrievedDoc(TypedDict):
+    text: str           # Chunk正文
+    meta: DocMeta       # Chunk元数据
+
+
+# 消息
+class ChatMessage(TypedDict):
+    role: str                   # 消息发送方角色（user / assistant / system）
+    content: str                # 消息内容
+    timestamp: Optional[str]    # 消息创建时间
+
+# Agent运行轨迹
+class AgentStepTrace(TypedDict):
+    step_name: str          # 当前执行的节点
+    input_summary: str      # 输入内容摘要
+    output_summary: str     # 输出内容摘要
+
+# LangGraph全局状态
+class GraphState(TypedDict):
+    # 外部输入
+    query: str         # 用户问题
+    doc_id: str        # 当前文档ID或知识库ID
+    task_type: str     # qa/summary/compare
+    top_k: int         # 检索返回数量
+
+    # 核心RAG管道中间态
+    rewritten_query: str                    # Query Rewrite结果
+    retrieved_docs: List[RetrievedDoc]      # 混合检索召回结果
+    reranked_docs: List[RetrievedDoc]       # Reranker排序后结果
+    context: str                            # 最终送入LLM的上下文
+
+    # 最终输出与溯源
+    answer: str                 # 最终回答
+    critique: str               # Critic反思结果
+    sources: List[DocMeta]      # 答案来源
+
+    # 历史
+    chat_history: Annotated[List[ChatMessage], merge_lists]
+
+    # Agent编排与控制流
+    route: str                  # 下一步执行节点
+    iteration_count: int        # 当前反思次数
+    max_iteration_count: int    # 最大允许反思次数
+
+    # Agent执行轨迹
+    steps_trace: Annotated[List[AgentStepTrace], merge_lists]
+
+    # 异常
+    error: Optional[str]
+
+
+
+
