@@ -1,4 +1,5 @@
 from typing import TypedDict, List, Optional, Annotated, Any
+from typing_extensions import NotRequired
 
 # LangGraph状态合并函数
 def merge_lists(old_list: Optional[Any], new_list: Optional[Any]) -> List[Any]:
@@ -67,6 +68,15 @@ class GraphState(TypedDict):
 
     # 异常
     error: Optional[str]
+
+class ParsePage(TypedDict):
+    page: int                # 页码
+    source: str              # 来源文件名
+    text: str                # 当前页解析出的正文
+    is_ocr_fallback: bool    # 当前页面是否是需要OCR才能读取的页面（非正常文本）
+
+
+
 
 
 
