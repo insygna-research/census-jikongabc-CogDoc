@@ -1,7 +1,7 @@
 import fitz
 import re
 import os
-from typint import List
+from typing import List
 from graph.state import ParsedPage
 
 def smart_parse(pdf_path: str) -> List[ParsedPage]:

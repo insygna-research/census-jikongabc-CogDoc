@@ -5,6 +5,7 @@ from typing import List
 class Embedder:
     # 单例模型，整个程序只加载一次
     _model = None
+    MODEL_NAME = "BAAI/bge-small-zh-v1.5"
 
     # 自动选择运行设备：NVIDIA GPU -> Apple M系列 -> CPU
     device = "cuda" if torch.cuda.is_available() else (
@@ -15,7 +16,7 @@ class Embedder:
     # 加载模型
     @classmethod
     def get_model(cls) -> SentenceTransformer:
-        if cls._model is Mone:
+        if cls._model is None:
             cls._model = SentenceTransformer("BAAI/bge-small-zh-v1.5", device = cls.device)
         return cls._model
     
