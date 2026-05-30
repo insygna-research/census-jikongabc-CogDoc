@@ -20,7 +20,7 @@ class ChromaRetriever(BaseRetriever):
         self.client = chromadb.PersistentClient(path = persist_directory)  # 初始化持久化Chroma客户端
 
         self.collection = self.client.get_or_create_collection(
-            name=f"col-{collection_id}"[:60],  # 每个文档独立collection避免污染
+            name = f"col-{collection_id}"[:60],  # 每个文档独立collection避免污染
             metadata={"embedding_model": Embedder.MODEL_NAME}  # 记录当前embedding模型信息
         )
         
