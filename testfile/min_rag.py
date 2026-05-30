@@ -1,3 +1,4 @@
+# 测试文件，在项目中无实际作用
 from langchain_ollama import OllamaLLM
 import chromadb
 from sentence_transformers import SentenceTransformer

@@ -11,11 +11,14 @@ def merge_lists(old_list: Optional[Any], new_list: Optional[Any]) -> List[Any]:
 
 # 文档Chunk元数据
 class DocMeta(TypedDict):
-    chunk_index: int    # 当前Chunk在原文中的序号
-    source: str         # 来源文件名
-    page: int           # PDF页码
-    score: float        # 检索/Rerank相关度得分
-    origin: str         # 来源渠道(vector/bm25/web)
+    chunk_index: int                # 当前Chunk在原文中的序号
+    source: str                     # 来源文件名
+    page: int                       # 主页码
+    page_start: int                 # 起始页码
+    page_end: int                   # 终止页码
+    score: float                    # 检索/Rerank相关度得分
+    origin: str                     # 来源渠道(vector/bm25/web)
+    distance: NotRequired[float]    # 相似度反向指标
 
 
 # 检索得到的文档片段
@@ -69,7 +72,7 @@ class GraphState(TypedDict):
     # 异常
     error: Optional[str]
 
-class ParsePage(TypedDict):
+class ParsedPage(TypedDict):
     page: int                # 页码
     source: str              # 来源文件名
     text: str                # 当前页解析出的正文
