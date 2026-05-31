@@ -1,29 +1,24 @@
 import os
 import chromadb
-from abc import ABC, abstractmethod
 from typing import List
 from graph.state import RetrievedDoc
 from tools.embedder import Embedder
-
-class BaseRetriever(ABC):
-    # 抽象基类，定义检索器必须实现的接口
-    @abstractmethod
-    def index(self, chunks: List[RetrievedDoc]) -> None: pass
-    # 向量入库接口
-    @abstractmethod
-    def search(self, query: str, top_k: int = 3) -> List[RetrievedDoc]: pass
-    # 查询接口
+from tools.retriever.base_retriever import BaseRetriever
 
 class ChromaRetriever(BaseRetriever):
     def __init__(self, collection_id: str, persist_directory: str = "./data/chroma_db"):
         os.makedirs(persist_directory, exist_ok = True)  # 确保向量数据库落盘目录存在
         self.client = chromadb.PersistentClient(path = persist_directory)  # 初始化持久化Chroma客户端
-
-        self.collection = self.client.get_or_create_collection(
-            name = f"col-{collection_id}"[:60],  # 每个文档独立collection避免污染
-            metadata={"embedding_model": Embedder.MODEL_NAME}  # 记录当前embedding模型信息
-        )
         
+        self.collection_name = f"col-{collection_id}"[:60]
+        self._init_collection()
+        
+    def _init_collection(self) -> None:
+        self.collection = self.client.get_or_create_collection(
+            name = self.collection_name,  # 每个文档独立collection避免污染
+            metadata = {"embedding_model": Embedder.MODEL_NAME}  # 记录当前embedding模型信息
+        )
+
         existing_meta = self.collection.metadata  # 读取已存在collection的元信息
         if existing_meta and existing_meta.get("embedding_model") != Embedder.MODEL_NAME:
             raise RuntimeError(  # 防止不同embedding模型混用导致检索失真
@@ -31,8 +26,21 @@ class ChromaRetriever(BaseRetriever):
                 f"System model: {Embedder.MODEL_NAME}"
             )
 
+    def exists(self) -> bool: 
+        return self.collection.count() > 0 # 检查向量库中是否存在索引数据
+    
+    def clear(self) -> None:
+        try:
+            self.client.delete_collection(name = self.collection_name) # 销毁向量数据库
+            self._init_collection() 
+        except Exception:
+            pass
+
     def index(self, chunks: List[RetrievedDoc]) -> None:
         if not chunks: return  # 空数据直接跳过避免无意义计算
+
+        self.clear()
+
         embeddings = Embedder.embed_documents([c["text"] for c in chunks])  # 批量生成向量
         
         ids, metadatas, texts = [], [], []  # 分别存储id、元数据、文本内容
@@ -60,18 +68,25 @@ class ChromaRetriever(BaseRetriever):
             return []  # 无结果直接返回空列表
             
         retrieved_docs: List[RetrievedDoc] = []
-        for i in range(len(results["documents"][0])):
-            meta_data = results["metadatas"][0][i]
+        docs = results["documents"][0]
+        ids = results["ids"][0]
+        metas = results["metadatas"][0]
+        distances = results["distances"][0] if "distances" in results else [0.0] * len(ids)
+
+        for i in range(len(ids)):
+            meta_data = metas[i]
             retrieved_docs.append({
-                "text": results["documents"][0][i],  # 命中的文本块
+                "text": docs[i],  # 命中的文本块
                 "meta": {
                     "chunk_index": int(meta_data["chunk_index"]),
                     "source": str(meta_data["source"]),
                     "page": int(meta_data["page"]),
                     "page_start": int(meta_data["page_start"]),
                     "page_end": int(meta_data["page_end"]),
-                    "origin": str(meta_data["origin"]),
-                    "distance": float(results["distances"][0][i])  # 向量距离（越小越相关）
+                    "origin": str(meta_data["origin"])
+                },
+                "retrieval": {
+                    "distance": float(distances[i])  # 向量距离（越小越相关）
                 }
             })
         return retrieved_docs  # 返回结构化检索结果
