@@ -64,7 +64,19 @@ class BM25Retriever(BaseRetriever):
         self.clear()  # 重建前清空旧索引
 
         for c in chunks:
-            self.doc_registry.append(c)  # 保存原始Chunk
+            meta = c["meta"]
+            clean_doc: RetrievedDoc = {
+                "text": c["text"],
+                "meta": {
+                    "chunk_index": int(meta["chunk_index"]),
+                    "source": str(meta["source"]),
+                    "page": int(meta["page"]),
+                    "page_start": int(meta["page_start"]),
+                    "page_end": int(meta["page_end"]),
+                    "origin": str(meta.get("origin", "file"))
+                }
+            }
+            self.doc_registry.append(clean_doc)  # 保存清洗干净后的原始Chunk
             self.tokenized_corpus.append(self._tokenize(c["text"]))  # 保存分词结果
         
         self.bm25 = BM25Okapi(self.tokenized_corpus)  # 构建BM25倒排索引
@@ -103,7 +115,8 @@ class BM25Retriever(BaseRetriever):
                     "origin": str(meta_data["origin"])
                 },
                 "retrieval": {
-                    "bm25_score": float(scores[idx])  # BM25相关性得分
+                    "bm25_score": float(scores[idx]),  # BM25相关性得分
+                    "search_channel": "bm25"
                 }
             })
         return retrieved_docs  # 返回结构化检索结果

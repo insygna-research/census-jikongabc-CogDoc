@@ -54,7 +54,7 @@ class ChromaRetriever(BaseRetriever):
                 "page": meta["page"],
                 "page_start": meta["page_start"],
                 "page_end": meta["page_end"],
-                "origin": meta["origin"]
+                "origin": meta.get("origin", "file")
             })
             
         self.collection.upsert(ids = ids, embeddings = embeddings, documents = texts, metadatas = metadatas)  # 幂等写入向量库
@@ -86,7 +86,8 @@ class ChromaRetriever(BaseRetriever):
                     "origin": str(meta_data["origin"])
                 },
                 "retrieval": {
-                    "distance": float(distances[i])  # 向量距离（越小越相关）
+                    "distance": float(distances[i]),  # 向量距离（越小越相关）
+                    "search_channel": "vector"
                 }
             })
         return retrieved_docs  # 返回结构化检索结果

@@ -17,14 +17,20 @@ class DocMeta(TypedDict):
     page_start: int                 # 起始页码
     page_end: int                   # 终止页码
     score: float                    # 检索/Rerank相关度得分
-    origin: str                     # 来源渠道(vector/bm25/web)
-    distance: NotRequired[float]    # 相似度反向指标
+    origin: str                     # 来源渠道(vector/bm25/web/...)
 
+class RetrievalMetrics(TypedDict, total = False):
+    distance: float                 # 向量密集检索距离（越小越相关）
+    bm25_score: float               # 稀疏检索词频得分（越大越相关）
+    rrf_score: float                # 混合检索倒数排名融合得分
+    rerank_score: float             # 交叉编码器精排模型最终得分
+    search_channel: str             # 动态召回渠道标记 ("vector" / "bm25" / "hybrid")
 
 # 检索得到的文档片段
 class RetrievedDoc(TypedDict):
-    text: str           # Chunk正文
-    meta: DocMeta       # Chunk元数据
+    text: str                                   # Chunk正文
+    meta: DocMeta                               # Chunk元数据
+    retrieval: NotRequired[RetrievalMetrics]    # Chunk动态检索指标
 
 
 # 消息
