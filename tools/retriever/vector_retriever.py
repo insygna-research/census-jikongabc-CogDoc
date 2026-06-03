@@ -5,7 +5,7 @@ from graph.state import RetrievedDoc
 from tools.embedder import Embedder
 from tools.retriever.base_retriever import BaseRetriever
 
-class ChromaRetriever(BaseRetriever):
+class VectorRetriever(BaseRetriever):
     def __init__(self, collection_id: str, persist_directory: str = "./data/chroma_db"):
         os.makedirs(persist_directory, exist_ok = True)  # 确保向量数据库落盘目录存在
         self.client = chromadb.PersistentClient(path = persist_directory)  # 初始化持久化Chroma客户端
