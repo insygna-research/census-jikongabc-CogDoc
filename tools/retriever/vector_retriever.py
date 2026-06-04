@@ -46,7 +46,7 @@ class VectorRetriever(BaseRetriever):
         ids, metadatas, texts = [], [], []  # 分别存储id、元数据、文本内容
         for c in chunks:
             meta = c["meta"]
-            ids.append(f"chk-{meta['chunk_index']}")  # 每个chunk生成唯一id
+            ids.append(f"{meta['source']}_{meta['chunk_index']}")  # 每个chunk生成唯一id
             texts.append(c["text"])  # 原始文本
             metadatas.append({  # 存储检索辅助信息
                 "chunk_index": meta["chunk_index"],

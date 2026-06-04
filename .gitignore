@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+data/
+chroma_db/
+*.pkl
+*.bin
+*.sqlite3
+
+logs/
+*.log
