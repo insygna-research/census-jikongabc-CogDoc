@@ -5,7 +5,7 @@ from graph.workflow import app, RetrieverFactory
 from tools.parser import smart_parse
 from tools.chunker import chunk_paper
 
-def build_index(doc_id: str, doc_dir: str = "测试论文"):
+def build_index(doc_id: str, doc_dir: str = "tests"):
     if not os.path.exists(doc_dir):
         os.makedirs(doc_dir)
         print(f"📁 已自动为您创建待扫描的知识库目录: 【{doc_dir}】")
