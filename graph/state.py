@@ -1,5 +1,7 @@
 from typing import TypedDict, List, Optional, Annotated, Any
 from typing_extensions import NotRequired
+from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
 
 # LangGraph状态合并函数
 def merge_lists(old_list: Optional[Any], new_list: Optional[Any]) -> List[Any]:
@@ -47,6 +49,10 @@ class AgentStepTrace(TypedDict):
 
 # LangGraph全局状态
 class GraphState(TypedDict):
+    # LangGraph 消息流（当前工作流实际使用的字段）
+    messages: Annotated[List[BaseMessage], add_messages]
+    docs: NotRequired[List[RetrievedDoc]]
+
     # 外部输入
     query: str         # 用户问题
     doc_id: str        # 当前文档ID或知识库ID
@@ -83,7 +89,6 @@ class ParsedPage(TypedDict):
     source: str              # 来源文件名
     text: str                # 当前页解析出的正文
     is_ocr_fallback: bool    # 当前页面是否是需要OCR才能读取的页面（非正常文本）
-
 
 
 

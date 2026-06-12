@@ -1,11 +1,7 @@
 from functools import lru_cache
-from typing import TypedDict, List, Annotated
-from typing_extensions import NotRequired
-from langchain_core.messages import BaseMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, START, END
-from langgraph.graph.message import add_messages
-from graph.state import RetrievedDoc
+from graph.state import GraphState, RetrievedDoc
 from tools.retriever.vector_retriever import VectorRetriever
 from tools.retriever.bm25_retriever import BM25Retriever
 from tools.retriever.hybrid import HybridRetriever
@@ -20,10 +16,6 @@ class RetrieverFactory:
             vector_retriever = VectorRetriever(collection_id = doc_id),
             bm25_retriever = BM25Retriever(collection_id = doc_id)
         )
-
-class GraphState(TypedDict):
-    messages: Annotated[List[BaseMessage], add_messages] # LangGraph 消息状态
-    docs: NotRequired[List[RetrievedDoc]] # 节点间传递的文档
 
 def retrieve_node(state: GraphState, config: RunnableConfig) -> dict:
     configurable = config.get("configurable", {}) # 读取运行配置

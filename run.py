@@ -1,4 +1,3 @@
-# run.py
 import sys
 import os
 from graph.workflow import app, RetrieverFactory
@@ -28,6 +27,20 @@ def build_index(doc_id: str, doc_dir: str = "tests"):
         pages = smart_parse(pdf_path)
         chunks = chunk_paper(pages)
         print(f"  -> 成功抽取 {len(chunks)} 个语义 Chunk")
+
+        print("\n--- [切块细节预览开始] ---")
+        for i, chunk in enumerate(chunks):
+            # 从 metadata 提取源文件和页码
+            meta = chunk.get("meta", {})
+            source = meta.get("source", pdf)
+            page = meta.get("page", 1)
+            chunk_idx = meta.get("chunk_index", i)
+            
+            print(f"📄 [Chunk #{chunk_idx}] 来源: {source} | 页码: P{page}")
+            print(f"📝 文本内容:\n{chunk['text'].strip()}")
+            print("-" * 30)
+        print("--- [切块细节预览结束] ---\n")
+
         all_chunks.extend(chunks)
 
     if not all_chunks:
@@ -106,7 +119,7 @@ def main():
     print("   - 输入 '/cloud' 快捷切换为 云端 API 高性能生产模式")
     print("=" * 60)
 
-    is_local = False
+    is_local = True
     
     # CLI 命令行终极稳固交互大循环
     while True:
@@ -132,7 +145,7 @@ def main():
                 continue
 
             # 安全平稳触发 RAG 工作流
-            ask(doc_id=TARGET_DOC_ID, query=user_input, is_local=is_local)
+            ask(doc_id=TARGET_DOC_ID, query = user_input, is_local = is_local)
             
         except KeyboardInterrupt:
             print("\n👋 检测到系统中断信号（Ctrl+C），安全关闭。")

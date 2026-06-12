@@ -66,6 +66,21 @@ def chunk_paper(
         # 当前Chunk终点
         end_idx = min(start_idx + chunk_char_size, total_len)
 
+        # 在目标边界附近搜索语义边界，避免断句/断段
+        if end_idx < total_len:
+            search_start = max(start_idx + 1, end_idx - 60)
+            search_end = min(end_idx + 120, total_len)
+
+            # 优先在段落边界 (\n\n) 处切分
+            para_break = global_text.rfind('\n\n', search_start, search_end)
+            if para_break != -1:
+                end_idx = para_break + 2  # 包含换行符
+            else:
+                # 退而求其次在行尾 (\n) 处切分
+                line_break = global_text.rfind('\n', search_start, search_end)
+                if line_break != -1:
+                    end_idx = line_break + 1  # 包含换行符
+
         # 按字符数切片
         chunk_text = global_text[start_idx:end_idx].strip()
 
