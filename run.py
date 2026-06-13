@@ -2,7 +2,8 @@ import sys
 import os 
 import json 
 import hashlib
-from graph.workflow import app, RetrieverFactory
+from graph.workflow import app
+from graph.subgraphs.qa import RetrieverFactory
 from tools.parser import smart_parse 
 from tools.chunker import chunk_paper
 from tools.embedder import Embedder
@@ -133,10 +134,6 @@ def build_index(doc_id: str, doc_dir: str = DEFAULT_DOC_DIR):  # 根据PDF目录
 
 
 def ask(doc_id: str, query: str, is_local: bool = False):
-    """
-    100% 正统的 LangGraph 原生消息流消费客户端。
-    支持在提问时在线将精排召回的切块详情喷射在终端上。
-    """
     initial_state = {"messages": []}  # 初始化LangGraph消息状态
     
     runtime_config = {
@@ -160,8 +157,22 @@ def ask(doc_id: str, query: str, is_local: bool = False):
 
         try:
             for mode, data in token_stream:  # 消费LangGraph多模式流
-                if mode == "updates" and "rerank_node" in data:  # 捕获精排节点输出
-                    final_docs = data["rerank_node"].get("docs", [])  # 读取精排后的最终文档
+                # 1. 统一单点打印大图任务路由器的智能决策报告
+                if mode == "updates" and "intent_router" in data:
+                    router_output = data["intent_router"]
+                    task = router_output.get("task_type", "qa")
+                    reason = router_output.get("router_reason", "无")
+                    print(f"🧠 [RouterAgent 智能路由判别报告]:")
+                    print(f"   ↳ 判定任务类型 -> 【{task.upper()}】")
+                    print(f"   ↳ 判定分类逻辑 -> {reason}\n")
+                    print("-" * 50)
+                    
+                # 2. 🥇 终极防御：抛弃脆弱的子图内部节点监听，直接拦截父图大节点 "qa_subgraph"
+                elif mode == "updates" and "qa_subgraph" in data:
+                    subgraph_output = data["qa_subgraph"]
+                    # 🌟 从解耦清洗、完全属于本轮多 Agent 问答的专职状态槽中读取已经排好序的终产物切块
+                    final_docs = subgraph_output.get("reranked_docs", [])
+
                     print("\n🎯 [RAG 召回与精排切块结果预览]:")
                     if not final_docs:  # 无召回结果时打印空提示
                         print("  （未检索到任何相关的参考本地知识库内容。）")
@@ -177,7 +188,10 @@ def ask(doc_id: str, query: str, is_local: bool = False):
                     print("=" * 50)
 
                 elif mode == "messages":  # 捕获模型消息流
-                    chunk, _ = data  # 拆出消息对象和元信息
+                    chunk, metadata = data  # 拆出消息对象和元信息
+                    node_name = metadata.get("langgraph_node", "") if isinstance(metadata, dict) else ""
+                    if node_name not in {"generate_node", "qa_subgraph"}:
+                        continue  # 跳过路由器结构化输出等非最终回答消息
                     if hasattr(chunk, "content") and chunk.content:  # 只打印有正文的消息片段
                         if not has_printed_ai_prompt:  # 首次输出前打印AI标识
                             print("🤖 [AI]: ", end = "", flush = True)

@@ -54,42 +54,43 @@ class GraphState(TypedDict):
     docs: NotRequired[List[RetrievedDoc]]
 
     # 外部输入
-    query: str         # 用户问题
-    doc_id: str        # 当前文档ID或知识库ID
-    task_type: str     # qa/summary/compare
-    top_k: int         # 检索返回数量
+    query: NotRequired[str]         # 用户问题
+    doc_id: NotRequired[str]        # 当前文档ID或知识库ID
+    is_local: NotRequired[bool]     # 是否使用本地Ollama模型
+    task_type: NotRequired[str]     # qa/summary/compare
+    router_reason: NotRequired[str]   # 当前任务分类的文本理由
+    top_k: NotRequired[int]        # 检索返回数量
 
     # 核心RAG管道中间态
-    rewritten_query: str                    # Query Rewrite结果
-    retrieved_docs: List[RetrievedDoc]      # 混合检索召回结果
-    reranked_docs: List[RetrievedDoc]       # Reranker排序后结果
-    context: str                            # 最终送入LLM的上下文
+    rewritten_queries: NotRequired[List[str]]             # Query Rewrite结果
+    retrieved_docs: NotRequired[List[RetrievedDoc]]     # 混合检索召回结果
+    reranked_docs: NotRequired[List[RetrievedDoc]]       # Reranker排序后结果
+    context: NotRequired[str]                          # 最终送入LLM的上下文
 
     # 最终输出与溯源
-    answer: str                 # 最终回答
-    critique: str               # Critic反思结果
-    sources: List[DocMeta]      # 答案来源
+    answer: NotRequired[str]                 # 最终回答
+    critique: NotRequired[str]               # Critic反思结果
+    sources: NotRequired[List[DocMeta]]      # 答案来源
 
     # 历史
-    chat_history: Annotated[List[ChatMessage], merge_lists]
+    chat_history: NotRequired[Annotated[List[ChatMessage], merge_lists]]
 
     # Agent编排与控制流
-    route: str                  # 下一步执行节点
-    iteration_count: int        # 当前反思次数
-    max_iteration_count: int    # 最大允许反思次数
+    route: NotRequired[str]                  # 下一步执行节点
+    iteration_count: NotRequired[int]        # 当前反思次数
+    max_iteration_count: NotRequired[int]    # 最大允许反思次数
 
     # Agent执行轨迹
-    steps_trace: Annotated[List[AgentStepTrace], merge_lists]
+    steps_trace: NotRequired[Annotated[List[AgentStepTrace], merge_lists]]
 
     # 异常
-    error: Optional[str]
+    error: NotRequired[Optional[str]]
 
 class ParsedPage(TypedDict):
     page: int                # 页码
     source: str              # 来源文件名
     text: str                # 当前页解析出的正文
     is_ocr_fallback: bool    # 当前页面是否是需要OCR才能读取的页面（非正常文本）
-
 
 
 

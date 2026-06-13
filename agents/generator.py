@@ -21,12 +21,12 @@ class Generator:
             base_url = cls.OLLAMA_BASE_URL
             api_key = cls.OLLAMA_API_KEY
             model_name = custom_model_name if custom_model_name else cls.OLLAMA_MODEL  # 优先使用传入模型
-            client_key = f"local_{base_url}"  # 本地客户端缓存键
+            client_key = f"local_{base_url}_{model_name}"  # 本地客户端缓存键
         else:
             base_url = cls.CLOUD_BASE_URL
             api_key = cls.CLOUD_API_KEY
             model_name = custom_model_name if custom_model_name else cls.CLOUD_MODEL  # 优先使用传入模型
-            client_key = f"cloud_{base_url}"  # 云端客户端缓存键
+            client_key = f"cloud_{base_url}_{model_name}"  # 云端客户端缓存键
 
         if client_key not in cls._clients:
             cls._clients[client_key] = ChatOpenAI(
