@@ -9,6 +9,11 @@ class HybridRetriever(BaseRetriever):
         self.bm25_retriever = bm25_retriever      # BM25检索器
         self.k = k  # RRF平滑系数
 
+    @staticmethod
+    def _doc_key(doc: RetrievedDoc) -> str:
+        meta = doc["meta"]
+        return f"{meta.get('source', '')}::{meta.get('chunk_index', '')}"
+
     def exists(self) -> bool:
         return self.vector_retriever.exists() and self.bm25_retriever.exists()  # 两路索引均存在才视为可用
     
@@ -27,33 +32,33 @@ class HybridRetriever(BaseRetriever):
         vector_results = self.vector_retriever.search(query, top_k = recall_top_k)  # 向量召回
         bm25_results = self.bm25_retriever.search(query, top_k = recall_top_k)  # BM25召回
 
-        rrf_scores = {}  # chunk_index -> RRF得分
-        doc_registry = {}  # chunk_index -> 文档结果
+        rrf_scores = {}  # source::chunk_index -> RRF得分
+        doc_registry = {}  # source::chunk_index -> 文档结果
 
         for rank, doc in enumerate(vector_results):
-            chunk_idx = doc["meta"]["chunk_index"]
-            doc_registry[chunk_idx] = copy.deepcopy(doc)  # 注册向量召回结果
+            doc_key = self._doc_key(doc)
+            doc_registry[doc_key] = copy.deepcopy(doc)  # 注册向量召回结果
             
-            rrf_scores[chunk_idx] = rrf_scores.get(chunk_idx, 0.0) + 1.0 / (self.k + (rank + 1))    # 累加向量检索RRF得分
+            rrf_scores[doc_key] = rrf_scores.get(doc_key, 0.0) + 1.0 / (self.k + (rank + 1))    # 累加向量检索RRF得分
 
         for rank, doc in enumerate(bm25_results):
-            chunk_idx = doc["meta"]["chunk_index"]
+            doc_key = self._doc_key(doc)
 
-            if chunk_idx in doc_registry:
-                doc_registry[chunk_idx]["retrieval"]["bm25_score"] = doc["retrieval"]["bm25_score"] # 为已有结果补充BM25得分
+            if doc_key in doc_registry:
+                doc_registry[doc_key]["retrieval"]["bm25_score"] = doc["retrieval"]["bm25_score"] # 为已有结果补充BM25得分
             else:
-                doc_registry[chunk_idx] = copy.deepcopy(doc)    # 注册仅被BM25命中的结果
+                doc_registry[doc_key] = copy.deepcopy(doc)    # 注册仅被BM25命中的结果
                 
-            rrf_scores[chunk_idx] = rrf_scores.get(chunk_idx, 0.0) + 1.0 / (self.k + (rank + 1))    # 累加BM25检索RRF得分
+            rrf_scores[doc_key] = rrf_scores.get(doc_key, 0.0) + 1.0 / (self.k + (rank + 1))    # 累加BM25检索RRF得分
 
-        sorted_chunk_indices = sorted(rrf_scores.keys(), key = lambda x: rrf_scores[x], reverse = True)  # 按RRF得分降序排序
+        sorted_doc_keys = sorted(rrf_scores.keys(), key = lambda x: rrf_scores[x], reverse = True)  # 按RRF得分降序排序
 
         combined_results: List[RetrievedDoc] = []
-        for chunk_idx in sorted_chunk_indices[:top_k]:
-            target_doc = doc_registry[chunk_idx]
+        for doc_key in sorted_doc_keys[:top_k]:
+            target_doc = doc_registry[doc_key]
 
             
-            target_doc["retrieval"]["rrf_score"] = float(rrf_scores[chunk_idx])     # 写入最终融合得分
+            target_doc["retrieval"]["rrf_score"] = float(rrf_scores[doc_key])     # 写入最终融合得分
             
             combined_results.append(target_doc)
             

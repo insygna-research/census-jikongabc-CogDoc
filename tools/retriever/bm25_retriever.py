@@ -46,6 +46,9 @@ class BM25Retriever(BaseRetriever):
                 tokens.append(w_strip)  # 加入中文分词结果
 
         return tokens
+
+    def warm_up(self) -> None:
+        self._tokenize("知识库 检索 warmup")
     
     def exists(self) -> bool: 
         return self.bm25 is not None and len(self.doc_registry) > 0  # 检查倒排索引是否存在

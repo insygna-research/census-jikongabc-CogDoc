@@ -26,6 +26,10 @@ class BGEReranker:
         return cls._tokenizer, cls._model
 
     @classmethod
+    def warm_up(cls) -> None:
+        cls._get_resources()
+
+    @classmethod
     def rerank(cls, query: str, docs: List[RetrievedDoc], top_n: int = 3) -> List[RetrievedDoc]:
         if not docs:
             return []  # 无候选文档直接返回
