@@ -148,17 +148,22 @@ def ask(doc_id: str, query: str, is_local: bool = False):
         print(f"\n[运行模式]: {'本地 Ollama' if is_local else '云端 API'}")
         
         token_stream = app.stream(
-            initial_state, 
-            config=runtime_config, 
-            stream_mode=["messages", "updates"]
-        )  # 同时订阅模型消息流和节点状态更新
+            initial_state,
+            config = runtime_config,
+            stream_mode = ["messages", "updates"],
+            subgraphs = True,
+        )  # 同时订阅模型消息流和节点状态更新；subgraphs=True 暴露子图内部节点更新
         
         has_printed_ai_prompt = False  # 控制AI前缀只打印一次
 
         try:
-            for mode, data in token_stream:  # 消费LangGraph多模式流
-                # 1. 统一单点打印大图任务路由器的智能决策报告
-                if mode == "updates" and "intent_router" in data:
+            # subgraphs=True 时流元素为 (namespace, mode, data) 三元组
+            # namespace 是元组：() 表示父图，非空表示子图事件
+            for ns, mode, data in token_stream:
+                in_subgraph = len(ns) > 0
+
+                # 1. 统一单点打印大图任务路由器的智能决策报告（父图事件）
+                if mode == "updates" and not in_subgraph and "intent_router" in data:
                     router_output = data["intent_router"]
                     task = router_output.get("task_type", "qa")
                     reason = router_output.get("router_reason", "无")
@@ -166,11 +171,18 @@ def ask(doc_id: str, query: str, is_local: bool = False):
                     print(f"   ↳ 判定任务类型 -> 【{task.upper()}】")
                     print(f"   ↳ 判定分类逻辑 -> {reason}\n")
                     print("-" * 50)
-                    
-                # 2. 🥇 终极防御：抛弃脆弱的子图内部节点监听，直接拦截父图大节点 "qa_subgraph"
-                elif mode == "updates" and "qa_subgraph" in data:
+                # 2. QueryRewriteAgent的裂变报告（子图内部事件，data key 是裸节点名）
+                elif mode == "updates" and in_subgraph and "rewrite_node" in data:
+                    rewrite_output = data["rewrite_node"]
+                    queries = rewrite_output.get("rewritten_queries", [])
+                    print(f"🔮 [QueryRewriteAgent 多路改写报告]:")
+                    for q_idx, q in enumerate(queries):
+                        print(f"   ├── ➔ 检索分支 #{q_idx+1}: '{q}'")
+                    print("   └── 🚀 正在拉起多路并行召回与全局大去重机制...")
+                    print("-" * 50)
+                # 3. QAAgent的最终结算报告（父图看到子图整体输出）
+                elif mode == "updates" and not in_subgraph and "qa_subgraph" in data:
                     subgraph_output = data["qa_subgraph"]
-                    # 🌟 从解耦清洗、完全属于本轮多 Agent 问答的专职状态槽中读取已经排好序的终产物切块
                     final_docs = subgraph_output.get("reranked_docs", [])
 
                     print("\n🎯 [RAG 召回与精排切块结果预览]:")

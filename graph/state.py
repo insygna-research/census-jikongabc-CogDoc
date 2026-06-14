@@ -27,6 +27,7 @@ class RetrievalMetrics(TypedDict, total = False):
     rrf_score: float                # 混合检索倒数排名融合得分
     rerank_score: float             # 交叉编码器精排模型最终得分
     search_channel: str             # 动态召回渠道标记 ("vector" / "bm25" / "hybrid")
+    rewrite_query: str              # 触发本次召回的改写查询语句
 
 # 检索得到的文档片段
 class RetrievedDoc(TypedDict):
@@ -46,6 +47,14 @@ class AgentStepTrace(TypedDict):
     step_name: str          # 当前执行的节点
     input_summary: str      # 输入内容摘要
     output_summary: str     # 输出内容摘要
+
+class Evidence(TypedDict, total = False):
+    chunk_index: int                # 文档块编号
+    source: str                     # 来源文件名
+    page: int                       # 页码
+    rerank_score: Optional[float]   # 精排得分（不一定存在）
+    rewrite_query: Optional[str]    # 触发召回的改写查询（原始 query 路径时为 None）
+    text_preview: str               # 文本前100字摘要
 
 # LangGraph全局状态
 class GraphState(TypedDict):
@@ -71,6 +80,7 @@ class GraphState(TypedDict):
     answer: NotRequired[str]                 # 最终回答
     critique: NotRequired[str]               # Critic反思结果
     sources: NotRequired[List[DocMeta]]      # 答案来源
+    evidence: NotRequired[List[Evidence]]    # 结构化证据列表
 
     # 历史
     chat_history: NotRequired[Annotated[List[ChatMessage], merge_lists]]
