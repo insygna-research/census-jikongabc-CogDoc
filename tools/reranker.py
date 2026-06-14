@@ -4,22 +4,34 @@ from typing import List
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from graph.state import RetrievedDoc
 
+
+def _detect_default_device() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    mps_backend = getattr(getattr(torch, "backends", None), "mps", None)
+    if mps_backend is not None and mps_backend.is_available():
+        return "mps"
+    return "cpu"
+
+
 class BGEReranker:
     _tokenizer = None  # Tokenizer单例
     _model = None  # 模型单例
     MODEL_NAME = "BAAI/bge-reranker-v2-m3"  # Reranker模型名称
     MAX_LENGTH = 512  # 模型单次处理的最大Token长度保护
 
-    device = "cuda" if torch.cuda.is_available() else (
-        "mps" if hasattr(torch, "backends") and torch.backends.mps.is_available()
-        else "cpu"
-    )  # 自动选择运行设备
+    _default_device = _detect_default_device()  # 进程启动时自动选择的运行设备
+    device = _default_device
 
     @classmethod
     def set_device(cls, device: str) -> None:
         if device != cls.device:
             cls._model = None  # 设备变更时清除单例，下次调用重新加载到新设备
             cls.device = device
+
+    @classmethod
+    def default_device(cls) -> str:
+        return cls._default_device
 
     @classmethod
     def _get_resources(cls):

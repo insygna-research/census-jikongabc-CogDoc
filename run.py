@@ -1,7 +1,13 @@
 import sys  
 import os 
-import json 
-import hashlib
+import json
+from tools.rust_core_loader import ensure_rust_core
+
+try:
+    rust_core = ensure_rust_core("scan_pdf_manifest_native", "rrf_fusion_native")
+except RuntimeError as exc:
+    print(f"❌ {exc}")
+    raise SystemExit(1) from exc
 from graph.workflow import app
 from graph.subgraphs.qa import RetrieverFactory
 from tools.parser import smart_parse 
@@ -15,33 +21,6 @@ MANIFEST_DIR = os.path.join("data", "manifests")  # 索引指纹清单保存目�
 
 def _manifest_path(doc_id: str) -> str:  # 生成指定知识库的指纹清单路径
     return os.path.join(MANIFEST_DIR, f"{doc_id}.json")  # 返回manifest文件路径
-
-
-def _file_sha256(path: str) -> str:  # 计算文件内容的sha256哈希
-    digest = hashlib.sha256()  # 创建sha256计算器
-    with open(path, "rb") as f:  # 以二进制方式读取文件
-        for block in iter(lambda: f.read(1024 * 1024), b""):  # 分块读取避免大文件占满内存
-            digest.update(block)  # 累加当前文件块到哈希计算器
-    return digest.hexdigest()  # 返回十六进制哈希值
-
-
-def _scan_pdf_manifest(doc_id: str, doc_dir: str) -> dict:  # 扫描PDF目录并生成当前指纹清单
-    pdf_files = sorted(f for f in os.listdir(doc_dir) if f.lower().endswith(".pdf"))  # 获取稳定排序后的PDF文件列表
-    documents = []  # 保存每个PDF的指纹信息
-    for pdf in pdf_files:  # 遍历每个PDF文件
-        pdf_path = os.path.join(doc_dir, pdf)  # 拼接PDF完整路径
-        stat = os.stat(pdf_path)  # 读取文件元信息
-        documents.append({
-            "name": pdf,
-            "size": stat.st_size,
-            "sha256": _file_sha256(pdf_path)
-        })  # 记录文件名、大小和内容哈希
-    return {
-        "doc_id": doc_id,
-        "doc_dir": os.path.abspath(doc_dir),
-        "documents": documents
-    }  # 返回当前知识库源文件快照
-
 
 def _load_index_manifest(doc_id: str) -> dict:  # 读取已保存的索引指纹清单
     path = _manifest_path(doc_id)  # 获取manifest路径
@@ -60,13 +39,22 @@ def _save_index_manifest(manifest: dict) -> None:  # 保存当前索引对应的
         json.dump(manifest, f, ensure_ascii = False, indent = 2)  # 写入可读JSON
 
 
-def _index_is_current(doc_id: str, doc_dir: str, engine) -> bool:  # 判断本地索引是否与PDF目录一致
+def _manifests_match(current_manifest: dict, saved_manifest: dict) -> bool:  # 比较索引指纹，排除机器相关路径
+    return (
+        current_manifest.get("doc_id") == saved_manifest.get("doc_id")
+        and current_manifest.get("documents", []) == saved_manifest.get("documents", [])
+    )
+
+
+def _index_is_current(doc_id: str, doc_dir: str, engine):  # 判断本地索引是否与PDF目录一致，并返回当前指纹
     if not (engine.vector_retriever.exists() and engine.bm25_retriever.exists()):  # 任一路索引缺失都视为不可用
-        return False  # 触发重建
+        return False, None  # 触发重建
     if not os.path.exists(doc_dir):  # 源目录不存在时旧索引不可信
-        return False  # 触发重建或清理
-    current_manifest = _scan_pdf_manifest(doc_id, doc_dir)  # 计算当前PDF目录指纹
-    return current_manifest == _load_index_manifest(doc_id)  # 对比当前指纹和上次建库指纹
+        return False, None  # 触发重建或清理
+
+    abs_dir = os.path.abspath(doc_dir)
+    current_manifest = rust_core.scan_pdf_manifest_native(doc_id, abs_dir)  # 计算当前PDF目录指纹
+    return _manifests_match(current_manifest, _load_index_manifest(doc_id)), current_manifest  # 对比稳定字段
 
 
 def warm_up_runtime(engine) -> None:  # 提前加载运行期重资源
@@ -77,7 +65,7 @@ def warm_up_runtime(engine) -> None:  # 提前加载运行期重资源
     print("✅ 模型与分词资源预热完成。")
 
 
-def build_index(doc_id: str, doc_dir: str = DEFAULT_DOC_DIR):  # 根据PDF目录重建双轨索引
+def build_index(doc_id: str, doc_dir: str = DEFAULT_DOC_DIR, current_manifest: dict = None):  # 根据PDF目录重建双轨索引
     if not os.path.exists(doc_dir):  # 源目录不存在时创建目录并停止建库
         os.makedirs(doc_dir)  # 创建待扫描目录
         RetrieverFactory.get_engine(doc_id).clear()  # 清除旧索引避免误用历史数据
@@ -129,7 +117,12 @@ def build_index(doc_id: str, doc_dir: str = DEFAULT_DOC_DIR):  # 根据PDF目录
     
     engine = RetrieverFactory.get_engine(doc_id)  # 获取当前知识库的混合检索器
     engine.index(all_chunks)  # 写入向量索引和BM25索引
-    _save_index_manifest(_scan_pdf_manifest(doc_id, doc_dir))  # 保存源文件指纹用于下次启动校验
+
+    if current_manifest is None:  # 预检阶段未扫描时才重新计算PDF指纹
+        abs_dir = os.path.abspath(doc_dir)
+        current_manifest = rust_core.scan_pdf_manifest_native(doc_id, abs_dir)
+    _save_index_manifest(current_manifest)  # 保存源文件指纹用于下次启动校验
+
     print("✅ 物理多轨索引构建成功并落盘，数据管线安全关闭。\n")
 
 
@@ -275,10 +268,11 @@ def main():  # CLI主入口
     
     engine = RetrieverFactory.get_engine(TARGET_DOC_ID)  # 获取混合检索引擎
 
-    if not _index_is_current(TARGET_DOC_ID, TARGET_DOC_DIR, engine):  # 索引缺失或源PDF变化时重建
+    index_is_current, current_manifest = _index_is_current(TARGET_DOC_ID, TARGET_DOC_DIR, engine)  # 索引缺失或源PDF变化时重建
+    if not index_is_current:
         print(f"⚠️ 预检提示: 知识库 【{TARGET_DOC_ID}】 的本地索引缺失或已过期。")
         try:
-            build_index(TARGET_DOC_ID, TARGET_DOC_DIR)  # 构建或重建本地索引
+            build_index(TARGET_DOC_ID, TARGET_DOC_DIR, current_manifest)  # 构建或重建本地索引
             if not (engine.vector_retriever.exists() and engine.bm25_retriever.exists()):  # 建库后仍不可用则退出
                 print("❌ 错误: 知识库目录中由于缺乏源文件，无法建立有效索引。")
                 input("⚙️ 请在上述目标文件夹内放入 PDF 文档后，按回车键退出并重新拉起系统...")

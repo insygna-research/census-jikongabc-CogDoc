@@ -32,8 +32,8 @@ class CitationValidatorAgent:
         if FALLBACK_MARKER in answer:
             return {"is_valid": True, "critique": ""}
 
-        citation_pattern = r'\[([^:\]]+):P?(\d+)\]'
-        citations = re.findall(citation_pattern, answer)
+        citation_pattern = r'[\[［]\s*([^:：\]］]+?)\s*[:：]\s*[pPｐＰ]?\s*(\d+)\s*[\]］]'
+        citations = re.findall(citation_pattern, answer, flags = re.IGNORECASE)
 
         if not citations:
             return {
@@ -50,6 +50,7 @@ class CitationValidatorAgent:
         invalid_pages = []
 
         for file_name, page_str in citations:
+            file_name = file_name.strip()
             page_num = int(page_str)
             
             if file_name not in allowed_registry:

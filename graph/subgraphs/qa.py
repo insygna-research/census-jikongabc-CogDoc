@@ -63,8 +63,8 @@ def rerank_node(state: GraphState) -> dict:
     docs = state.get("retrieved_docs", [])
     is_local = state.get("is_local", False)
 
-    if is_local:
-        BGEReranker.set_device("cpu")  # 本地模式下 Ollama 已占用 GPU，Reranker 退到 CPU
+    target_device = "cpu" if is_local else BGEReranker.default_device()
+    BGEReranker.set_device(target_device)  # 本地模式让出GPU，云端模式恢复默认加速设备
 
     reranked_docs = BGEReranker.rerank(query = query, docs = docs, top_n = 3)
     return {"reranked_docs": reranked_docs}
