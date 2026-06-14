@@ -134,7 +134,11 @@ def build_index(doc_id: str, doc_dir: str = DEFAULT_DOC_DIR):  # 根据PDF目录
 
 
 def ask(doc_id: str, query: str, is_local: bool = False):
-    initial_state = {"messages": []}  # 初始化LangGraph消息状态
+    initial_state = {
+        "messages": [],
+        "iteration_count": 0,
+        "max_iteration_count": 2
+    }  # 初始化LangGraph消息状态
     
     runtime_config = {
         "configurable": {
@@ -152,12 +156,44 @@ def ask(doc_id: str, query: str, is_local: bool = False):
             config = runtime_config,
             stream_mode = ["messages", "updates"],
             subgraphs = True,
-        )  # 同时订阅模型消息流和节点状态更新；subgraphs=True 暴露子图内部节点更新
+        )  # 同时订阅模型消息流和节点状态更新；subgraphs = True 暴露子图内部节点更新
         
-        has_printed_ai_prompt = False  # 控制AI前缀只打印一次
+        saw_parent_qa_output = False
+        subgraph_fallback_output = {}
+
+        def print_final_qa_output(subgraph_output: dict) -> None:
+            final_docs = subgraph_output.get("reranked_docs", [])
+
+            print("\n🎯 [RAG 召回与精排切块结果预览]:")
+            if not final_docs:  # 无召回结果时打印空提示
+                print("  （未检索到任何相关的参考本地知识库内容。）")
+            else:
+                for idx, doc in enumerate(final_docs):  # 逐条打印精排结果摘要
+                    meta = doc.get("meta", {})  # 获取文档元数据
+                    retrieval_info = doc.get("retrieval", {})  # 获取检索得分信息
+                    print(f"  📍 [{idx+1}] 来源: {meta.get('source')} | 页码: P{meta.get('page')}")
+                    print(f"     📊 融合得分(RRF): {retrieval_info.get('rrf_score', 'N/A')}")
+                    preview_text = doc['text'].strip().replace('\n', ' ')  # 压缩预览文本为单行
+                    print(f"     📄 核心内容: {preview_text[:120]}...")
+                    print("     " + "-" * 40)
+
+            # 子图整体完成后在此处打印最终通过校验的答案（避免流式输出被拒答案）
+            final_answer = subgraph_output.get("answer", "")
+            has_critique_state = "critique" in subgraph_output
+            final_critique = subgraph_output.get("critique")
+            if not has_critique_state:
+                print("\n⚠️ [AI]: QA 子图未返回引证校验状态，已拒绝打印未确认答案。")
+            elif final_critique:
+                print("\n❌ [AI]: 引证校验未通过，已达到最大自愈次数，本轮答案已拦截。")
+                print(f"   ↳ 最终批注 >>>\n{final_critique}")
+            elif final_answer:
+                print(f"\n🤖 [AI]: {final_answer}")
+            else:
+                print("\n⚠️ [AI]: 模型返回了空内容，但引证校验已通过。")
+            print("=" * 50)
 
         try:
-            # subgraphs=True 时流元素为 (namespace, mode, data) 三元组
+            # subgraphs = True 时流元素为 (namespace, mode, data) 三元组
             # namespace 是元组：() 表示父图，非空表示子图事件
             for ns, mode, data in token_stream:
                 in_subgraph = len(ns) > 0
@@ -180,35 +216,49 @@ def ask(doc_id: str, query: str, is_local: bool = False):
                         print(f"   ├── ➔ 检索分支 #{q_idx+1}: '{q}'")
                     print("   └── 🚀 正在拉起多路并行召回与全局大去重机制...")
                     print("-" * 50)
+                elif mode == "updates" and in_subgraph and "rerank_node" in data:
+                    subgraph_fallback_output.update(data["rerank_node"])
+                elif mode == "updates" and in_subgraph and "generate_node" in data:
+                    subgraph_fallback_output.update(data["generate_node"])
                 # 3. QAAgent的最终结算报告（父图看到子图整体输出）
                 elif mode == "updates" and not in_subgraph and "qa_subgraph" in data:
+                    saw_parent_qa_output = True
                     subgraph_output = data["qa_subgraph"]
-                    final_docs = subgraph_output.get("reranked_docs", [])
+                    print_final_qa_output(subgraph_output)
+                # 4. 看清 CitationAgent 物理引证校验节点的反思轨迹（子图内部事件）
+                elif mode == "updates" and in_subgraph and "citation_node" in data:
+                    citation_output = data["citation_node"]
+                    subgraph_fallback_output.update(citation_output)
+                    critique = citation_output.get("critique", "")
+                    iter_num = citation_output.get("iteration_count", 1)
+                    max_iter = citation_output.get("max_iteration_count", initial_state.get("max_iteration_count", 2))
 
-                    print("\n🎯 [RAG 召回与精排切块结果预览]:")
-                    if not final_docs:  # 无召回结果时打印空提示
-                        print("  （未检索到任何相关的参考本地知识库内容。）")
+                    if critique:
+                        # 区分"完全没有引证"和"引证内容捏造"两种拒绝原因
+                        if "未标出任何知识来源" in critique:
+                            reject_title = f"模型第 {iter_num} 轮回答未添加任何引用标签"
+                        else:
+                            reject_title = f"模型第 {iter_num} 轮回答包含捏造引证（错误页码/文件名）"
+                        print(f"\n🚨 [CitationAgent 拒绝]: {reject_title}")
+
+                        # 展示本轮模型实际输出，帮助诊断问题
+                        round_answer = subgraph_fallback_output.get("answer", "")
+                        if round_answer:
+                            preview = round_answer.replace("\n", " ")[:200]
+                            print(f"   ↳ 本轮模型回答预览 >>> {preview}{'...' if len(round_answer) > 200 else ''}")
+
+                        print(f"   ↳ 拒绝原因 >>> {critique}")
+                        if iter_num < max_iter:
+                            print(f"   ↳ 🔄 正在强行打回控制流，驱使大模型执行自愈修正...")
+                        else:
+                            print(f"   ↳ ⛔ 已达到最大自愈次数，系统将拦截本轮未通过校验的答案。")
+                        print("-" * 50)
                     else:
-                        for idx, doc in enumerate(final_docs):  # 逐条打印精排结果摘要
-                            meta = doc.get("meta", {})  # 获取文档元数据
-                            retrieval_info = doc.get("retrieval", {})  # 获取检索得分信息
-                            print(f"  📍 [{idx+1}] 来源: {meta.get('source')} | 页码: P{meta.get('page')}")
-                            print(f"     📊 融合得分(RRF): {retrieval_info.get('rrf_score', 'N/A')}")
-                            preview_text = doc['text'].strip().replace('\n', ' ')  # 压缩预览文本为单行
-                            print(f"     📄 核心内容: {preview_text[:120]}...")
-                            print("     " + "-" * 40)
-                    print("=" * 50)
+                        print(f"\n🛡️ [CitationAgent 审计通过]: 第 {iter_num} 轮回答物理引用契约完全匹配，无名义页码幻觉。")
+                        print("-" * 50)
 
-                elif mode == "messages":  # 捕获模型消息流
-                    chunk, metadata = data  # 拆出消息对象和元信息
-                    node_name = metadata.get("langgraph_node", "") if isinstance(metadata, dict) else ""
-                    if node_name not in {"generate_node", "qa_subgraph"}:
-                        continue  # 跳过路由器结构化输出等非最终回答消息
-                    if hasattr(chunk, "content") and chunk.content:  # 只打印有正文的消息片段
-                        if not has_printed_ai_prompt:  # 首次输出前打印AI标识
-                            print("🤖 [AI]: ", end = "", flush = True)
-                            has_printed_ai_prompt = True  # 标记AI前缀已打印
-                        print(chunk.content, end = "", flush = True)  # 流式输出模型内容
+            if not saw_parent_qa_output and subgraph_fallback_output:
+                print_final_qa_output(subgraph_fallback_output)
                         
         except Exception as stream_err:
             print(f"\n⚠️ [大模型流式通信管道在运行时遭遇意外中断]: {stream_err}")
@@ -275,7 +325,7 @@ def main():  # CLI主入口
                 print("🔄 控制面配置已成功切换到：云端 API 模式。")
                 continue
 
-            ask(doc_id=TARGET_DOC_ID, query=user_input, is_local=is_local)  # 执行RAG问答流程
+            ask(doc_id = TARGET_DOC_ID, query = user_input, is_local = is_local)  # 执行RAG问答流程
             
         except KeyboardInterrupt:
             print("\n👋 检测到系统中断信号（Ctrl+C），安全关闭。")

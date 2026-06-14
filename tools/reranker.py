@@ -16,13 +16,19 @@ class BGEReranker:
     )  # 自动选择运行设备
 
     @classmethod
+    def set_device(cls, device: str) -> None:
+        if device != cls.device:
+            cls._model = None  # 设备变更时清除单例，下次调用重新加载到新设备
+            cls.device = device
+
+    @classmethod
     def _get_resources(cls):
         if cls._tokenizer is None:
-            cls._tokenizer = AutoTokenizer.from_pretrained(cls.MODEL_NAME)  # 加载分词器
+            cls._tokenizer = AutoTokenizer.from_pretrained(cls.MODEL_NAME)
         if cls._model is None:
-            cls._model = AutoModelForSequenceClassification.from_pretrained(cls.MODEL_NAME)  # 加载精排模型
-            cls._model.to(cls.device)  # 模型迁移到目标设备
-            cls._model.eval()  # 切入推理模式
+            cls._model = AutoModelForSequenceClassification.from_pretrained(cls.MODEL_NAME)
+            cls._model.to(cls.device)
+            cls._model.eval()
         return cls._tokenizer, cls._model
 
     @classmethod
