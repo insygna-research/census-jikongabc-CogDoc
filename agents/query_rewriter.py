@@ -4,8 +4,8 @@ from agents.generator import Generator
 
 class QueryRewriteOutput(BaseModel):
     queries: List[str] = Field(
-        min_items = 1,
-        max_items = 3,
+        min_length = 1,
+        max_length = 3,
         description = "针对用户原始问题，裂变、改写出的 1-3 个最适合在本地知识库中检索的差异化查询语句。"
     )
 

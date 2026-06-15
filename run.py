@@ -1,7 +1,7 @@
 import sys  
 import os 
-import json
 from tools.rust_core_loader import ensure_rust_core
+from tools.manifest import load_index_manifest, manifests_match, save_index_manifest
 
 try:
     rust_core = ensure_rust_core("scan_pdf_manifest_native", "rrf_fusion_native")
@@ -16,35 +16,6 @@ from tools.embedder import Embedder
 from tools.reranker import BGEReranker 
 
 DEFAULT_DOC_DIR = os.getenv("COGDOC_DOC_DIR", "测试论文")  # 默认扫描的PDF目录，可用环境变量覆盖
-MANIFEST_DIR = os.path.join("data", "manifests")  # 索引指纹清单保存目录
-
-
-def _manifest_path(doc_id: str) -> str:  # 生成指定知识库的指纹清单路径
-    return os.path.join(MANIFEST_DIR, f"{doc_id}.json")  # 返回manifest文件路径
-
-def _load_index_manifest(doc_id: str) -> dict:  # 读取已保存的索引指纹清单
-    path = _manifest_path(doc_id)  # 获取manifest路径
-    if not os.path.exists(path):  # manifest不存在说明没有可验证的旧索引
-        return {}  # 返回空清单触发重建
-    try:
-        with open(path, "r", encoding = "utf-8") as f:  # 读取manifest文件
-            return json.load(f)  # 解析JSON清单
-    except Exception:
-        return {}  # manifest损坏时按过期处理
-
-
-def _save_index_manifest(manifest: dict) -> None:  # 保存当前索引对应的源文件指纹
-    os.makedirs(MANIFEST_DIR, exist_ok = True)  # 确保manifest目录存在
-    with open(_manifest_path(manifest["doc_id"]), "w", encoding = "utf-8") as f:  # 打开manifest输出文件
-        json.dump(manifest, f, ensure_ascii = False, indent = 2)  # 写入可读JSON
-
-
-def _manifests_match(current_manifest: dict, saved_manifest: dict) -> bool:  # 比较索引指纹，排除机器相关路径
-    return (
-        current_manifest.get("doc_id") == saved_manifest.get("doc_id")
-        and current_manifest.get("documents", []) == saved_manifest.get("documents", [])
-    )
-
 
 def _index_is_current(doc_id: str, doc_dir: str, engine):  # 判断本地索引是否与PDF目录一致，并返回当前指纹
     if not (engine.vector_retriever.exists() and engine.bm25_retriever.exists()):  # 任一路索引缺失都视为不可用
@@ -54,8 +25,7 @@ def _index_is_current(doc_id: str, doc_dir: str, engine):  # 判断本地索引�
 
     abs_dir = os.path.abspath(doc_dir)
     current_manifest = rust_core.scan_pdf_manifest_native(doc_id, abs_dir)  # 计算当前PDF目录指纹
-    return _manifests_match(current_manifest, _load_index_manifest(doc_id)), current_manifest  # 对比稳定字段
-
+    return manifests_match(current_manifest, load_index_manifest(doc_id)), current_manifest  # 对比稳定字段
 
 def warm_up_runtime(engine) -> None:  # 提前加载运行期重资源
     print("🧠 正在预热检索与重排模型，请稍候...")
@@ -63,7 +33,6 @@ def warm_up_runtime(engine) -> None:  # 提前加载运行期重资源
     engine.bm25_retriever.warm_up()  # 预热BM25分词器
     BGEReranker.warm_up()  # 预加载精排模型
     print("✅ 模型与分词资源预热完成。")
-
 
 def build_index(doc_id: str, doc_dir: str = DEFAULT_DOC_DIR, current_manifest: dict = None):  # 根据PDF目录重建双轨索引
     if not os.path.exists(doc_dir):  # 源目录不存在时创建目录并停止建库
@@ -121,10 +90,9 @@ def build_index(doc_id: str, doc_dir: str = DEFAULT_DOC_DIR, current_manifest: d
     if current_manifest is None:  # 预检阶段未扫描时才重新计算PDF指纹
         abs_dir = os.path.abspath(doc_dir)
         current_manifest = rust_core.scan_pdf_manifest_native(doc_id, abs_dir)
-    _save_index_manifest(current_manifest)  # 保存源文件指纹用于下次启动校验
+    save_index_manifest(current_manifest)  # 保存源文件指纹用于下次启动校验
 
     print("✅ 物理多轨索引构建成功并落盘，数据管线安全关闭。\n")
-
 
 def ask(doc_id: str, query: str, is_local: bool = False):
     initial_state = {
@@ -261,7 +229,6 @@ def ask(doc_id: str, query: str, is_local: bool = False):
     except Exception as e:
         print(f"\n❌ [Pipeline 核心图调度执行失败]: {e}")
 
-
 def main():  # CLI主入口
     TARGET_DOC_ID = "arch_blueprint_2026"  # 当前知识库ID
     TARGET_DOC_DIR = DEFAULT_DOC_DIR  # 当前知识库源文档目录
@@ -326,7 +293,6 @@ def main():  # CLI主入口
             break  # 用户中断时退出循环
         except Exception as e:
             print(f"⚠️ [控制台内部异常捕获]: {e}")
-
 
 if __name__ == "__main__":
     main()
