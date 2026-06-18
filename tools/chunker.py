@@ -1,40 +1,42 @@
 import bisect
 from typing import List
 from graph.state import ParsedPage, RetrievedDoc
+from tools.chunk_identity import (
+    DEFAULT_CHUNK_CHAR_OVERLAP,
+    DEFAULT_CHUNK_CHAR_SIZE,
+    MIN_CHUNK_CHARS,
+    build_chunk_id,
+)
 
 def chunk_paper(
     parsed_pages: List[ParsedPage],
-    chunk_char_size: int = 600,
-    chunk_char_overlap: int = 60
+    source_sha256: str = "",
+    chunk_char_size: int = DEFAULT_CHUNK_CHAR_SIZE,
+    chunk_char_overlap: int = DEFAULT_CHUNK_CHAR_OVERLAP
 ) -> List[RetrievedDoc]:
 
-    # 空文档直接返回
     if not parsed_pages:
         return []
 
     source_name = parsed_pages[0]["source"]
+    if not source_sha256:
+        raise ValueError("source_sha256 is required for stable chunk identity")
 
-    # 拼接后的全文
     global_text = ""
 
-    # 记录每页在全文中的起始位置
     page_starts: List[int] = []
 
-    # 对应页码
     page_nums: List[int] = []
 
-    # 当前字符位置
     current_idx = 0
 
     for page in parsed_pages:
         p_text = page["text"]
 
-        # 页面之间插入两个换行
         if global_text and p_text:
             global_text += "\n\n"
             current_idx += 2
 
-        # 记录当前页起始位置
         page_starts.append(current_idx)
         page_nums.append(page["page"])
 
@@ -43,58 +45,52 @@ def chunk_paper(
 
     chunks: List[RetrievedDoc] = []
 
-    # 全文长度
     total_len = len(global_text)
 
-    # 当前切片起点
     start_idx = 0
 
-    # Chunk编号
-    global_chunk_count = 0
+    # local_chunk_index 只在单个 PDF 内递增，参与稳定 chunk_id。
+    local_chunk_index = 0
 
-    # 根据字符位置反查所在页码
     def find_page_by_pos(pos: int) -> int:
         idx = bisect.bisect_right(page_starts, pos) - 1
         return page_nums[max(0, idx)]
 
-    # 全文为空直接返回
     if total_len == 0:
         return []
 
     while start_idx < total_len:
 
-        # 当前Chunk终点
         end_idx = min(start_idx + chunk_char_size, total_len)
 
-        # 在目标边界附近搜索语义边界，避免断句/断段
+        # 在目标边界附近优先按段落或行切分。
         if end_idx < total_len:
             search_start = max(start_idx + 1, end_idx - 60)
             search_end = min(end_idx + 120, total_len)
 
-            # 优先在段落边界 (\n\n) 处切分
             para_break = global_text.rfind('\n\n', search_start, search_end)
             if para_break != -1:
-                end_idx = para_break + 2  # 包含换行符
+                end_idx = para_break + 2
             else:
-                # 退而求其次在行尾 (\n) 处切分
                 line_break = global_text.rfind('\n', search_start, search_end)
                 if line_break != -1:
-                    end_idx = line_break + 1  # 包含换行符
+                    end_idx = line_break + 1
 
-        # 按字符数切片
         chunk_text = global_text[start_idx:end_idx].strip()
 
-        # 过滤过短文本
-        if len(chunk_text) > 30:
+        if len(chunk_text) > MIN_CHUNK_CHARS:
 
-            # 计算Chunk起止页码
             p_start = find_page_by_pos(start_idx)
             p_end = find_page_by_pos(end_idx - 1)
+            chunk_id = build_chunk_id(source_sha256, p_start, p_end, local_chunk_index)
 
             chunks.append({
                 "text": chunk_text,
                 "meta": {
-                    "chunk_index": global_chunk_count,
+                    "chunk_id": chunk_id,
+                    "source_sha256": source_sha256,
+                    "local_chunk_index": local_chunk_index,
+                    "chunk_index": local_chunk_index,
                     "source": source_name,
                     "page": p_start,
                     "page_start": p_start,
@@ -103,16 +99,13 @@ def chunk_paper(
                 }
             })
 
-            global_chunk_count += 1
+            local_chunk_index += 1
 
-        # 已到末尾
         if end_idx >= total_len:
             break
 
-        # 重叠切分
         start_idx = end_idx - chunk_char_overlap
 
-        # 防止死循环
         if chunk_char_overlap >= chunk_char_size:
             break
 

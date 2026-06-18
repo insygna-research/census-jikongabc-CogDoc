@@ -4,9 +4,11 @@ from typing import List, Dict, Any
 class CitationValidatorAgent:
     @staticmethod
     def validate_citations(answer: str, valid_docs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        # 引用校验保持页级格式，chunk_id 只用于机器溯源。
         if not answer:
             return {"is_valid": True, "critique": ""}
 
+        # allowed_registry 记录本轮检索实际允许引用的文件和页码。
         allowed_registry = {}
         for doc in valid_docs:
             meta = doc.get("meta", {})
@@ -18,7 +20,6 @@ class CitationValidatorAgent:
                 except (TypeError, ValueError):
                     continue
                 
-        # 无可用文档时模型应回答"未找到依据"，无需引证，直接通过
         if not allowed_registry:
             return {"is_valid": True, "critique": ""}
 
@@ -27,7 +28,7 @@ class CitationValidatorAgent:
             for file, pages in allowed_registry.items()
         }
 
-        # 兜底回答（参考资料中无相关内容）不含事实陈述，无需引用标签，直接通过
+        # 兜底回答不包含文档事实，允许不带引用。
         FALLBACK_MARKER = "在所提供的参考资料中未找到与该问题相关的内容"
         if FALLBACK_MARKER in answer:
             return {"is_valid": True, "critique": ""}

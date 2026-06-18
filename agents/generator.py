@@ -5,63 +5,67 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from graph.state import RetrievedDoc
 
 class Generator:
-    _clients = {}  # 缓存不同后端对应的 OpenAI 客户端实例
+    # 不同后端和模型使用独立客户端缓存。
+    _clients = {}
 
-    CLOUD_MODEL = os.getenv("LLM_MODEL_NAME", "deepseek-chat")  # 云端模型名称
-    CLOUD_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1")  # 云端接口地址
-    CLOUD_API_KEY = os.getenv("LLM_API_KEY", "your-cloud-api-key-here")  # 云端 API Key
+    CLOUD_MODEL = os.getenv("LLM_MODEL_NAME", "deepseek-chat")
+    CLOUD_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1")
+    CLOUD_API_KEY = os.getenv("LLM_API_KEY", "your-cloud-api-key-here")
 
-    OLLAMA_MODEL = os.getenv("OLLAMA_MODEL_NAME", "qwen2.5:7b")  # 本地 Ollama 模型名称
-    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")  # Ollama OpenAI兼容接口地址
+    OLLAMA_MODEL = os.getenv("OLLAMA_MODEL_NAME", "qwen2.5:7b")
+    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
     OLLAMA_API_KEY = "ollama"
 
     @classmethod
     def _get_client(cls, is_local: bool = False, custom_model_name: str = None) -> ChatOpenAI:
+        # client_key 必须包含后端、地址和模型名。
         if is_local:
             base_url = cls.OLLAMA_BASE_URL
             api_key = cls.OLLAMA_API_KEY
-            model_name = custom_model_name if custom_model_name else cls.OLLAMA_MODEL  # 优先使用传入模型
-            client_key = f"local_{base_url}_{model_name}"  # 本地客户端缓存键
+            model_name = custom_model_name if custom_model_name else cls.OLLAMA_MODEL
+            client_key = f"local_{base_url}_{model_name}"
         else:
             base_url = cls.CLOUD_BASE_URL
             api_key = cls.CLOUD_API_KEY
-            model_name = custom_model_name if custom_model_name else cls.CLOUD_MODEL  # 优先使用传入模型
-            client_key = f"cloud_{base_url}_{model_name}"  # 云端客户端缓存键
+            model_name = custom_model_name if custom_model_name else cls.CLOUD_MODEL
+            client_key = f"cloud_{base_url}_{model_name}"
 
         if client_key not in cls._clients:
             cls._clients[client_key] = ChatOpenAI(
                 model = model_name,
                 openai_api_key = api_key,
-                openai_api_base = base_url,  # 接口地址
-                temperature = 0.2,  # 回答随机性
-                timeout = 90.0,     # 请求超时时间
-                max_retries = 2     # 请求失败重试次数
+                openai_api_base = base_url,
+                temperature = 0.2,
+                timeout = 90.0,
+                max_retries = 2
             )
         return cls._clients[client_key]
 
     @classmethod
     def _build_context_string(cls, docs: List[RetrievedDoc]) -> str:
+        # chunk_id 只进入 Document 属性，引用格式仍按 source/page。
         if not docs:
             return "（未检索到任何相关的参考本地知识库内容。）"
 
-        context_blocks = []  # 存储格式化后的文档块
+        context_blocks = []
         for doc in docs:
             meta = doc["meta"]
-            source = meta.get("source", "未知文件")  # 文件名
-            page = meta.get("page", 1)              # 页码
-            chunk_idx = meta.get("chunk_index", 0)  # chunk编号
+            source = meta.get("source", "未知文件")
+            page = meta.get("page", 1)
+            chunk_id = meta.get("chunk_id", meta.get("chunk_index", 0))
 
             block = (
-                f'<Document source="{source}" page="{page}" chunk_id="{chunk_idx}">\n'
-                f'{doc["text"].strip()}\n'  # 文本内容
+                f'<Document source="{source}" page="{page}" chunk_id="{chunk_id}">\n'
+                f'{doc["text"].strip()}\n'
                 f'</Document>'
             )
             context_blocks.append(block)
 
-        return "\n\n".join(context_blocks)  # 拼接全部文档块
+        return "\n\n".join(context_blocks)
 
     @classmethod
     def format_prompt(cls, query: str, docs: List[RetrievedDoc]) -> List:
+        # Prompt 明确约束模型只使用 Document 标签内的信息。
         context_str = cls._build_context_string(docs)
 
         system_prompt = (
@@ -95,6 +99,6 @@ class Generator:
         )
 
         return [
-            SystemMessage(content = system_prompt),  # 系统消息
-            HumanMessage(content = user_content)     # 用户消息
+            SystemMessage(content = system_prompt),
+            HumanMessage(content = user_content)
         ]
