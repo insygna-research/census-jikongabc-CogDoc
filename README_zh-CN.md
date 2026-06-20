@@ -1,5 +1,3 @@
-<div align="center">
-
 # CogDoc
 
 **面向论文与技术文档的 RAG 控制台:LangGraph 多 Agent 在上,确定性 Rust kernel 在下。**

@@ -1,5 +1,3 @@
-<div align="center">
-
 # CogDoc
 
 **A RAG console for papers and technical docs — LangGraph agents on top, deterministic Rust kernels underneath.**
