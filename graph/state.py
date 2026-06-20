@@ -75,6 +75,7 @@ class GraphState(TypedDict):
     top_k: NotRequired[int]
 
     rewritten_queries: NotRequired[List[str]]
+    rewrite_similarity_threshold: NotRequired[float]
     retrieved_docs: NotRequired[List[RetrievedDoc]]
     reranked_docs: NotRequired[List[RetrievedDoc]]
     context: NotRequired[str]
@@ -100,4 +101,3 @@ class ParsedPage(TypedDict):
     source: str
     text: str
     is_ocr_fallback: bool
-

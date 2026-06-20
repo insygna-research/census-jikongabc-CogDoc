@@ -9,6 +9,7 @@ from tools.retriever.hybrid import HybridRetriever
 from tools.reranker import BGEReranker
 from agents.generator import Generator
 from agents.query_rewriter import QueryRewriteAgent
+from agents.rewrite_verifier import RewriteVerifyAgent
 from agents.citation_validator import CitationValidatorAgent
 
 class RetrieverFactory:
@@ -22,6 +23,10 @@ class RetrieverFactory:
     
 def rewrite_node(state: GraphState) -> dict:
     return QueryRewriteAgent.rewrite_query(state)
+
+def verify_rewrite_node(state: GraphState) -> dict:
+    # 在检索前过滤语义漂移的 query rewrite。
+    return RewriteVerifyAgent.verify_rewrites(state)
 
 def retrieve_node(state: GraphState) -> dict:
     original_query = state.get("query", "")
@@ -147,13 +152,15 @@ def citation_check(state: GraphState) -> str:
 sub_graph = StateGraph(GraphState)
 
 sub_graph.add_node("rewrite_node", rewrite_node)
+sub_graph.add_node("verify_rewrite_node", verify_rewrite_node)
 sub_graph.add_node("retrieve_node", retrieve_node)
 sub_graph.add_node("rerank_node", rerank_node)
 sub_graph.add_node("generate_node", generate_node)
 sub_graph.add_node("citation_node", citation_node)
 
 sub_graph.add_edge(START, "rewrite_node")
-sub_graph.add_edge("rewrite_node", "retrieve_node")
+sub_graph.add_edge("rewrite_node", "verify_rewrite_node")
+sub_graph.add_edge("verify_rewrite_node", "retrieve_node")
 sub_graph.add_edge("retrieve_node", "rerank_node")
 sub_graph.add_edge("rerank_node", "generate_node")
 sub_graph.add_edge("generate_node", "citation_node")
