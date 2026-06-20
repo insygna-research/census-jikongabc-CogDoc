@@ -101,9 +101,13 @@ chunk_id = sha256:{source_sha256}:p{page_start}-p{page_end}:c{local_chunk_index}
 ## Usage Example
 
 ```text
-[本地Ollama] 请输入您的问题 >>> AI 智能体开发应用赛需要提交什么材料？
+[本地Ollama] 请输入您的问题 >>> 参加 AI 智能体开发应用赛时，团队需要重点关注哪些提交要求？
 
-参赛团队通常需要按赛事要求提交作品说明、技术方案或相关材料，具体提交项以赛事规程中的参赛要求和作品提交说明为准。[AI智能体开发应用赛赛事规程260428.pdf:P4]
+参赛团队应先确认赛事规程中的参赛对象、报名方式和作品提交节点，避免因流程性要求遗漏影响评审资格。[AI智能体开发应用赛赛事规程260428.pdf:P2]
+
+作品材料需要围绕智能体应用场景、核心功能、技术方案和运行效果展开说明，提交内容应能支撑评委复现或理解系统能力。[AI智能体开发应用赛赛事规程260428.pdf:P4]
+
+如果团队选择本地部署或调用外部模型服务，还应在说明中交代运行环境、依赖组件和接口配置，降低评审过程中的复现成本。[大模型开发应用赛.pdf:P6]
 ```
 
 The exact wording depends on the selected model and the local PDF corpus. The important contract is that every factual claim should end with a citation whose file name and page exist in the retrieved context.
