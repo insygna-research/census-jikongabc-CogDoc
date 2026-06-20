@@ -1,3 +1,4 @@
+import re
 from typing import List, Tuple
 from langchain_core.messages import HumanMessage, SystemMessage
 from agents.citation_validator import CitationValidatorAgent
@@ -7,6 +8,7 @@ from tools.tokenizer import tokenize_mixed_text
 
 
 MAX_SECTION_CONTEXT_CHUNKS = 8
+CITATION_PATTERN = re.compile(r'[\[［]\s*([^:：\]］]+?)\s*[:：]\s*[pPｐＰ]?\s*([0-9０-９]+)\s*[\]］]')
 
 
 def tokenize_for_section(text: str) -> set[str]:
@@ -59,6 +61,55 @@ def format_summary_context(docs: List[RetrievedDoc]) -> str:
     return "\n\n".join(blocks)
 
 
+def build_section_citations(docs: List[RetrievedDoc]) -> str:
+    # 引用只从本章节实际使用的 chunk 元数据生成，避免模型复制出错。
+    seen = set()
+    citations = []
+    for doc in docs:
+        meta = doc.get("meta", {})
+        source = meta.get("source", "")
+        page = meta.get("page")
+        key = (source, page)
+        if not source or page is None or key in seen:
+            continue
+        seen.add(key)
+        citations.append(f"[{source}:P{page}]")
+
+    return "".join(citations)
+
+
+NO_EVIDENCE_MARKER = "文档中未明确说明"
+# 标记之后出现转折/补充词，说明仍陈述了实质内容，不能当无依据跳过引用。
+_CONTENT_TURN_RE = re.compile(r"(但|不过|然而|另外|此外)")
+# 句子终止符用于判断标记之后是否还另起了第二句实质内容。
+_SENTENCE_SPLIT_RE = re.compile(r"[。！？!?；;\n]+")
+
+
+def is_no_evidence_summary(content: str) -> bool:
+    # 只有单句无依据声明才跳过引用；转折或第二句都按实质内容绑定引用。
+    normalized = content.strip()
+    if not normalized.startswith(NO_EVIDENCE_MARKER):
+        return False
+    sentences = [s for s in _SENTENCE_SPLIT_RE.split(normalized) if s.strip()]
+    if len(sentences) > 1:
+        return False
+    return not _CONTENT_TURN_RE.search(normalized[len(NO_EVIDENCE_MARKER):])
+
+
+def attach_section_citations(content: str, docs: List[RetrievedDoc]) -> str:
+    # 模型只负责摘要正文，章节引用由程序按上下文确定性绑定。
+    content = content.strip()
+    if not content or is_no_evidence_summary(content) or not docs:
+        return content
+
+    citations = build_section_citations(docs)
+    if not citations:
+        return content
+
+    content = CITATION_PATTERN.sub("", content).strip()
+    return f"{content}{citations}"
+
+
 def build_summary_evidence(docs: List[RetrievedDoc]) -> List[Evidence]:
     # Summary evidence 暂先暴露参与摘要的全部单文档 chunk。
     return [
@@ -99,25 +150,17 @@ class SectionSummaryAgent:
                 SystemMessage(
                     content = (
                         "你是一位严谨的技术文档摘要助手。你的唯一工作是：仅依据给定的 <Document> 标签文本，"
-                        "为指定章节写一段简短的中文摘要，并为每个事实标注可被机器校验的精确引用。\n\n"
+                        "为指定章节写一段简短的中文摘要。\n\n"
                         "【硬性约束】\n"
                         "1. 只能使用 <Document> 标签内的信息，禁止引入任何标签外的知识、常识或推测。\n"
-                        "2. 每一句陈述文档事实的句子，句尾必须附加引用，格式为 [source:P页码]。\n"
-                        "3. 引用里的 source 和 page 必须逐字复制对应 <Document> 标签的 source、page 属性，"
-                        "不得改写文件名、不得使用占位词、不得引用标签中不存在的文件名或页码——"
-                        "这些引用会被逐条机器校验，任何一处对不上都会导致整篇摘要被判废。\n"
-                        "4. 同一句涉及多个来源时，可连续附加多个标签，例如 [a.pdf:P3][a.pdf:P5]。\n"
-                        "5. 只能用半角方括号与冒号 []:，禁止中文括号（）和任何全角符号。\n\n"
+                        "2. 不要输出引用标签、页码、文件名或 <Document> 标签，程序会在生成后自动绑定引用。\n"
+                        "3. 不要使用占位词，不要输出章节标题，不要解释规则。\n\n"
                         "【范围与篇幅】\n"
                         "- 只写当前指定章节的内容，不复述其它章节、不重复章节标题、不加前言/结语/过渡语。\n"
                         "- 输出 2-4 句中文短句。\n\n"
                         "【无依据时】\n"
                         "- 若给定片段中确实找不到与本章节相关的内容，只输出一行：文档中未明确说明"
                         "（不加引用、不编造）。\n\n"
-                        "【示例】\n"
-                        "参考资料含 <Document source=\"赛事规程.pdf\" page=\"2\">……报名于 6 月 1 日截止……</Document> 时，"
-                        "合格输出形如：\n"
-                        "本赛事报名于 6 月 1 日截止，参赛团队须在此前完成组队与材料提交。[赛事规程.pdf:P2]\n\n"
                         "【输出】只输出摘要正文（或“文档中未明确说明”），"
                         "不要输出章节标题、不要解释、不要任何额外文字。"
                     )
@@ -135,11 +178,12 @@ class SectionSummaryAgent:
                 ),
             ]
             response = llm.invoke(messages)
+            content = attach_section_citations(response.content, section_docs)
             results.append(
                 SummarySectionResult(
                     section_id = plan["section_id"],
                     title = plan["title"],
-                    content = response.content,
+                    content = content,
                 )
             )
 

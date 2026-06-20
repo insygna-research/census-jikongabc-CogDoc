@@ -144,8 +144,13 @@ def ask(doc_id: str, query: str, is_local: bool = False):
             subgraphs = True,
         )
         
-        saw_parent_qa_output = False
-        subgraph_fallback_output = {}
+        current_task = "qa"
+        saw_parent_output = False
+        fallback_outputs = {
+            "qa": {},
+            "summary": {},
+            "compare": {},
+        }
 
         def print_final_qa_output(subgraph_output: dict) -> None:
             final_docs = subgraph_output.get("reranked_docs", [])
@@ -177,6 +182,50 @@ def ask(doc_id: str, query: str, is_local: bool = False):
                 print("\n⚠️ [AI]: 模型返回了空内容，但引证校验已通过。")
             print("=" * 50)
 
+        def print_final_summary_output(subgraph_output: dict) -> None:
+            summary_source = subgraph_output.get("summary_source", "")
+            final_answer = subgraph_output.get("answer", "")
+            evidence = subgraph_output.get("evidence", [])
+
+            if summary_source:
+                print(f"\n📝 [SummaryAgent 文档摘要]: {summary_source}")
+            else:
+                print("\n📝 [SummaryAgent 文档摘要]:")
+
+            if final_answer:
+                print(f"\n{final_answer}")
+            else:
+                print("\n⚠️ [SummaryAgent]: 摘要子图未返回可打印内容。")
+
+            if evidence:
+                print(f"\n📚 [摘要 Evidence]: 共 {len(evidence)} 个 chunk 参与摘要。")
+            print("=" * 50)
+
+        def print_final_compare_output(subgraph_output: dict) -> None:
+            messages = subgraph_output.get("messages", [])
+            content = ""
+            if messages:
+                latest = messages[-1]
+                content = latest.get("content", "") if isinstance(latest, dict) else getattr(latest, "content", "")
+            content = content or subgraph_output.get("answer", "")
+
+            print("\n📊 [CompareAgent 文档对比]:")
+            if content:
+                print(f"\n{content}")
+            else:
+                print("\n⚠️ [CompareAgent]: 对比子图未返回可打印内容。")
+            print("=" * 50)
+
+        parent_printers = {
+            "qa_subgraph": ("qa", print_final_qa_output),
+            "summary_subgraph": ("summary", print_final_summary_output),
+            "compare_subgraph": ("compare", print_final_compare_output),
+        }
+        fallback_printers = {
+            task_name: printer
+            for task_name, printer in parent_printers.values()
+        }
+
         try:
             for ns, mode, data in token_stream:
                 in_subgraph = len(ns) > 0
@@ -184,6 +233,7 @@ def ask(doc_id: str, query: str, is_local: bool = False):
                 if mode == "updates" and not in_subgraph and "intent_router" in data:
                     router_output = data["intent_router"]
                     task = router_output.get("task_type", "qa")
+                    current_task = task
                     reason = router_output.get("router_reason", "无")
                     print(f"🧠 [RouterAgent 智能路由判别报告]:")
                     print(f"   ↳ 判定任务类型 -> 【{task.upper()}】")
@@ -197,17 +247,9 @@ def ask(doc_id: str, query: str, is_local: bool = False):
                         print(f"   ├── ➔ 检索分支 #{q_idx+1}: '{q}'")
                     print("   └── 🚀 正在拉起多路并行召回与全局大去重机制...")
                     print("-" * 50)
-                elif mode == "updates" and in_subgraph and "rerank_node" in data:
-                    subgraph_fallback_output.update(data["rerank_node"])
-                elif mode == "updates" and in_subgraph and "generate_node" in data:
-                    subgraph_fallback_output.update(data["generate_node"])
-                elif mode == "updates" and not in_subgraph and "qa_subgraph" in data:
-                    saw_parent_qa_output = True
-                    subgraph_output = data["qa_subgraph"]
-                    print_final_qa_output(subgraph_output)
                 elif mode == "updates" and in_subgraph and "citation_node" in data:
                     citation_output = data["citation_node"]
-                    subgraph_fallback_output.update(citation_output)
+                    fallback_outputs["qa"].update(citation_output)
                     critique = citation_output.get("critique", "")
                     iter_num = citation_output.get("iteration_count", 1)
                     max_iter = citation_output.get("max_iteration_count", initial_state.get("max_iteration_count", 2))
@@ -219,7 +261,7 @@ def ask(doc_id: str, query: str, is_local: bool = False):
                             reject_title = f"模型第 {iter_num} 轮回答包含捏造引证（错误页码/文件名）"
                         print(f"\n🚨 [CitationAgent 拒绝]: {reject_title}")
 
-                        round_answer = subgraph_fallback_output.get("answer", "")
+                        round_answer = fallback_outputs["qa"].get("answer", "")
                         if round_answer:
                             preview = round_answer.replace("\n", " ")[:200]
                             print(f"   ↳ 本轮模型回答预览 >>> {preview}{'...' if len(round_answer) > 200 else ''}")
@@ -233,9 +275,22 @@ def ask(doc_id: str, query: str, is_local: bool = False):
                     else:
                         print(f"\n🛡️ [CitationAgent 审计通过]: 第 {iter_num} 轮回答物理引用契约完全匹配，无名义页码幻觉。")
                         print("-" * 50)
+                elif mode == "updates" and in_subgraph:
+                    task_output = fallback_outputs.setdefault(current_task, {})
+                    for value in data.values():
+                        if isinstance(value, dict):
+                            task_output.update(value)
+                elif mode == "updates" and not in_subgraph:
+                    for parent_key, (task_name, printer) in parent_printers.items():
+                        if parent_key in data:
+                            saw_parent_output = True
+                            printer(data[parent_key])
+                            break
 
-            if not saw_parent_qa_output and subgraph_fallback_output:
-                print_final_qa_output(subgraph_fallback_output)
+            if not saw_parent_output:
+                task_output = fallback_outputs.get(current_task, {})
+                if task_output:
+                    fallback_printers.get(current_task, print_final_compare_output)(task_output)
                         
         except Exception as stream_err:
             print(f"\n⚠️ [大模型流式通信管道在运行时遭遇意外中断]: {stream_err}")
