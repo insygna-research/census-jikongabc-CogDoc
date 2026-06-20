@@ -1,11 +1,11 @@
 import os
 import pickle
 import copy
-import jieba
-import re
 from typing import List
 from rank_bm25 import BM25Okapi
 from graph.state import RetrievedDoc
+from tools.document_loader import list_sources, load_source_chunks
+from tools.tokenizer import tokenize_mixed_text
 from tools.retriever.base_retriever import BaseRetriever
 
 class BM25Retriever(BaseRetriever):
@@ -32,20 +32,7 @@ class BM25Retriever(BaseRetriever):
                 self.bm25, self.doc_registry, self.tokenized_corpus = None, [], []
     
     def _tokenize(self, text: str) -> List[str]:
-        text = text.lower()
-        tokens = []
-        
-        english_words = re.findall(r'[a-z0-9_\-\.]+', text)
-        tokens.extend([w for w in english_words if len(w) > 1])
-        
-        chinese_pure = re.sub(r'[a-z0-9_\-\.]+', ' ', text)
-        jieba_words = jieba.cut(chinese_pure, cut_all = False)
-        for w in jieba_words:
-            w_strip = w.strip()
-            if w_strip and len(w_strip) > 1:
-                tokens.append(w_strip)
-
-        return tokens
+        return tokenize_mixed_text(text)
 
     def warm_up(self) -> None:
         self._tokenize("知识库 检索 warmup")
@@ -93,6 +80,14 @@ class BM25Retriever(BaseRetriever):
                 "doc_registry": self.doc_registry, 
                 "tokenized_corpus": self.tokenized_corpus
             }, f)
+
+    def list_sources(self) -> List[str]:
+        # BM25 registry 保存了完整 chunk 文本，可作为摘要文档加载来源。
+        return list_sources(self.doc_registry)
+
+    def load_source_chunks(self, source: str) -> List[RetrievedDoc]:
+        # 摘要链路按 source 直接加载已索引 chunk。
+        return load_source_chunks(self.doc_registry, source)
 
     def search(self, query: str, top_k: int = 3) -> List[RetrievedDoc]:
         if not self.bm25 or not self.doc_registry:

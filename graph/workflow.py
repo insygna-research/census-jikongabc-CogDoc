@@ -3,10 +3,8 @@ from langgraph.graph import StateGraph, START, END
 from graph.state import GraphState
 from agents.router import RouterAgent
 from graph.subgraphs.qa import qa_subgraph_node
+from graph.subgraphs.summary import summary_subgraph_node
 
-def dummy_summary_subgraph(state: GraphState) -> dict:
-    # Summary 子图尚未实现时返回占位消息。
-    return {"messages": [{"role": "assistant", "content": "📝 [Summary Subgraph 提示]: 论文结构化摘要总结子图功能开发中，敬请期待。"}]}
 
 def dummy_compare_subgraph(state: GraphState) -> dict:
     # Compare 子图尚未实现时返回占位消息。
@@ -29,7 +27,7 @@ workflow = StateGraph(GraphState)
 
 workflow.add_node("intent_router", RouterAgent.route_intent)  # 智能路由节点
 workflow.add_node("qa_subgraph", qa_subgraph_node)            # 真实的QA子图实体
-workflow.add_node("summary_subgraph", dummy_summary_subgraph)  # 摘要子图桩
+workflow.add_node("summary_subgraph", summary_subgraph_node)  # 摘要子图实体
 workflow.add_node("compare_subgraph", dummy_compare_subgraph)  # 对比子图桩
 
 workflow.add_edge(START, "intent_router")

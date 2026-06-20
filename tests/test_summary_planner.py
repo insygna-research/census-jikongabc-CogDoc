@@ -1,0 +1,35 @@
+from agents.summary_planner import SectionPlannerAgent
+
+
+def test_default_summary_sections_are_stable():
+    # Summary MVP 默认输出固定结构化章节。
+    result = SectionPlannerAgent.plan_sections({"query": "总结这篇文档"})
+
+    titles = [section["title"] for section in result["summary_section_plans"]]
+    assert titles == ["研究问题", "方法与方案", "实验与要求", "结论与价值", "局限与注意事项"]
+    assert result["steps_trace"][0]["step_name"] == "summary_section_planner"
+
+
+def test_custom_summary_sections_override_defaults():
+    # 调用方可显式传入章节标题。
+    result = SectionPlannerAgent.plan_sections(
+        {"summary_section_titles": ["背景", "贡献", "风险"]}
+    )
+
+    assert [section["title"] for section in result["summary_section_plans"]] == [
+        "背景",
+        "贡献",
+        "风险",
+    ]
+    assert [section["section_id"] for section in result["summary_section_plans"]] == [
+        "custom_1",
+        "custom_2",
+        "custom_3",
+    ]
+
+
+def test_empty_custom_sections_fall_back_to_defaults():
+    # 空自定义章节不应产生空规划。
+    result = SectionPlannerAgent.plan_sections({"summary_section_titles": ["", "  "]})
+
+    assert len(result["summary_section_plans"]) == 5

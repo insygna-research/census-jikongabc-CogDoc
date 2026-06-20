@@ -62,6 +62,18 @@ class Evidence(TypedDict, total = False):
     rewrite_query: Optional[str]
     text_preview: str
 
+class SummarySectionPlan(TypedDict):
+    # SummarySectionPlan 定义单文档摘要的固定章节。
+    section_id: str
+    title: str
+    instruction: str
+
+class SummarySectionResult(TypedDict):
+    # SummarySectionResult 保存单个章节的带引用摘要。
+    section_id: str
+    title: str
+    content: str
+
 class GraphState(TypedDict):
     # GraphState 是 LangGraph 节点间传递的全局状态。
     messages: Annotated[List[BaseMessage], add_messages]
@@ -84,6 +96,10 @@ class GraphState(TypedDict):
     critique: NotRequired[str]
     sources: NotRequired[List[DocMeta]]
     evidence: NotRequired[List[Evidence]]
+    summary_source: NotRequired[str]
+    summary_docs: NotRequired[List[RetrievedDoc]]
+    summary_section_plans: NotRequired[List[SummarySectionPlan]]
+    summary_section_results: NotRequired[List[SummarySectionResult]]
 
     chat_history: NotRequired[Annotated[List[ChatMessage], merge_lists]]
 

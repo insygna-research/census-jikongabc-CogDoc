@@ -26,6 +26,14 @@ class HybridRetriever(BaseRetriever):
         self.vector_retriever.index(chunks)  # 构建向量索引
         self.bm25_retriever.index(chunks)  # 构建BM25索引
 
+    def list_sources(self) -> List[str]:
+        # 单文档摘要从 BM25 registry 读取完整文档列表。
+        return self.bm25_retriever.list_sources()
+
+    def load_source_chunks(self, source: str) -> List[RetrievedDoc]:
+        # 单文档摘要加载指定 source 的全部 chunk。
+        return self.bm25_retriever.load_source_chunks(source)
+
     def search(self, query: str, top_k: int = 3) -> List[RetrievedDoc]:
         # 两路召回后交给 native RRF 做去重融合。
         recall_top_k = top_k * 3  # 扩大召回池提高融合质量
