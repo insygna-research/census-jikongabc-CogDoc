@@ -1,5 +1,10 @@
 import sys  
 import os 
+import signal
+try:
+    import readline  # 启用 input() 的方向键、历史记录和行内编辑。
+except ImportError:
+    readline = None
 from tools.rust_core_loader import ensure_rust_core
 from tools.manifest import load_index_manifest, manifests_match, save_index_manifest, stamp_chunk_identity_contract
 
@@ -16,6 +21,15 @@ from tools.embedder import Embedder
 from tools.reranker import BGEReranker 
 
 DEFAULT_DOC_DIR = os.getenv("COGDOC_DOC_DIR", "测试论文")
+
+def safe_print_on_interrupt(message: str) -> None:
+    # 打印退出提示时临时忽略 SIGINT，避免 Ctrl+C 连按打断清理路径。
+    previous_handler = signal.getsignal(signal.SIGINT)
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        print(message)
+    finally:
+        signal.signal(signal.SIGINT, previous_handler)
 
 def _index_is_current(doc_id: str, doc_dir: str, engine):
     # 任一路索引缺失都视为不可复用。
@@ -292,7 +306,7 @@ def main():
             ask(doc_id = TARGET_DOC_ID, query = user_input, is_local = is_local)
             
         except KeyboardInterrupt:
-            print("\n👋 检测到系统中断信号（Ctrl+C），安全关闭。")
+            safe_print_on_interrupt("\n👋 检测到系统中断信号（Ctrl+C），安全关闭。")
             break
         except Exception as e:
             print(f"⚠️ [控制台内部异常捕获]: {e}")
