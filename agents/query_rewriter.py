@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field
 from agents.generator import Generator
 
 class QueryRewriteOutput(BaseModel):
+    # 改写结果限定在少量高价值检索查询内。
     queries: List[str] = Field(
         min_length = 1,
         max_length = 3,
@@ -12,6 +13,7 @@ class QueryRewriteOutput(BaseModel):
 class QueryRewriteAgent:
     @staticmethod
     def rewrite_query(state: dict) -> dict:
+        # 改写失败时回退到原始 query，保证检索链路可继续。
         query = state.get("query", "")
         is_local = state.get("is_local", False)
         

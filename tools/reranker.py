@@ -6,6 +6,7 @@ from graph.state import RetrievedDoc
 
 
 def _detect_default_device() -> str:
+    # 精排模型优先使用可用加速后端。
     if torch.cuda.is_available():
         return "cuda"
     mps_backend = getattr(getattr(torch, "backends", None), "mps", None)
@@ -35,6 +36,7 @@ class BGEReranker:
 
     @classmethod
     def _get_resources(cls):
+        # Tokenizer 与模型按进程级单例懒加载。
         if cls._tokenizer is None:
             cls._tokenizer = AutoTokenizer.from_pretrained(cls.MODEL_NAME)
         if cls._model is None:
@@ -49,6 +51,7 @@ class BGEReranker:
 
     @classmethod
     def rerank(cls, query: str, docs: List[RetrievedDoc], top_n: int = 3) -> List[RetrievedDoc]:
+        # 精排只修改深拷贝结果，避免污染召回缓存。
         if not docs:
             return []  # 无候选文档直接返回
         if len(docs) <= 1:

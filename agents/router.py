@@ -4,12 +4,14 @@ from agents.generator import Generator
 from typing import Literal
 
 class RouteDecision(BaseModel):
+    # LLM 只能返回工作流支持的任务类型。
     task_type: Literal["qa", "summary", "compare", "unknown"] = Field(description = "任务类型: 'qa', 'summary', 'compare', 'unknown'")
     reason: str = Field(description = "做出该路由决策的清晰理由。")
 
 class RouterAgent:
     @staticmethod
     def route_intent(state: dict, config: RunnableConfig) -> dict:
+        # 路由节点从运行配置优先读取用户请求。
         messages = state.get("messages", [])  # 读取消息历史
         configurable = config.get("configurable", {})  # 读取运行配置
         

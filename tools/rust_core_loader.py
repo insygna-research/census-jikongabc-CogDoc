@@ -2,6 +2,7 @@ import importlib
 from types import ModuleType
 
 def ensure_rust_core(*required: str) -> ModuleType:
+    # 统一校验 Rust 扩展是否已安装且包含必需符号。
     try:
         rust_core = importlib.import_module("rust_core")
     except ImportError as exc:

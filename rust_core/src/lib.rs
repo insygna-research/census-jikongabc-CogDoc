@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
+mod citation;
 mod rrf;
 mod scanner;
 
@@ -46,10 +47,21 @@ fn rrf_fusion_native<'py>(
     rrf::rrf_fusion_core(vector_docs, bm25_docs, k, top_n)
 }
 
+// 校验回答里的引用标签是否只引用了本轮召回上下文中的文件和页码
+#[pyfunction]
+fn validate_citations_native<'py>(
+    py: Python<'py>,
+    answer: String,
+    valid_docs: Vec<Bound<'py, PyDict>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    citation::validate_citations_core(py, answer, valid_docs)
+}
+
 // 模块入口：向 Python 注册导出的 native 函数
 #[pymodule]
 fn rust_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(scan_pdf_manifest_native, m)?)?;
     m.add_function(wrap_pyfunction!(rrf_fusion_native, m)?)?;
+    m.add_function(wrap_pyfunction!(validate_citations_native, m)?)?;
     Ok(())
 }

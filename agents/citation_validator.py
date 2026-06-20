@@ -1,42 +1,21 @@
-import re
 from typing import List, Dict, Any
+
+from tools.rust_core_loader import ensure_rust_core
+
+
+# Python 门面只依赖 native checker 的结构化结果。
+rust_core = ensure_rust_core("validate_citations_native")
+
 
 class CitationValidatorAgent:
     @staticmethod
     def validate_citations(answer: str, valid_docs: List[Dict[str, Any]]) -> Dict[str, Any]:
-        # 引用校验保持页级格式，chunk_id 只用于机器溯源。
-        if not answer:
+        # Rust 负责确定性规则校验，Python 负责生成 critique。
+        native_result = rust_core.validate_citations_native(answer or "", valid_docs)
+        if native_result["is_valid"]:
             return {"is_valid": True, "critique": ""}
 
-        # allowed_registry 记录本轮检索实际允许引用的文件和页码。
-        allowed_registry = {}
-        for doc in valid_docs:
-            meta = doc.get("meta", {})
-            source = meta.get("source", "")
-            page = meta.get("page")
-            if source and page is not None:
-                try:
-                    allowed_registry.setdefault(source, set()).add(int(page))
-                except (TypeError, ValueError):
-                    continue
-                
-        if not allowed_registry:
-            return {"is_valid": True, "critique": ""}
-
-        allowed_pages_str_map = {
-            file: ", ".join(f"P{p}" for p in sorted(pages))
-            for file, pages in allowed_registry.items()
-        }
-
-        # 兜底回答不包含文档事实，允许不带引用。
-        FALLBACK_MARKER = "在所提供的参考资料中未找到与该问题相关的内容"
-        if FALLBACK_MARKER in answer:
-            return {"is_valid": True, "critique": ""}
-
-        citation_pattern = r'[\[［]\s*([^:：\]］]+?)\s*[:：]\s*[pPｐＰ]?\s*(\d+)\s*[\]］]'
-        citations = re.findall(citation_pattern, answer, flags = re.IGNORECASE)
-
-        if not citations:
+        if native_result["missing_citations"]:
             return {
                 "is_valid": False,
                 "critique": (
@@ -47,37 +26,23 @@ class CitationValidatorAgent:
                 )
             }
 
-        invalid_sources = []
-        invalid_pages = []
-
-        for file_name, page_str in citations:
-            file_name = file_name.strip()
-            page_num = int(page_str)
-            
-            if file_name not in allowed_registry:
-                invalid_sources.append(f"[{file_name}:P{page_num}] (该文件根本不在本次检索的上下文中)")
-                continue
-                
-            if page_num not in allowed_registry[file_name]:
-                valid_pages_str = allowed_pages_str_map[file_name]
-                invalid_pages.append(
-                    f"[{file_name}:P{page_num}] (该文件本次仅召回了 {valid_pages_str}，你引用的页码属于捏造事实)"
-                )
-
-        if invalid_sources or invalid_pages:
-            critique_lines = ["【引用校验未通过】检测到以下引用存在错误，请逐一核查后重新生成："]
-            for err in invalid_sources:
-                critique_lines.append(f"  - 文件名错误：{err}")
-            for err in invalid_pages:
-                critique_lines.append(f"  - 页码错误：{err}")
+        critique_lines = ["【引用校验未通过】检测到以下引用存在错误，请逐一核查后重新生成："]
+        for err in native_result["invalid_sources"]:
             critique_lines.append(
-                "\n修正要求：所有引用的文件名和页码必须与 <Document> 标签中的 source 和 page 属性完全一致，"
-                "不得引用未出现在参考资料中的文件或页码。"
+                f"  - 文件名错误：[{err['source']}:P{err['page']}] (该文件根本不在本次检索的上下文中)"
             )
-            
-            return {
-                "is_valid": False,
-                "critique": "\n".join(critique_lines)
-            }
+        for err in native_result["invalid_pages"]:
+            valid_pages_str = ", ".join(f"P{p}" for p in err["valid_pages"])
+            critique_lines.append(
+                f"  - 页码错误：[{err['source']}:P{err['page']}] "
+                f"(该文件本次仅召回了 {valid_pages_str}，你引用的页码属于捏造事实)"
+            )
+        critique_lines.append(
+            "\n修正要求：所有引用的文件名和页码必须与 <Document> 标签中的 source 和 page 属性完全一致，"
+            "不得引用未出现在参考资料中的文件或页码。"
+        )
 
-        return {"is_valid": True, "critique": ""}
+        return {
+            "is_valid": False,
+            "critique": "\n".join(critique_lines)
+        }
