@@ -1,6 +1,7 @@
 from tools.document_loader import (
     list_sources,
     load_source_chunks,
+    select_sources_for_compare,
     select_source_for_summary,
     sort_document_chunks,
 )
@@ -25,7 +26,6 @@ def _doc(source: str, page: int, local_chunk_index: int, chunk_id: str = None) -
 
 
 def test_sort_document_chunks_uses_source_page_and_local_index():
-    # 文档 chunk 加载后必须恢复原文顺序。
     docs = [
         _doc("b.pdf", 1, 0),
         _doc("a.pdf", 2, 1),
@@ -40,14 +40,12 @@ def test_sort_document_chunks_uses_source_page_and_local_index():
 
 
 def test_list_sources_is_stable_and_unique():
-    # source 列表按文件名稳定排序并去重。
     docs = [_doc("b.pdf", 1, 0), _doc("a.pdf", 1, 0), _doc("a.pdf", 2, 1)]
 
     assert list_sources(docs) == ["a.pdf", "b.pdf"]
 
 
 def test_load_source_chunks_filters_single_document():
-    # 单文档加载不得混入其它 source。
     docs = [_doc("b.pdf", 1, 0), _doc("a.pdf", 2, 1), _doc("a.pdf", 1, 0)]
 
     loaded = load_source_chunks(docs, "a.pdf")
@@ -56,31 +54,50 @@ def test_load_source_chunks_filters_single_document():
 
 
 def test_select_source_for_summary_matches_full_name_or_stem():
-    # 用户问题可按完整文件名或文件名主干定位目标文档。
     sources = ["paper-a.pdf", "paper-b.pdf"]
 
     assert select_source_for_summary("总结 paper-a.pdf", sources) == "paper-a.pdf"
     assert select_source_for_summary("总结 paper-b 的方法", sources) == "paper-b.pdf"
+    assert select_source_for_summary("summarize paper-b.pdf.", sources) == "paper-b.pdf"
 
 
 def test_select_source_for_summary_does_not_match_short_stem():
-    # 短文件名主干不能用宽松子串匹配，避免多文档时静默选错。
     assert select_source_for_summary("总结 data-arch 的方法", ["a.pdf", "data-arch.pdf"]) == "data-arch.pdf"
     assert select_source_for_summary("总结一个 ai 比赛", ["ai.pdf", "paper.pdf"]) is None
 
 
 def test_select_source_for_summary_uses_single_source_fallback():
-    # 知识库只有一个 source 时无需用户显式点名。
     assert select_source_for_summary("总结这篇文档", ["only.pdf"]) == "only.pdf"
 
 
 def test_select_source_for_summary_returns_none_when_ambiguous():
-    # 多文档且无法匹配时交给 Summary 子图生成可操作错误。
     assert select_source_for_summary("总结这篇文档", ["a.pdf", "b.pdf"]) is None
 
 
+def test_select_sources_for_compare_requires_two_explicit_sources():
+    sources = ["paper-a.pdf", "paper-b.pdf", "paper-c.pdf"]
+
+    assert select_sources_for_compare("对比 paper-a.pdf 和 paper-b.pdf", sources) == ["paper-a.pdf", "paper-b.pdf"]
+    assert select_sources_for_compare("compare paper-a.pdf and paper-b.pdf.", sources) == ["paper-a.pdf", "paper-b.pdf"]
+    assert select_sources_for_compare("对比 paper-c.pdf 和 paper-a.pdf", sources) == ["paper-c.pdf", "paper-a.pdf"]
+    assert select_sources_for_compare("对比 paper-a 和 paper-c 的方法", sources) == ["paper-a.pdf", "paper-c.pdf"]
+    assert select_sources_for_compare("对比这些文档", sources) == []
+    assert select_sources_for_compare("对比 paper-a.pdf", sources) == []
+
+
+def test_select_sources_for_compare_does_not_substring_match_short_filenames():
+    assert select_sources_for_compare("对比 data.pdf 和 b.pdf", ["a.pdf", "data.pdf", "b.pdf"]) == ["data.pdf", "b.pdf"]
+
+
+def test_select_sources_for_compare_does_not_match_dotted_filename_variants():
+    sources = ["data.pdf", "data.v2.pdf", "b.pdf"]
+
+    assert select_sources_for_compare("对比 data.v2.pdf 和 b.pdf", sources) == ["data.v2.pdf", "b.pdf"]
+    assert select_sources_for_compare("对比 data.pdf 和 b.pdf", sources) == ["data.pdf", "b.pdf"]
+    assert select_sources_for_compare("对比 data.pdf.old 和 b.pdf", sources) == []
+
+
 def test_bm25_retriever_exposes_indexed_document_loader(tmp_path):
-    # BM25 registry 可直接服务 Summary DocumentLoader。
     retriever = BM25Retriever("summary_loader_test", persist_directory = str(tmp_path))
     retriever.index([_doc("b.pdf", 1, 0), _doc("a.pdf", 2, 1), _doc("a.pdf", 1, 0)])
 

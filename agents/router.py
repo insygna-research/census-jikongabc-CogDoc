@@ -1,13 +1,12 @@
 import re
 from pydantic import BaseModel, Field
 from langchain_core.runnables import RunnableConfig
-from agents.generator import Generator
+from agents.qa_generator import Generator
 from agents.structured_output import invoke_structured
 from typing import Literal
 
 
 class RouteDecision(BaseModel):
-    # LLM 只能返回工作流支持的任务类型。
     task_type: Literal["qa", "summary", "compare", "unknown"] = Field(description = "任务类型: 'qa', 'summary', 'compare', 'unknown'")
     reason: str = Field(description = "做出该路由决策的清晰理由。")
 
@@ -41,18 +40,17 @@ def classify_intent_by_rule(query: str) -> RouteDecision:
 class RouterAgent:
     @staticmethod
     def route_intent(state: dict, config: RunnableConfig) -> dict:
-        # 路由节点从运行配置优先读取用户请求。
-        messages = state.get("messages", [])  # 读取消息历史
-        configurable = config.get("configurable", {})  # 读取运行配置
+        messages = state.get("messages", [])
+        configurable = config.get("configurable", {})
         
-        query = configurable.get("query", "")  # 获取用户问题
+        query = configurable.get("query", "")
         doc_id = configurable.get("doc_id", "arch_blueprint_2026")
         is_local = configurable.get("is_local", False)
 
-        if not query and messages:  # query为空时兜底
-            for msg in reversed(messages):  # 从最新消息开始查找
-                if msg.type == "user":  # 查找用户消息
-                    query = msg.content  # 提取消息内容
+        if not query and messages:
+            for msg in reversed(messages):
+                if msg.type == "user":
+                    query = msg.content
                     break
 
         system_prompt = (
@@ -80,12 +78,12 @@ class RouterAgent:
                 {
                     "role": "system",
                     "content": system_prompt
-                },  # 系统消息
+                },
                 {
                     "role": "user",
                     "content": user_content
-                }  # 用户消息
-            ])  # 调用模型进行路由判断
+                }
+            ])
 
             return {
                 "query": query,
@@ -93,7 +91,7 @@ class RouterAgent:
                 "is_local": is_local,
                 "task_type": decision.task_type,
                 "router_reason": decision.reason
-            }  # 返回路由结果
+            }
 
         except Exception as e:
             fallback = classify_intent_by_rule(query)
@@ -106,4 +104,4 @@ class RouterAgent:
                     f"结构化路由解析异常，已按规则 fallback 到 {fallback.task_type}。"
                     f"规则原因：{fallback.reason}。错误详情: {str(e)}"
                 )
-            }  # 异常时按关键词规则兜底
+            }

@@ -60,7 +60,6 @@ class FakeEngine:
 
 
 def test_document_loader_selects_named_source(monkeypatch):
-    # DocumentLoader 按用户问题中的文件名加载单文档 chunks。
     engine = FakeEngine([_doc("a.pdf", 1, 0), _doc("b.pdf", 1, 0)])
     monkeypatch.setattr(summary.RetrieverFactory, "get_engine", lambda doc_id: engine)
 
@@ -72,7 +71,6 @@ def test_document_loader_selects_named_source(monkeypatch):
 
 
 def test_document_loader_returns_actionable_message_when_ambiguous(monkeypatch):
-    # 多文档且用户未点名时返回可操作提示。
     engine = FakeEngine([_doc("a.pdf", 1, 0), _doc("b.pdf", 1, 0)])
     monkeypatch.setattr(summary.RetrieverFactory, "get_engine", lambda doc_id: engine)
 
@@ -85,12 +83,10 @@ def test_document_loader_returns_actionable_message_when_ambiguous(monkeypatch):
 
 
 def test_document_loader_check_continues_when_docs_exist():
-    # 文档加载成功后才进入章节规划。
     assert document_loader_check({"summary_docs": [_doc("a.pdf", 1, 0)]}) == "section_planner_node"
 
 
 def test_section_planner_node_delegates_to_agent():
-    # Summary 子图章节规划节点输出固定摘要章节。
     result = section_planner_node({"query": "总结 a.pdf"})
 
     assert [plan["title"] for plan in result["summary_section_plans"]] == [
@@ -103,7 +99,6 @@ def test_section_planner_node_delegates_to_agent():
 
 
 def test_section_summary_node_generates_each_planned_section(monkeypatch):
-    # SectionSummary 为每个章节生成一段带引用摘要。
     class FakeLLM:
         def invoke(self, messages):
             return FakeMessage("该章节内容来自文档。[a.pdf:P1]")
@@ -127,7 +122,6 @@ def test_section_summary_node_generates_each_planned_section(monkeypatch):
 
 
 def test_section_summary_node_retries_local_no_evidence(monkeypatch):
-    # 本地模型过度保守输出无依据时，用更直接的提示重试一次。
     class FakeLLM:
         def __init__(self):
             self.calls = 0
@@ -157,7 +151,6 @@ def test_section_summary_node_retries_local_no_evidence(monkeypatch):
 
 
 def test_section_summary_node_limits_local_context(monkeypatch):
-    # 未超过长文档阈值时，本地 Ollama 保留默认 8 个章节上下文。
     class FakeLLM:
         def invoke(self, messages):
             return FakeMessage("这是本地摘要。")
@@ -185,7 +178,6 @@ def test_section_summary_node_limits_local_context(monkeypatch):
 
 
 def test_section_summary_node_uses_six_chunks_for_large_local_documents(monkeypatch):
-    # 超过 16 个 chunk 的本地文档每章节保留 6 个相关 chunk。
     class FakeLLM:
         def invoke(self, messages):
             return FakeMessage("这是本地摘要。")
@@ -209,7 +201,6 @@ def test_section_summary_node_uses_six_chunks_for_large_local_documents(monkeypa
 
 
 def test_section_summary_node_keeps_small_local_documents_intact(monkeypatch):
-    # 8 个 chunk 以内的文档保留完整上下文，避免摘要章节误判无依据。
     class FakeLLM:
         def invoke(self, messages):
             return FakeMessage("这是本地摘要。")
@@ -233,7 +224,6 @@ def test_section_summary_node_keeps_small_local_documents_intact(monkeypatch):
 
 
 def test_global_summary_node_builds_validated_answer():
-    # GlobalSummary 整合章节并复用 citation checker。
     result = global_summary_node(
         {
             "summary_source": "a.pdf",
@@ -256,7 +246,6 @@ def test_global_summary_node_builds_validated_answer():
 
 
 def test_global_summary_node_dedupes_section_evidence():
-    # 顶层 evidence 汇总章节实际使用的 evidence，而不是无条件暴露全文 docs。
     first_doc = _doc("a.pdf", 1, 0)
     second_doc = _doc("a.pdf", 2, 1)
     section_evidence = [
@@ -296,7 +285,6 @@ def test_global_summary_node_dedupes_section_evidence():
 
 
 def test_global_summary_node_blocks_invalid_citation():
-    # 引用页码不在文档 chunk 内时保留摘要并附加校验警告。
     result = global_summary_node(
         {
             "summary_source": "a.pdf",
@@ -316,8 +304,48 @@ def test_global_summary_node_blocks_invalid_citation():
     assert "页码错误" in result["critique"]
 
 
+def test_global_summary_node_flags_substantive_uncited_section():
+    result = global_summary_node(
+        {
+            "summary_source": "a.pdf",
+            "summary_docs": [_doc("a.pdf", 1, 0)],
+            "summary_section_results": [
+                {
+                    "section_id": "one",
+                    "title": "研究问题",
+                    "content": "文档提出了明确的研究目标。",
+                    "evidence": [],
+                }
+            ],
+        }
+    )
+
+    assert "引用校验警告" in result["answer"]
+    assert result["critique"]
+
+
+def test_global_summary_node_accepts_all_no_evidence_sections():
+    result = global_summary_node(
+        {
+            "summary_source": "a.pdf",
+            "summary_docs": [_doc("a.pdf", 1, 0)],
+            "summary_section_results": [
+                {
+                    "section_id": "one",
+                    "title": "研究问题",
+                    "content": "文档中未明确说明。",
+                    "evidence": [],
+                }
+            ],
+        }
+    )
+
+    assert "# a.pdf 结构化摘要" in result["answer"]
+    assert "引用校验警告" not in result["answer"]
+    assert result["critique"] == ""
+
+
 def test_workflow_routes_to_summary_subgraph_smoke(monkeypatch):
-    # 顶层 workflow 可从 Router 进入 Summary 子图并返回结构化摘要。
     engine = FakeEngine([_doc("a.pdf", 1, 0), _doc("b.pdf", 1, 0)])
     monkeypatch.setattr(summary.RetrieverFactory, "get_engine", lambda doc_id: engine)
     monkeypatch.setattr(summary_generator.Generator, "_get_client", lambda is_local = False: FakeSummaryLLM())

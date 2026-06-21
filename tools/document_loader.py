@@ -1,11 +1,10 @@
 import os
 import re
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Tuple
 from graph.state import RetrievedDoc
 
 
 def sort_document_chunks(chunks: Iterable[RetrievedDoc]) -> List[RetrievedDoc]:
-    # 单文档摘要必须按原文顺序读取 chunk。
     return sorted(
         chunks,
         key = lambda doc: (
@@ -19,7 +18,6 @@ def sort_document_chunks(chunks: Iterable[RetrievedDoc]) -> List[RetrievedDoc]:
 
 
 def list_sources(chunks: Iterable[RetrievedDoc]) -> List[str]:
-    # source 是用户选择单文档摘要目标的最小稳定标识。
     sources = {
         str(doc.get("meta", {}).get("source", ""))
         for doc in chunks
@@ -29,14 +27,30 @@ def list_sources(chunks: Iterable[RetrievedDoc]) -> List[str]:
 
 
 def load_source_chunks(chunks: Iterable[RetrievedDoc], source: str) -> List[RetrievedDoc]:
-    # 只加载指定 source 的 chunk，避免跨文档摘要混写。
     return sort_document_chunks(
         doc for doc in chunks if str(doc.get("meta", {}).get("source", "")) == source
     )
 
 
+def _source_match_start(query_lower: str, name_lower: str, allow_trailing_dot: bool) -> Optional[int]:
+    right_boundary = r"(?![a-z0-9_\-]|\.[a-z0-9_\-])" if allow_trailing_dot else r"(?![a-z0-9_\-.])"
+    match = re.search(rf"(?<![a-z0-9_\-.]){re.escape(name_lower)}{right_boundary}", query_lower)
+    if match is None:
+        return None
+    return match.start()
+
+
+def _full_source_match_start(query_lower: str, source_lower: str) -> Optional[int]:
+    # 完整文件名后允许句末英文句点，例如 "compare a.pdf and b.pdf."。
+    return _source_match_start(query_lower, source_lower, allow_trailing_dot = True)
+
+
+def _stem_source_match_start(query_lower: str, stem_lower: str) -> Optional[int]:
+    # stem 匹配不允许右侧点号，避免 stem "data" 命中 data.v2.pdf。
+    return _source_match_start(query_lower, stem_lower, allow_trailing_dot = False)
+
+
 def select_source_for_summary(query: str, sources: List[str]) -> Optional[str]:
-    # 单文档摘要优先从用户问题中匹配完整文件名或文件名主干。
     if not sources:
         return None
     if len(sources) == 1:
@@ -44,12 +58,36 @@ def select_source_for_summary(query: str, sources: List[str]) -> Optional[str]:
 
     query_lower = query.lower()
     for source in sources:
-        if source.lower() in query_lower:
+        if _full_source_match_start(query_lower, source.lower()) is not None:
             return source
 
     for source in sources:
         stem = os.path.splitext(source)[0].lower()
-        if len(stem) >= 3 and re.search(rf"(?<![a-z0-9_\-]){re.escape(stem)}(?![a-z0-9_\-])", query_lower):
+        if len(stem) >= 3 and _stem_source_match_start(query_lower, stem) is not None:
             return source
 
     return None
+
+
+def select_sources_for_compare(query: str, sources: List[str]) -> List[str]:
+    if not sources:
+        return []
+
+    query_lower = query.lower()
+    matched: List[Tuple[int, int, str]] = []
+
+    for source_index, source in enumerate(sources):
+        positions = []
+        full_pos = _full_source_match_start(query_lower, source.lower())
+        if full_pos is not None:
+            positions.append(full_pos)
+        stem = os.path.splitext(source)[0].lower()
+        stem_pos = _stem_source_match_start(query_lower, stem) if len(stem) >= 3 else None
+        if stem_pos is not None:
+            positions.append(stem_pos)
+        if positions:
+            matched.append((min(positions), source_index, source))
+
+    if len(matched) < 2:
+        return []
+    return [source for _, _, source in sorted(matched)]

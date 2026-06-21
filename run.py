@@ -2,7 +2,7 @@ import sys
 import os 
 import signal
 try:
-    import readline  # 启用 input() 的方向键、历史记录和行内编辑。
+    import readline
 except ImportError:
     readline = None
 from tools.rust_core_loader import ensure_rust_core
@@ -274,6 +274,24 @@ def ask(doc_id: str, query: str, is_local: bool = False):
                         print("-" * 50)
                     else:
                         print(f"\n🛡️ [CitationAgent 审计通过]: 第 {iter_num} 轮回答物理引用契约完全匹配，无名义页码幻觉。")
+                        print("-" * 50)
+                elif mode == "updates" and in_subgraph and "compare_citation_node" in data:
+                    # compare 单遍校验、无自愈迭代；此分支会短路下方通用分支，需自行补缓存。
+                    compare_citation_output = data["compare_citation_node"]
+                    fallback_outputs["compare"].update(compare_citation_output)
+                    critique = compare_citation_output.get("critique", "")
+
+                    if critique:
+                        if "未包含任何引用标签" in critique:
+                            reject_reason = "对比结论未携带任何引用标签"
+                        else:
+                            reject_reason = "对比结论或单元格存在捏造引证（错误页码/文件名）"
+                        print(f"\n🚨 [CompareAgent 引用校验未通过]: {reject_reason}")
+                        print(f"   ↳ 已降级为纯对比表，并在答案末尾追加引用校验警告。")
+                        print(f"   ↳ 拒绝原因 >>> {critique}")
+                        print("-" * 50)
+                    else:
+                        print(f"\n🛡️ [CompareAgent 审计通过]: 对比表与简短结论的引用契约完全匹配，无名义页码幻觉。")
                         print("-" * 50)
                 elif mode == "updates" and in_subgraph:
                     task_output = fallback_outputs.setdefault(current_task, {})

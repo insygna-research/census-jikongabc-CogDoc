@@ -1,4 +1,4 @@
-from typing import TypedDict, List, Optional, Annotated, Any
+from typing import TypedDict, List, Optional, Annotated, Any, Dict
 from typing_extensions import NotRequired
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -75,6 +75,24 @@ class SummarySectionResult(TypedDict):
     content: str
     evidence: NotRequired[List[Evidence]]
 
+class CompareDimensionPlan(TypedDict):
+    # CompareDimensionPlan 定义多文档对比的固定维度。
+    dimension_id: str
+    title: str
+    instruction: str
+
+class CompareCell(TypedDict):
+    # CompareCell 保存某篇文档在某个对比维度下的带引用短描述。
+    dimension_id: str
+    source: str
+    content: str
+    evidence: NotRequired[List[Evidence]]
+
+class DocumentProfile(TypedDict):
+    # DocumentProfile 是 Compare 子图里单篇文档的结构化画像。
+    source: str
+    cells: List[CompareCell]
+
 class GraphState(TypedDict):
     # GraphState 是 LangGraph 节点间传递的全局状态。
     messages: Annotated[List[BaseMessage], add_messages]
@@ -101,6 +119,13 @@ class GraphState(TypedDict):
     summary_docs: NotRequired[List[RetrievedDoc]]
     summary_section_plans: NotRequired[List[SummarySectionPlan]]
     summary_section_results: NotRequired[List[SummarySectionResult]]
+    compare_sources: NotRequired[List[str]]
+    compare_docs_by_source: NotRequired[Dict[str, List[RetrievedDoc]]]
+    compare_dimensions: NotRequired[List[CompareDimensionPlan]]
+    document_profiles: NotRequired[List[DocumentProfile]]
+    compare_table_answer: NotRequired[str]
+    compare_conclusion: NotRequired[str]
+    compare_conclusion_warning: NotRequired[str]
 
     chat_history: NotRequired[Annotated[List[ChatMessage], merge_lists]]
 

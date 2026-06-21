@@ -7,7 +7,7 @@ from tools.retriever.vector_retriever import VectorRetriever
 from tools.retriever.bm25_retriever import BM25Retriever
 from tools.retriever.hybrid import HybridRetriever
 from tools.reranker import BGEReranker
-from agents.generator import Generator
+from agents.qa_generator import Generator
 from agents.query_rewriter import QueryRewriteAgent
 from agents.rewrite_verifier import RewriteVerifyAgent
 from agents.citation_validator import CitationValidatorAgent

@@ -1,6 +1,6 @@
 from typing import List
 from pydantic import BaseModel, Field
-from agents.generator import Generator
+from agents.qa_generator import Generator
 from agents.structured_output import invoke_structured
 
 class QueryRewriteOutput(BaseModel):
