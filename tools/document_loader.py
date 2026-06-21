@@ -32,9 +32,32 @@ def load_source_chunks(chunks: Iterable[RetrievedDoc], source: str) -> List[Retr
     )
 
 
+# 常见汉字区间，用于判断 stem 边缘是否被同为中文的字符续接。
+_CJK_RANGE = "一-鿿"
+
+
+def _is_cjk(ch: str) -> bool:
+    return "一" <= ch <= "鿿"
+
+
 def _source_match_start(query_lower: str, name_lower: str, allow_trailing_dot: bool) -> Optional[int]:
-    right_boundary = r"(?![a-z0-9_\-]|\.[a-z0-9_\-])" if allow_trailing_dot else r"(?![a-z0-9_\-.])"
-    match = re.search(rf"(?<![a-z0-9_\-.]){re.escape(name_lower)}{right_boundary}", query_lower)
+    if not name_lower:
+        return None
+
+    left_exclude = r"a-z0-9_\-."
+    if allow_trailing_dot:
+        # 完整文件名带 .pdf 强锚点，边界保持宽松，只防右侧粘连更长点号文件。
+        right_boundary = r"(?![a-z0-9_\-]|\.[a-z0-9_\-])"
+    else:
+        # stem 匹配同时排除点号变体和中文复合词误命中。
+        right_exclude = r"a-z0-9_\-."
+        if _is_cjk(name_lower[-1]):
+            right_exclude += _CJK_RANGE
+        if _is_cjk(name_lower[0]):
+            left_exclude += _CJK_RANGE
+        right_boundary = rf"(?![{right_exclude}])"
+
+    match = re.search(rf"(?<![{left_exclude}]){re.escape(name_lower)}{right_boundary}", query_lower)
     if match is None:
         return None
     return match.start()

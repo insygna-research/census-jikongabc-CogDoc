@@ -3,6 +3,7 @@ from agents.router import RouteDecision, RouterAgent, classify_intent_by_rule
 
 
 class RaisingStructuredLLM:
+    # 模拟结构化路由不可用，验证规则路由兜底仍可工作。
     def with_structured_output(self, schema, **kwargs):
         assert kwargs["method"] == "json_mode"
         return self
@@ -18,6 +19,7 @@ def test_rule_router_classifies_explicit_summary():
 
 
 def test_rule_router_avoids_common_false_positive_phrases():
+    # “比较好用”“比较详细”“总结部分”不是 compare/summary 任务触发词。
     assert classify_intent_by_rule("比较好用的检索方法是什么").task_type == "qa"
     assert classify_intent_by_rule("请比较详细地介绍这个算法").task_type == "qa"
     assert classify_intent_by_rule("这篇论文的总结部分讲了什么").task_type == "qa"
@@ -42,6 +44,7 @@ def test_router_falls_back_to_summary_when_structured_llm_fails(monkeypatch):
 
 
 def test_router_uses_llm_before_keyword_fallback(monkeypatch):
+    # LLM 明确判为 QA 时，不应被关键词规则改写成 compare。
     class LLM:
         def with_structured_output(self, schema, **kwargs):
             return self
@@ -67,6 +70,7 @@ def test_router_uses_llm_before_keyword_fallback(monkeypatch):
 
 
 def test_router_uses_json_mode_for_llm_structured_output(monkeypatch):
+    # Router 统一使用 json_mode，兼容本地和云端的结构化输出路径。
     class JsonModeLLM:
         def with_structured_output(self, schema, **kwargs):
             assert kwargs["method"] == "json_mode"

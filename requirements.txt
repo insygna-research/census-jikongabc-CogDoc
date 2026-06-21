@@ -1,4 +1,3 @@
-# CogDoc 运行时顶层依赖
 chromadb
 pymupdf
 langgraph
@@ -8,5 +7,4 @@ sentence-transformers
 torch
 transformers
 jieba
-rank-bm25
 pydantic

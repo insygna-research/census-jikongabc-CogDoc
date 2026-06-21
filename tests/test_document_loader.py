@@ -66,6 +66,13 @@ def test_select_source_for_summary_does_not_match_short_stem():
     assert select_source_for_summary("总结一个 ai 比赛", ["ai.pdf", "paper.pdf"]) is None
 
 
+def test_select_source_for_summary_does_not_match_cjk_stem_inside_compound_word():
+    sources = ["技术方案.pdf", "b.pdf"]
+
+    assert select_source_for_summary("总结 技术方案 的内容", sources) == "技术方案.pdf"
+    assert select_source_for_summary("总结技术方案设计规范的内容", sources) is None
+
+
 def test_select_source_for_summary_uses_single_source_fallback():
     assert select_source_for_summary("总结这篇文档", ["only.pdf"]) == "only.pdf"
 
@@ -95,6 +102,13 @@ def test_select_sources_for_compare_does_not_match_dotted_filename_variants():
     assert select_sources_for_compare("对比 data.v2.pdf 和 b.pdf", sources) == ["data.v2.pdf", "b.pdf"]
     assert select_sources_for_compare("对比 data.pdf 和 b.pdf", sources) == ["data.pdf", "b.pdf"]
     assert select_sources_for_compare("对比 data.pdf.old 和 b.pdf", sources) == []
+
+
+def test_select_sources_for_compare_does_not_match_cjk_stem_inside_compound_word():
+    sources = ["技术方案.pdf", "数据报告.pdf"]
+
+    assert select_sources_for_compare("对比 技术方案 和 数据报告", sources) == ["技术方案.pdf", "数据报告.pdf"]
+    assert select_sources_for_compare("对比技术方案设计规范与数据报告体系", sources) == []
 
 
 def test_bm25_retriever_exposes_indexed_document_loader(tmp_path):

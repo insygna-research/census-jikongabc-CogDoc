@@ -2,6 +2,7 @@ from agents.query_rewriter import QueryRewriteAgent, QueryRewriteOutput
 from agents.qa_generator import Generator
 
 class _RaisingLLM:
+    # 模拟本地模型结构化输出不可用，验证重写链路必须降级到原始问题。
     def with_structured_output(self, schema, **kwargs):
         assert kwargs["method"] == "json_mode"
         return self
@@ -10,6 +11,7 @@ class _RaisingLLM:
         raise RuntimeError("LLM 暂不可用")
 
 class _OkLLM:
+    # 模拟结构化输出成功，避免测试依赖真实 LLM。
     def __init__(self, queries):
         self._queries = queries
 

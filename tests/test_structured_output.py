@@ -1,6 +1,5 @@
 from langchain_core.messages import AIMessage
 from pydantic import BaseModel
-
 from agents.structured_output import _METHOD_CACHE, _extract_json_object, invoke_structured
 
 

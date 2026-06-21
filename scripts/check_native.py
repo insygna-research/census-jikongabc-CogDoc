@@ -15,6 +15,8 @@ REQUIRED_SYMBOLS = (
     "scan_pdf_manifest_native",
     "rrf_fusion_native",
     "validate_citations_native",
+    "tokenize_mixed_text_native",
+    "Bm25Index",
 )
 
 
