@@ -15,7 +15,7 @@ def _llm_cache_key(llm) -> str:
 
 
 def _auto_methods_for_llm(llm) -> list[str]:
-    # Known local OpenAI-compatible servers often reject response_format variants; raw JSON avoids wasted requests.
+    # 本地部署的兼容 OpenAI 接口的服务端，大多会拒绝各类 response_format 格式限定参数；直接返回原始 JSON 可避免无效请求损耗。
     base_url = str(getattr(llm, "openai_api_base", "") or getattr(llm, "base_url", "")).lower()
     model = str(getattr(llm, "model_name", "") or getattr(llm, "model", "")).lower()
 
