@@ -1,3 +1,5 @@
+import time
+
 from agents import compare_generator, compare_profile
 from graph import workflow
 from graph.subgraphs import compare
@@ -462,6 +464,43 @@ def test_citation_node_accepts_all_no_evidence_table(monkeypatch):
     assert "- **b.pdf**：文档中未明确说明。" in result["answer"]
     assert "引用校验警告" not in result["answer"]
     assert result["critique"] == ""
+
+
+class FakeJitterLLM:
+    # 每次调用睡随机抖动时长，放大并发完成乱序，用于验证回填保序。
+    def __init__(self):
+        self._counter = 0
+
+    def invoke(self, messages):
+        self._counter += 1
+        time.sleep(0.04 if self._counter % 2 else 0.01)
+        return FakeMessage("该维度内容来自文档。")
+
+
+def test_document_profile_node_preserves_order_under_concurrency(monkeypatch):
+    monkeypatch.setattr(compare_profile.Generator, "_get_client", lambda is_local = False: FakeJitterLLM())
+
+    sources = ["a.pdf", "b.pdf", "c.pdf"]
+    dimensions = [
+        {"dimension_id": "method", "title": "方法", "instruction": "概括方法"},
+        {"dimension_id": "data", "title": "数据", "instruction": "概括数据"},
+        {"dimension_id": "metrics", "title": "指标", "instruction": "概括指标"},
+    ]
+    result = document_profile_node(
+        {
+            "query": "对比这些文档",
+            "compare_sources": sources,
+            "compare_docs_by_source": {s: [_doc(s, i + 1, 0)] for i, s in enumerate(sources)},
+            "compare_dimensions": dimensions,
+            "is_local": False,
+        }
+    )
+
+    # 列序 == sources 顺序，每列行序 == dimensions 顺序，不受并发完成顺序影响。
+    assert [profile["source"] for profile in result["document_profiles"]] == sources
+    for profile in result["document_profiles"]:
+        assert [cell["dimension_id"] for cell in profile["cells"]] == ["method", "data", "metrics"]
+        assert all(cell["source"] == profile["source"] for cell in profile["cells"])
 
 
 def test_workflow_routes_to_compare_subgraph_smoke(monkeypatch):

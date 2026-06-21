@@ -1,4 +1,6 @@
+import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Iterable, List, Tuple
 from langchain_core.messages import HumanMessage, SystemMessage
 from agents.citation_validator import CitationValidatorAgent
@@ -10,6 +12,25 @@ from tools.tokenizer import tokenize_mixed_text
 MAX_SECTION_CONTEXT_CHUNKS = 8
 LOCAL_LARGE_SECTION_CONTEXT_CHUNKS = 6
 CITATION_PATTERN = re.compile(r'[\[［]\s*([^:：\]］]+?)\s*[:：]\s*[pPｐＰ]?\s*([0-9０-９]+)\s*[\]］]')
+
+# 云端逐单元 LLM 调用相互独立，并发执行降低 Summary/Compare 端到端延迟；本地走串行。
+CLOUD_SECTION_MAX_WORKERS = int(os.getenv("CLOUD_SECTION_MAX_WORKERS", "6"))
+
+
+def resolve_section_workers(is_local: bool, task_count: int) -> int:
+    # 本地 Ollama 并发会放大显存/内存压力，退回串行；单任务无需起线程池。
+    if task_count <= 1 or is_local:
+        return 1
+    return min(task_count, CLOUD_SECTION_MAX_WORKERS)
+
+
+def run_section_cells(tasks: List, worker: Callable, is_local: bool) -> List:
+    # ThreadPoolExecutor.map 按输入顺序返回结果，与完成先后无关，保证列序/章节序确定。
+    workers = resolve_section_workers(is_local, len(tasks))
+    if workers == 1:
+        return [worker(task) for task in tasks]
+    with ThreadPoolExecutor(max_workers = workers) as executor:
+        return list(executor.map(worker, tasks))
 
 
 def tokenize_for_section(text: str) -> set[str]:
@@ -297,10 +318,9 @@ class SectionSummaryAgent:
             return {"summary_section_results": []}
 
         llm = Generator._get_client(is_local = is_local)
-        results: List[SummarySectionResult] = []
         doc_tokens = [(doc, tokenize_for_section(doc["text"])) for doc in docs]
 
-        for plan in plans:
+        def build_section_result(plan: SummarySectionPlan) -> SummarySectionResult:
             content, evidence = generate_section_cell(
                 llm,
                 source,
@@ -312,15 +332,14 @@ class SectionSummaryAgent:
                 _summary_messages,
                 _summary_retry_messages,
             )
-            results.append(
-                SummarySectionResult(
-                    section_id = plan["section_id"],
-                    title = plan["title"],
-                    content = content,
-                    evidence = evidence,
-                )
+            return SummarySectionResult(
+                section_id = plan["section_id"],
+                title = plan["title"],
+                content = content,
+                evidence = evidence,
             )
 
+        results = run_section_cells(plans, build_section_result, is_local)
         return {"summary_section_results": results}
 
 

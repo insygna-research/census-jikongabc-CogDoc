@@ -1,8 +1,9 @@
-from typing import List
+from typing import List, Tuple
 from langchain_core.messages import HumanMessage, SystemMessage
 from agents.qa_generator import Generator
 from agents.summary_generator import (
     generate_section_cell,
+    run_section_cells,
     tokenize_for_section,
 )
 from graph.state import CompareDimensionPlan, CompareCell, DocumentProfile, RetrievedDoc, SummarySectionPlan
@@ -142,42 +143,51 @@ class DocumentProfileAgent:
             return {"document_profiles": [], "compare_dimensions": dimensions}
 
         llm = Generator._get_client(is_local = is_local)
-        profiles: List[DocumentProfile] = []
 
+        # 把每个 (文档, 维度) cell 拍平成独立任务；source-major / dimension-minor 顺序
+        # 与回填顺序一致，配合 run_section_cells 的保序返回，结果列序/行序与串行相同。
+        tasks: List[Tuple[str, CompareDimensionPlan, List[RetrievedDoc], List]] = []
         for source in sources:
             docs = docs_by_source.get(source, [])
             if not docs:
                 continue
-
             doc_tokens = [(doc, tokenize_for_section(doc["text"])) for doc in docs]
-            cells: List[CompareCell] = []
-
             for dimension in dimensions:
-                plan = _dimension_as_section_plan(dimension)
-                # 每个 cell 走 Summary 共享的证据绑定和无依据规则。
-                content, evidence = generate_section_cell(
-                    llm,
-                    source,
-                    plan,
-                    docs,
-                    query,
-                    is_local,
-                    doc_tokens,
-                    _compare_messages,
-                    _compare_retry_messages,
-                    max_chunks = LOCAL_COMPARE_CELL_CONTEXT_CHUNKS if is_local else COMPARE_CELL_CONTEXT_CHUNKS,
-                )
+                tasks.append((source, dimension, docs, doc_tokens))
 
-                cells.append(
-                    CompareCell(
-                        dimension_id = dimension["dimension_id"],
-                        source = source,
-                        content = content,
-                        evidence = evidence,
-                    )
-                )
+        def build_cell(task: Tuple[str, CompareDimensionPlan, List[RetrievedDoc], List]) -> CompareCell:
+            source, dimension, docs, doc_tokens = task
+            plan = _dimension_as_section_plan(dimension)
+            # 每个 cell 走 Summary 共享的证据绑定和无依据规则。
+            content, evidence = generate_section_cell(
+                llm,
+                source,
+                plan,
+                docs,
+                query,
+                is_local,
+                doc_tokens,
+                _compare_messages,
+                _compare_retry_messages,
+                max_chunks = LOCAL_COMPARE_CELL_CONTEXT_CHUNKS if is_local else COMPARE_CELL_CONTEXT_CHUNKS,
+            )
+            return CompareCell(
+                dimension_id = dimension["dimension_id"],
+                source = source,
+                content = content,
+                evidence = evidence,
+            )
 
-            profiles.append(DocumentProfile(source = source, cells = cells))
+        cells = run_section_cells(tasks, build_cell, is_local)
+
+        # dict 插入序保 source 顺序，组内 append 保维度顺序。
+        cells_by_source: dict[str, List[CompareCell]] = {}
+        for (source, *_), cell in zip(tasks, cells):
+            cells_by_source.setdefault(source, []).append(cell)
+        profiles: List[DocumentProfile] = [
+            DocumentProfile(source = source, cells = cells_by_source[source])
+            for source in cells_by_source
+        ]
 
         return {
             "compare_dimensions": dimensions,
