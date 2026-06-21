@@ -5,27 +5,27 @@ from graph.state import SummarySectionPlan
 DEFAULT_SUMMARY_SECTIONS: List[SummarySectionPlan] = [
     {
         "section_id": "research_question",
-        "title": "研究问题",
-        "instruction": "概括文档要解决的核心问题、任务背景与目标，即“为什么做、做什么”；方法与结果留给后续章节。",
+        "title": "背景与目标",
+        "instruction": "概括文档要解决的核心问题、任务背景与目标，即“为什么做、做什么”；若文档是通知、规程或赛事文件，则概括发布背景、举办目标与面向对象。",
     },
     {
         "section_id": "method",
-        "title": "方法与方案",
-        "instruction": "概括文档采用的方法、系统设计、关键流程或技术路线，即“怎么做”；不写实验数据与最终结论。",
+        "title": "方案与流程",
+        "instruction": "概括文档采用的方法、系统设计、关键流程、组织方式或技术路线，即“怎么做”；赛事/通知类文档可概括赛制、组别、模块或实施安排。",
     },
     {
         "section_id": "experiment_or_requirement",
-        "title": "实验与要求",
-        "instruction": "概括实验设置、评价指标、提交要求或约束条件，侧重可操作的条件与衡量方式；不重复方法本身。",
+        "title": "规则与要求",
+        "instruction": "概括实验设置、评价指标、参赛要求、提交要求、奖项规则或约束条件，侧重可操作的条件与衡量方式；不重复方法本身。",
     },
     {
         "section_id": "conclusion",
-        "title": "结论与价值",
-        "instruction": "概括文档已得出的结论、预期成果与应用价值；只写结论性判断，不复述方法过程与实验细节。",
+        "title": "价值与产出",
+        "instruction": "概括文档已得出的结论、预期成果、培养价值、应用价值或获奖产出；只写结论性判断，不复述方法过程与细节。",
     },
     {
         "section_id": "limitations",
-        "title": "局限与注意事项",
+        "title": "限制与注意事项",
         "instruction": "概括文档明确提到的限制、风险、注意事项或未覆盖范围；仅限文档显式说明的内容，不要自行推断。",
     },
 ]

@@ -73,6 +73,7 @@ class SummarySectionResult(TypedDict):
     section_id: str
     title: str
     content: str
+    evidence: NotRequired[List[Evidence]]
 
 class GraphState(TypedDict):
     # GraphState 是 LangGraph 节点间传递的全局状态。

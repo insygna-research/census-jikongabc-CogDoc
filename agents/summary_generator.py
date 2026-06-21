@@ -8,6 +8,7 @@ from tools.tokenizer import tokenize_mixed_text
 
 
 MAX_SECTION_CONTEXT_CHUNKS = 8
+LOCAL_LARGE_SECTION_CONTEXT_CHUNKS = 6
 CITATION_PATTERN = re.compile(r'[\[［]\s*([^:：\]］]+?)\s*[:：]\s*[pPｐＰ]?\s*([0-9０-９]+)\s*[\]］]')
 
 
@@ -126,6 +127,38 @@ def build_summary_evidence(docs: List[RetrievedDoc]) -> List[Evidence]:
     ]
 
 
+def section_context_limit(is_local: bool, doc_count: int) -> int:
+    # 本地模型按文档长度分档，避免长文档 4k context 截断，同时不过度牺牲摘要覆盖面。
+    if is_local and doc_count > 16:
+        return LOCAL_LARGE_SECTION_CONTEXT_CHUNKS
+    return MAX_SECTION_CONTEXT_CHUNKS
+
+
+def collect_section_evidence(
+    results: List[SummarySectionResult],
+    fallback_docs: List[RetrievedDoc],
+) -> List[Evidence]:
+    # 顶层 evidence 汇总各章节实际使用的 chunk；旧结果缺字段时回退全文 docs。
+    seen = set()
+    evidence: List[Evidence] = []
+
+    for result in results:
+        for item in result.get("evidence", []):
+            key = (
+                item.get("chunk_id", ""),
+                item.get("source", ""),
+                item.get("page_start", item.get("page", 0)),
+                item.get("page_end", item.get("page", 0)),
+                item.get("chunk_index", -1),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            evidence.append(item)
+
+    return evidence or build_summary_evidence(fallback_docs)
+
+
 class SectionSummaryAgent:
     @staticmethod
     def summarize_sections(state: dict) -> dict:
@@ -144,7 +177,8 @@ class SectionSummaryAgent:
         doc_tokens = [(doc, tokenize_for_section(doc["text"])) for doc in docs]
 
         for plan in plans:
-            section_docs = select_section_docs(docs, plan, query, doc_tokens = doc_tokens)
+            max_chunks = section_context_limit(is_local, len(docs))
+            section_docs = select_section_docs(docs, plan, query, doc_tokens = doc_tokens, max_chunks = max_chunks)
             context = format_summary_context(section_docs)
             messages = [
                 SystemMessage(
@@ -156,11 +190,14 @@ class SectionSummaryAgent:
                         "2. 不要输出引用标签、页码、文件名或 <Document> 标签，程序会在生成后自动绑定引用。\n"
                         "3. 不要使用占位词，不要输出章节标题，不要解释规则。\n\n"
                         "【范围与篇幅】\n"
+                        "- 章节名是内容归类维度，不代表文档必须是论文；通知、规程、赛事规则也要按最接近维度归纳。\n"
                         "- 只写当前指定章节的内容，不复述其它章节、不重复章节标题、不加前言/结语/过渡语。\n"
                         "- 输出 2-4 句中文短句。\n\n"
                         "【无依据时】\n"
-                        "- 若给定片段中确实找不到与本章节相关的内容，只输出一行：文档中未明确说明"
-                        "（不加引用、不编造）。\n\n"
+                        "- 只有当所有给定片段都没有任何可归入本章节的信息时，才输出一行：文档中未明确说明"
+                        "（不加引用、不编造）。\n"
+                        "- 若片段中有目标、对象、赛制、模块、要求、评分、奖项、日程、注意事项等赛事/通知信息，"
+                        "必须按章节聚焦摘要，不要因为不是论文实验而输出“文档中未明确说明”。\n\n"
                         "【输出】只输出摘要正文（或“文档中未明确说明”），"
                         "不要输出章节标题、不要解释、不要任何额外文字。"
                     )
@@ -178,12 +215,41 @@ class SectionSummaryAgent:
                 ),
             ]
             response = llm.invoke(messages)
-            content = attach_section_citations(response.content, section_docs)
+            content = response.content
+            if is_local and section_docs and is_no_evidence_summary(content):
+                retry_messages = [
+                    SystemMessage(
+                        content = (
+                            "你是一位严谨的中文资料整理助手。下面片段已经由程序筛选为与指定摘要维度相关。"
+                            "你的任务是从片段中提炼事实，不要因为文档不是论文而回答“文档中未明确说明”。\n\n"
+                            "【要求】\n"
+                            "1. 只能依据 <Document> 标签内文字。\n"
+                            "2. 若能找到任何与该维度相关的目标、对象、流程、规则、要求、评分、奖项、日程、注意事项或价值，"
+                            "就写 2-3 句中文摘要。\n"
+                            "3. 不要输出章节标题、引用、页码或解释。\n"
+                            "4. 只有片段完全没有相关事实时，才输出：文档中未明确说明。"
+                        )
+                    ),
+                    HumanMessage(
+                        content = (
+                            f"【目标文档】{source}\n"
+                            f"【摘要维度】{plan['title']}\n"
+                            f"【维度说明】{plan['instruction']}\n"
+                            f"【用户意图】{query}\n\n"
+                            f"【参考资料开始】\n{context}\n【参考资料结束】\n\n"
+                            "请重新提炼该维度摘要。"
+                        )
+                    ),
+                ]
+                content = llm.invoke(retry_messages).content
+
+            content = attach_section_citations(content, section_docs)
             results.append(
                 SummarySectionResult(
                     section_id = plan["section_id"],
                     title = plan["title"],
                     content = content,
+                    evidence = build_summary_evidence(section_docs),
                 )
             )
 
@@ -222,6 +288,6 @@ class GlobalSummaryAgent:
             "answer": answer,
             "messages": [{"role": "assistant", "content": answer}],
             "sources": [doc["meta"] for doc in docs],
-            "evidence": build_summary_evidence(docs),
+            "evidence": collect_section_evidence(results, docs),
             "critique": check_res["critique"],
         }

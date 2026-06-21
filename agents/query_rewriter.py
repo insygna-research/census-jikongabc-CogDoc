@@ -1,6 +1,7 @@
 from typing import List
 from pydantic import BaseModel, Field
 from agents.generator import Generator
+from agents.structured_output import invoke_structured
 
 class QueryRewriteOutput(BaseModel):
     # 改写结果限定在少量高价值检索查询内。
@@ -20,9 +21,6 @@ class QueryRewriteAgent:
         if not query:
             return {"rewritten_queries": []}
 
-        llm = Generator._get_client(is_local = is_local)
-        structured_llm = llm.with_structured_output(QueryRewriteOutput)
-
         system_prompt = (
             "你是一位 RAG 检索优化专家，负责将用户原始提问改写为更适合在向量数据库（Vector Search）和关键词引擎（BM25）中精确召回的检索语句。\n\n"
             "【任务定义】\n"
@@ -32,6 +30,9 @@ class QueryRewriteAgent:
             "2. 每条改写语句之间须有明显差异，不得重复或近义替换。\n"
             "3. 不得引入原问题中不存在的概念或实体。\n"
             "4. 若原问题已是简洁的关键词形式，可将其作为第一条直接输出，再补充 1-2 条不同角度的改写。\n\n"
+            "【输出格式】\n"
+            "只输出 JSON 对象，不要 Markdown，不要解释。JSON 示例：\n"
+            "{\"queries\":[\"大模型 医疗影像诊断 应用方法\",\"医学图像分析 深度学习 临床部署\"]}\n\n"
             "【示例】\n"
             "原问题：大模型在医疗影像诊断中是怎么应用的？\n"
             "改写输出：\n"
@@ -41,7 +42,8 @@ class QueryRewriteAgent:
         )
 
         try:
-            output = structured_llm.invoke([
+            llm = Generator._get_client(is_local = is_local)
+            output = invoke_structured(llm, QueryRewriteOutput, [
                 {
                     "role": "system",
                     "content": system_prompt

@@ -2,7 +2,8 @@ from agents.query_rewriter import QueryRewriteAgent, QueryRewriteOutput
 from agents.generator import Generator
 
 class _RaisingLLM:
-    def with_structured_output(self, schema):
+    def with_structured_output(self, schema, **kwargs):
+        assert kwargs["method"] == "json_mode"
         return self
 
     def invoke(self, messages):
@@ -12,7 +13,8 @@ class _OkLLM:
     def __init__(self, queries):
         self._queries = queries
 
-    def with_structured_output(self, schema):
+    def with_structured_output(self, schema, **kwargs):
+        assert kwargs["method"] == "json_mode"
         return self
 
     def invoke(self, messages):

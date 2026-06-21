@@ -1,8 +1,30 @@
 import os
+from pathlib import Path
 from typing import List
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from graph.state import RetrievedDoc
+
+
+def _load_local_env() -> None:
+    # 轻量读取项目根目录 .env；真实密钥只留在本地文件或进程环境中。
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding = "utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
+
+
+_load_local_env()
+
 
 class Generator:
     # 不同后端和模型使用独立客户端缓存。
@@ -10,7 +32,7 @@ class Generator:
 
     CLOUD_MODEL = os.getenv("LLM_MODEL_NAME", "deepseek-chat")
     CLOUD_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1")
-    CLOUD_API_KEY = os.getenv("LLM_API_KEY", "your-cloud-api-key-here")
+    CLOUD_API_KEY = os.getenv("LLM_API_KEY", "")
 
     OLLAMA_MODEL = os.getenv("OLLAMA_MODEL_NAME", "qwen2.5:7b")
     OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
@@ -29,6 +51,11 @@ class Generator:
             api_key = cls.CLOUD_API_KEY
             model_name = custom_model_name if custom_model_name else cls.CLOUD_MODEL
             client_key = f"cloud_{base_url}_{model_name}"
+            if not api_key:
+                raise RuntimeError(
+                    "LLM_API_KEY is not configured. Set it in your shell environment "
+                    "or create a local .env file from .env.example."
+                )
 
         if client_key not in cls._clients:
             cls._clients[client_key] = ChatOpenAI(

@@ -1,12 +1,42 @@
+import re
 from pydantic import BaseModel, Field
 from langchain_core.runnables import RunnableConfig
 from agents.generator import Generator
+from agents.structured_output import invoke_structured
 from typing import Literal
+
 
 class RouteDecision(BaseModel):
     # LLM 只能返回工作流支持的任务类型。
     task_type: Literal["qa", "summary", "compare", "unknown"] = Field(description = "任务类型: 'qa', 'summary', 'compare', 'unknown'")
     reason: str = Field(description = "做出该路由决策的清晰理由。")
+
+
+def classify_intent_by_rule(query: str) -> RouteDecision:
+    # LLM 结构化输出不可用时的确定性兜底，不能把明确摘要/对比请求打到 QA。
+    normalized = (query or "").strip().lower()
+    if not normalized:
+        return RouteDecision(task_type = "unknown", reason = "空问题")
+
+    compare_patterns = [
+        r"(对比|比较).+(和|与|跟|及|以及|vs|versus).+",
+        r".+(和|与|跟|及|以及|vs|versus).+(对比|比较|区别|差异|异同)",
+        r"(区别|差异|异同).+(是什么|有哪些|在哪|如何|怎么)",
+        r"compare .+ (and|with|vs|versus) .+",
+    ]
+    if any(re.search(pattern, normalized) for pattern in compare_patterns):
+        return RouteDecision(task_type = "compare", reason = "命中对比关键词")
+
+    summary_patterns = [
+        r"^(请|帮我|给我|麻烦)?(总结|摘要|概括)(一下|下)?[：:\s]?.+",
+        r"^.+(全文|整篇|这篇|该文档|这个文档).*(总结|摘要|概括)$",
+        r"^(summarize|summary)\b.+",
+    ]
+    if any(re.search(pattern, normalized) for pattern in summary_patterns):
+        return RouteDecision(task_type = "summary", reason = "命中摘要关键词")
+
+    return RouteDecision(task_type = "qa", reason = "规则兜底为问答")
+
 
 class RouterAgent:
     @staticmethod
@@ -25,9 +55,6 @@ class RouterAgent:
                     query = msg.content  # 提取消息内容
                     break
 
-        llm = Generator._get_client(is_local = is_local)
-        structured_llm = llm.with_structured_output(RouteDecision)  # 开启结构化输出
-
         system_prompt = (
             "你是一位任务路由专家，负责将用户提问分配至对应的处理子图。\n"
             "知识库中存放了多种领域的文档，用户提问的范围可能很广。\n\n"
@@ -39,13 +66,17 @@ class RouterAgent:
             "【决策要点】\n"
             "- 只要提问中含有实质性的信息诉求，无论措辞是'需要什么'、'如何准备'、'怎么学'、'是什么'，均选 qa。\n"
             "- 不确定时，选 qa，让检索系统判断能否找到相关内容。\n"
-            "- reason 字段用一句话简要说明分配依据，不超过 30 字。"
+            "- reason 字段用一句话简要说明分配依据，不超过 30 字。\n\n"
+            "【输出格式】\n"
+            "只输出 JSON 对象，不要 Markdown，不要解释。JSON 示例：\n"
+            "{\"task_type\":\"qa\",\"reason\":\"用户询问信息\"}"
         )
 
         user_content = f"请分析以下用户提问的路由意图：\n{query}"
         
         try:
-            decision = structured_llm.invoke([
+            llm = Generator._get_client(is_local = is_local)
+            decision = invoke_structured(llm, RouteDecision, [
                 {
                     "role": "system",
                     "content": system_prompt
@@ -65,10 +96,14 @@ class RouterAgent:
             }  # 返回路由结果
 
         except Exception as e:
+            fallback = classify_intent_by_rule(query)
             return {
                 "query": query,
                 "doc_id": doc_id,
                 "is_local": is_local,
-                "task_type": "qa",
-                "router_reason": f"结构化路由解析异常，安全 fallback 到标准 QA 子图。错误详情: {str(e)}"
-            }  # 异常时默认走QA
+                "task_type": fallback.task_type,
+                "router_reason": (
+                    f"结构化路由解析异常，已按规则 fallback 到 {fallback.task_type}。"
+                    f"规则原因：{fallback.reason}。错误详情: {str(e)}"
+                )
+            }  # 异常时按关键词规则兜底
