@@ -8,7 +8,7 @@
 
 ## 这是什么
 
-CogDoc 在你自己的 PDF 库上做问答。一条 [LangGraph](https://langchain-ai.github.io/langgraph/) 工作流负责意图路由、问题改写、检索与重排,最后生成**每处事实都带 `[source:Pn]` 引用**的回答。检索融合、引用规则、manifest 哈希放在通过 [PyO3](https://pyo3.rs/) 暴露的小型 [Rust](https://www.rust-lang.org/) 核心里;chunk 身份是 Python 侧带版本的共享契约,贯穿整条链路。
+CogDoc 可以在你自己的 PDF 库上做问答、总结单篇文档、对比多篇文档。一条 [LangGraph](https://langchain-ai.github.io/langgraph/) 工作流先把意图路由到 QA、Summary 或 Compare,再让每条生成结论都绑定回 `[source:Pn]` 引用。分词、BM25 打分、检索融合、引用规则、manifest 哈希放在通过 [PyO3](https://pyo3.rs/) 暴露的小型 [Rust](https://www.rust-lang.org/) 核心里;chunk 身份是 Python 侧带版本的共享契约,贯穿整条链路。
 
 ## 为什么需要它
 
@@ -37,8 +37,9 @@ Python 依赖拆成两份:[requirements.txt](requirements.txt) 放运行时依�
 
 ## 你会得到什么
 
-- **带可验证引用的有据回答。** 生成被约束在召回的 `<Document>` 块内;捏造的文件/页码标签会被 Rust 校验器抓出并重新生成,直到 `max_iteration_count`。
-- **带确定性融合的混合检索。** 向量(Chroma + BGE)与 BM25(jieba)两路召回,由 Rust RRF kernel 以稳定、可复现的 tie-break 合并。
+- **带可验证引用的有据回答。** 生成被约束在召回的 `<Document>` 块内;捏造的文件/页码标签会被 Rust 校验器抓出并重新生成,直到 `max_iteration_count`。Summary 与 Compare 复用同一套校验器,不开豁免。
+- **结构化摘要与多文档对比。** Summary 加载一篇点名文档,按固定章节生成带确定性引用的摘要;Compare 加载两篇或更多点名文档,先建逐文档 profile,再按维度输出带引用的对比块。
+- **打分路径全 native 的混合检索。** 向量(Chroma + BGE)与 BM25 两路召回由 Rust RRF kernel 以稳定 tie-break 合并;分词(`jieba-rs`)与 BM25 打分(`Bm25Index`)均为 native,且与各自的旧 Python 实现逐位对齐。
 - **只在必要时重建的索引。** 未变化的语料跳过重建;PDF 变化或 chunk 契约 bump 才触发干净重索引。
 
 ## 当前状态
@@ -48,11 +49,12 @@ Python 依赖拆成两份:[requirements.txt](requirements.txt) 放运行时依�
 | 索引链路(parse → chunk → index → manifest) | 已实现 |
 | 意图路由 | 已实现 |
 | 问题改写 + 语义漂移守卫 | 已实现 |
-| 混合检索(Vector + BM25 + Rust RRF) | 已实现 |
+| 混合检索(Vector + native BM25 + Rust RRF) | 已实现 |
 | 交叉编码器重排 | 已实现 |
 | 引用校验 + 自愈循环 | 已实现 |
-| Rust 原生核心 | 已实现 |
-| Summary / Compare 子图 | 占位节点 |
+| Rust 原生核心(manifest、RRF、citation、分词、BM25) | 已实现 |
+| Summary 子图(单文档结构化摘要) | 已实现 |
+| Compare 子图(多文档对比) | 已实现 |
 | `api/`、`frontend/` | 空占位包 |
 
 ## 架构
@@ -63,12 +65,16 @@ user question
   -> QA subgraph
        rewrite_node          QueryRewriteAgent: 1–3 条关键词查询
     -> verify_rewrite_node   RewriteVerifyAgent: cosine 漂移过滤
-    -> retrieve_node         HybridRetriever: 每条 query 走 Vector + BM25,Rust RRF 融合
+    -> retrieve_node         HybridRetriever: 每条 query 走 Vector + native BM25,Rust RRF 融合
     -> rerank_node           BGEReranker: cross-encoder 取 top_n
     -> generate_node         Generator: 带 [source:Pn] 标签的受约束回答
     -> citation_node         CitationValidatorAgent: Rust 校验 + Python critique
        (generate <-> citation 循环至 max_iteration_count,否则 END)
+  -> Summary 子图            document_loader -> section_planner -> section_summary -> global_summary
+  -> Compare 子图            document_loader -> document_profile -> compare_table -> citation
 ```
+
+Summary 为单个点名文档生成固定章节结构化摘要;Compare 为每篇文档在固定维度上建 profile,再按维度渲染带引用的 Markdown 对比块。两者都从 chunk 元数据确定性地绑定 `[source:Pn]` 引用,并跑与 QA 同一套 `validate_citations_native` 校验——任何子图都不豁免。
 
 Python 层负责图编排、Prompt、模型客户端、索引和控制台。Rust 层(`rust_core`)负责确定性 kernel,不随 Agent 逻辑漂移,并独立做单元测试。
 
@@ -80,7 +86,7 @@ Python 层负责图编排、Prompt、模型客户端、索引和控制台。Rust
 2. **比对** — `manifests_match` 仅当 `doc_id`、`chunk_identity_version` 及每个 `{name, sha256}` 都与已存 manifest 一致时才复用索引;任一不匹配都强制重建。
 3. **解析** — `smart_parse`(PyMuPDF)抽取页文本,按文本块中心 x 坐标重排双栏布局,对疑似扫描页打 `is_ocr_fallback` 标记。
 4. **切块** — `chunk_paper` 以 600 字符 / 60 重叠(最小 30)滑窗切过页文本流,通过 `bisect` 把每个 chunk 映射回页跨度,并赋予稳定的 `chunk_id`。
-5. **建索引** — chunk 写入 Chroma(向量)和 pickle 持久化的 BM25Okapi 存储;`save_index_manifest` 落盘 manifest。
+5. **建索引** — chunk 写入 Chroma(向量)和 pickle 持久化的分词语料;加载时由 native `Bm25Index` 从该语料重建。`save_index_manifest` 落盘 manifest。分词走 `tokenize_mixed_text_native`(`jieba-rs`)。
 
 **Chunk 身份契约:**
 
@@ -92,13 +98,19 @@ chunk_id = sha256:{source_sha256}:p{page_start}-p{page_end}:c{local_chunk_index}
 
 ## 查询链路
 
-- **意图路由** — `RouterAgent` 要求 LLM 返回结构化 `task_type ∈ {qa, summary, compare, unknown}`,任何解析异常都回退到 `qa`。目前只有 `qa` 接到了真实子图。
+- **意图路由** — `RouterAgent` 要求 LLM 返回结构化 `task_type ∈ {qa, summary, compare, unknown}`,任何解析异常都按关键词规则回退。`qa`、`summary`、`compare` 都已接到真实子图。
 - **改写 + 漂移守卫** — `QueryRewriteAgent` 生成 1–3 条关键词查询(pydantic 结构化输出)。`RewriteVerifyAgent` 一次批量 embed `[原问题] + 改写`,保留 `cosine >= rewrite_similarity_threshold`(默认 `0.5`)的改写,把保留/丢弃写入 `steps_trace`;若全被丢弃则只用原问题。
 - **混合检索 + RRF** — 每条 query 下两路各超召 `top_k * 3`(QA 用 `top_k = 9` → 每路 27);`rrf_fusion_native`(Rust,`k = 60`)计算 `score(d) = Σ_c 1 / (k + rank_c(d))`,合并共享同一 `chunk_id` 的命中,并按分数降序、身份键升序排序保证确定性。
 - **重排** — `BGEReranker`(`bge-reranker-v2-m3`)对 `(原问题, doc)` 打分并取 `top_n = 3`;改写不会影响最终排序。
 - **生成 + 引用自愈** — `Generator`(OpenAI 兼容;云端 `deepseek-chat` 或本地 `qwen2.5:7b`,`temperature = 0.2`)把文档包装为 `<Document source=… page=… chunk_id=…>` 并强制 `[source:Pn]` 标签。`validate_citations_native`(Rust)返回结构化的 `missing_citations` / `invalid_sources` / `invalid_pages`;`citation_node` 把失败转成 critique,循环 `generate → citation` 至 `max_iteration_count`(默认 `2`)。只有通过校验的回答才会打印。
 
+**Summary 子图** — `document_loader` 选定一个点名文档(若语料库只有一篇则可自动选中;多文档歧义 query 返回可操作提示),`section_planner` 默认固定为背景与目标、方案与流程、规则与要求、价值与产出、限制与注意事项五个章节(也可由 state 传入自定义标题),`section_summary` 逐章节生成一段短摘要(模型只写正文,`[source:Pn]` 由程序按所用 chunk 确定性绑定),`global_summary` 整合答案并复跑引用校验。无依据章节不带引用、不带 evidence。
+
+**Compare 子图** — `document_loader` 要求显式点名至少 2 篇文档;本地 Ollama 模式最多同时对比 2 篇。`document_profile` 在固定维度上逐文档建 profile(云端:方法/数据/指标/优点/限制/适用场景;本地:方法/数据/指标/限制),并复用 Summary 的 cell 原语。`compare_table` 渲染 Markdown 对比块;云端模式会额外生成一段受控短结论,本地模式跳过这次额外调用以降低内存压力。`compare_citation_node` 先单独校验结论,再校验对比块;任一失败都降级为纯对比块并附警告。全无依据的对比不会被误判为缺引用。
+
 ## 使用示例
+
+问答:
 
 ```text
 [本地Ollama] 请输入您的问题 >>> 参加 AI 智能体开发应用赛时，团队需要重点关注哪些提交要求？
@@ -112,36 +124,68 @@ chunk_id = sha256:{source_sha256}:p{page_start}-p{page_end}:c{local_chunk_index}
 
 具体措辞取决于所选模型和本地 PDF 语料。关键契约是:每条事实性陈述都应带有引用,且引用中的文件名和页码必须存在于本轮检索上下文中。
 
+摘要:
+
+```text
+[本地Ollama] 请输入您的问题 >>> 请总结 AI智能体开发应用赛赛事规程260428.pdf
+
+# AI智能体开发应用赛赛事规程260428.pdf 结构化摘要
+
+## 背景与目标
+...
+```
+
+对比:
+
+```text
+[云端API] 请输入您的问题 >>> 请对比 paper-a.pdf 和 paper-b.pdf 的方法和指标
+
+# 多文档对比
+
+## 方法
+- **paper-a.pdf**：...
+- **paper-b.pdf**：...
+```
+
+Summary 在多 PDF 语料库中需要点名目标文件。Compare 需要点名至少两篇文件,可使用完整文件名或明确的 stem;本地 Ollama 模式一次只支持两篇。
+
 ## Rust 原生核心
 
-`rust_core` 是 PyO3/maturin 扩展,通过 `tools.rust_core_loader.ensure_rust_core` 加载;若构建缺失或符号过期,会尽早失败并给出 `maturin develop` 提示。
+`rust_core` 是 PyO3/maturin 扩展,通过 `tools.rust_core_loader.ensure_rust_core` 加载;若构建缺失或符号过期,会尽早失败并给出 `maturin develop` 提示。共暴露五个 native 符号,全部登记在 `scripts/check_native.py`,使 `make check` 能对旧构建报错。
 
-| 函数 | 模块 | 用途 |
+| 符号 | 模块 | 用途 |
 | --- | --- | --- |
 | `scan_pdf_manifest_native` | `scanner.rs` | rayon 并行、缓冲式 SHA-256 计算所有 PDF;size + 哈希 manifest,稳定排序 |
 | `rrf_fusion_native` | `rrf.rs` | 对 vector + BM25 结果做确定性 RRF(`k=60`)融合,以 `chunk_id` 为键 |
 | `validate_citations_native` | `citation.rs` | 结构化引用校验 → `invalid_sources` / `invalid_pages` / `missing_citations` |
+| `tokenize_mixed_text_native` | `tokenizer.rs` | `jieba-rs` 中英混合分词,与旧 Python `jieba` 路径逐 token 对齐 |
+| `Bm25Index`(类) | `bm25.rs` | BM25 索引 + `score_topk`,与 `rank_bm25.BM25Okapi` 逐位对齐,top-k 在 native 端选出 |
 
 ## 项目结构
 
 ```text
 CogDoc/
-├── agents/                  # router、query_rewriter、rewrite_verifier、generator、citation_validator
+├── agents/                  # router、query_rewriter、rewrite_verifier、qa_generator、
+│                            # citation_validator、structured_output、
+│                            # summary_planner、summary_generator、
+│                            # compare_profile、compare_generator
 ├── graph/
-│   ├── state.py             # GraphState / RetrievedDoc / DocMeta / Evidence + 列表 reducer
+│   ├── state.py             # GraphState / RetrievedDoc / DocMeta / Evidence / Summary+Compare 类型
 │   ├── workflow.py          # 顶层图:intent_router -> qa | summary | compare
-│   └── subgraphs/qa.py      # QA 子图接线
+│   └── subgraphs/           # qa.py、summary.py、compare.py
 ├── tools/
 │   ├── parser.py            # PyMuPDF 解析,双栏重排 + OCR fallback 标记
 │   ├── chunker.py           # 字符窗切块 + 页跨度映射
 │   ├── chunk_identity.py    # chunk_id 格式 + 带版本的身份契约
 │   ├── manifest.py          # Manifest IO + 索引复用比对
+│   ├── tokenizer.py         # tokenize_mixed_text_native(jieba-rs)门面
+│   ├── document_loader.py   # Summary/Compare 的 source 选择与 chunk 加载
 │   ├── embedder.py          # bge-small-zh-v1.5(归一化)
 │   ├── reranker.py          # bge-reranker-v2-m3 cross-encoder
 │   ├── rust_core_loader.py  # ensure_rust_core:加载 + 符号校验
-│   └── retriever/           # vector(Chroma)、bm25(jieba)、hybrid(Rust RRF)
-├── rust_core/src/           # lib.rs、scanner.rs、rrf.rs、citation.rs(含 #[cfg(test)] 单测)
-├── scripts/check_native.py  # 原生扩展健康检查
+│   └── retriever/           # vector(Chroma)、bm25(native Bm25Index)、hybrid(Rust RRF)
+├── rust_core/src/           # lib.rs、scanner.rs、rrf.rs、citation.rs、tokenizer.rs、bm25.rs
+├── scripts/check_native.py  # 原生扩展健康检查(5 个必需符号)
 ├── tests/                   # Python 回归测试
 ├── data/                    # 生成的 chroma_db / bm25_db / manifests(运行态数据)
 ├── 测试论文/                 # 默认 PDF 语料目录(用 COGDOC_DOC_DIR 覆盖)
@@ -175,20 +219,14 @@ CogDoc/
 
 测试分层:业务逻辑与 Python↔native API 契约用 Python 覆盖(`tests/`);纯 Rust 逻辑用 `rust_core/src/` 里的 Rust `#[test]`。依赖 native 的 Python 测试在未构建时会 `importorskip` 跳过,完整回归前请先 `make native`。
 
-## 路线图
-
-- **Phase 1: QA 主链路加固** — 保持检索、重排、引用校验、native 检查和测试稳定。
-- **Phase 2: Summary MVP** — 将占位节点替换为单文档结构化摘要子图。
-- **Phase 3: Compare MVP** — 将占位节点替换为多文档对比子图。
-- **Phase 4: API 与前端** — 把当前控制台链路扩展成服务入口和 UI 入口。
-- **Phase 5: 评测与 native 扩展** — 增加回归数据集和质量指标,只在收益明确时继续下沉确定性 kernel。
-
 ## 已知限制
 
 - 当前主要入口仍是 CLI 控制台;`api/` 和 `frontend/` 还是占位包。
-- Summary 与 Compare 已有路由,但真实子图尚未实现。
-- Citation 校验只证明引用的 `source` 和 `page` 物理合法,不证明整句话语义完全正确。
+- Summary 与 Compare 是单遍 MVP:逐章节/逐维度的 LLM 调用串行执行(尚未并发),默认章节/维度集合固定,除非通过 graph state 传入自定义配置。
+- 本地 Compare 有意限制为 2 篇文档、4 个核心维度,并跳过额外结论生成,以降低 Ollama 内存压力。
+- Citation 校验只证明引用的 `source` 和 `page` 物理合法,不证明整句话语义完全正确,也不强制每句都带引用。
 - Rewrite 相似度阈值默认 `0.5`,后续应基于真实数据标定。
+- 暂无离线评测框架,检索/回答质量改动尚不能量化衡量。
 - 本地模型下载依赖网络或已有 Hugging Face 缓存。
 
 ## 故障排查
