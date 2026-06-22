@@ -3,16 +3,7 @@ import copy
 from typing import List
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from graph.state import RetrievedDoc
-
-
-def _detect_default_device() -> str:
-    # 精排模型优先使用可用加速后端。
-    if torch.cuda.is_available():
-        return "cuda"
-    mps_backend = getattr(getattr(torch, "backends", None), "mps", None)
-    if mps_backend is not None and mps_backend.is_available():
-        return "mps"
-    return "cpu"
+from tools.device import required_cuda_free_bytes, resolve_device
 
 
 class BGEReranker:
@@ -21,8 +12,10 @@ class BGEReranker:
     MODEL_NAME = "BAAI/bge-reranker-v2-m3"  # Reranker模型名称
     MAX_LENGTH = 512  # 模型单次处理的最大Token长度保护
 
-    _default_device = _detect_default_device()  # 进程启动时自动选择的运行设备
-    device = _default_device
+    # bge-reranker-v2-m3 权重约 2.3G + 推理活化余量，空闲低于此值回落 CPU，避免 CUDA OOM。
+    REQUIRED_CUDA_FREE_BYTES = required_cuda_free_bytes("RERANKER_MIN_CUDA_FREE_MB", 2800)
+
+    device = None  # None=未显式指定，加载时按空闲显存自动判定；set_device 后固定
 
     @classmethod
     def set_device(cls, device: str) -> None:
@@ -32,7 +25,9 @@ class BGEReranker:
 
     @classmethod
     def default_device(cls) -> str:
-        return cls._default_device
+        return resolve_device(
+            cls.REQUIRED_CUDA_FREE_BYTES, cls.device, cls._model is not None
+        )
 
     @classmethod
     def _get_resources(cls):
@@ -40,6 +35,8 @@ class BGEReranker:
         if cls._tokenizer is None:
             cls._tokenizer = AutoTokenizer.from_pretrained(cls.MODEL_NAME)
         if cls._model is None:
+            if cls.device is None:
+                cls.device = cls.default_device()  # 直连调用也按显存选设备，不退化成 CPU
             cls._model = AutoModelForSequenceClassification.from_pretrained(
                 cls.MODEL_NAME
             )

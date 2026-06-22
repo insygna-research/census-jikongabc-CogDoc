@@ -1,6 +1,6 @@
-import torch
 from sentence_transformers import SentenceTransformer
 from typing import List
+from tools.device import required_cuda_free_bytes, resolve_device
 
 
 class Embedder:
@@ -8,24 +8,17 @@ class Embedder:
     _model = None
     MODEL_NAME = "BAAI/bge-small-zh-v1.5"
 
-    # 自动选择运行设备：NVIDIA GPU -> Apple M系列 -> CPU
-    device = (
-        "cuda"
-        if torch.cuda.is_available()
-        else (
-            "mps"
-            if hasattr(torch, "backends") and torch.backends.mps.is_available()
-            else "cpu"
-        )
-    )
+    # bge-small-zh-v1.5 权重约 0.4G + 批量活化余量，空闲低于此值回落 CPU，避免 CUDA OOM。
+    REQUIRED_CUDA_FREE_BYTES = required_cuda_free_bytes("EMBEDDER_MIN_CUDA_FREE_MB", 800)
+
+    device = "cpu"  # 实际设备在首次加载时按空闲显存动态判定，默认安全回落 CPU
 
     # 加载模型
     @classmethod
     def get_model(cls) -> SentenceTransformer:
         if cls._model is None:
-            cls._model = SentenceTransformer(
-                "BAAI/bge-small-zh-v1.5", device=cls.device
-            )
+            cls.device = resolve_device(cls.REQUIRED_CUDA_FREE_BYTES)
+            cls._model = SentenceTransformer(cls.MODEL_NAME, device=cls.device)
         return cls._model
 
     # 问题向量化
