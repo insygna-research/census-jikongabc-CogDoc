@@ -434,9 +434,13 @@ def main():
 
     print("=" * 60)
     print(f"🚀 RAG 问答控制台 | LangGraph 原生大一统流范式 | 隔离域: {TARGET_DOC_ID}")
-    print("   - 输入 'exit' 或 'quit' 优雅退出问答系统")
+    print("   - 默认自动判别意图（问答 / 总结 / 对比）；也可显式指定：")
+    print("       · /qa <问题>            强制问答")
+    print("       · /summary <文件名>     强制总结指定文档")
+    print("       · /compare <文件A> <文件B> ...  强制对比多篇文档（≥2，本地模式限 2）")
     print("   - 输入 '/local' 快捷切换为 本地 Ollama 调试模式")
     print("   - 输入 '/cloud' 快捷切换为 云端 API 高性能生产模式")
+    print("   - 输入 'exit' 或 'quit' 优雅退出问答系统")
     print("=" * 60)
 
     is_local = True
