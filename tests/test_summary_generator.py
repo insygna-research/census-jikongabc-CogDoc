@@ -35,7 +35,7 @@ def test_select_section_docs_keeps_relevant_chunks_in_original_order():
         docs,
         {"title": "方法与方案", "instruction": "概括方法和系统架构"},
         "总结文档",
-        max_chunks = 2,
+        max_chunks=2,
     )
 
     assert [doc["text"] for doc in selected] == ["模型 方法 架构", "方法 部署 流程"]
@@ -60,8 +60,8 @@ def test_select_section_docs_accepts_precomputed_doc_tokens():
         docs,
         {"title": "方法与方案", "instruction": "概括方法和系统架构"},
         "总结文档",
-        doc_tokens = precomputed,
-        max_chunks = 1,
+        doc_tokens=precomputed,
+        max_chunks=1,
     )
 
     assert [doc["text"] for doc in selected] == ["模型 方法 架构"]
@@ -75,7 +75,7 @@ def test_select_section_docs_falls_back_to_leading_chunks_without_overlap():
         docs,
         {"title": "局限", "instruction": "概括限制"},
         "总结文档",
-        max_chunks = 2,
+        max_chunks=2,
     )
 
     assert [doc["text"] for doc in selected] == ["aaa", "bbb"]
@@ -99,7 +99,9 @@ def test_attach_section_citations_appends_valid_doc_citations():
 
 def test_attach_section_citations_replaces_model_generated_citations():
     # 模型自写引用统一替换为程序引用。
-    result = attach_section_citations("这是摘要内容。[fake.pdf:P99]", [_doc("上下文", 0)])
+    result = attach_section_citations(
+        "这是摘要内容。[fake.pdf:P99]", [_doc("上下文", 0)]
+    )
 
     assert result == "这是摘要内容。[a.pdf:P1]"
 
@@ -117,7 +119,10 @@ def test_attach_section_citations_keeps_no_evidence_variants_plain():
 
     assert attach_section_citations("文档中未明确说明。", docs) == "文档中未明确说明。"
     assert attach_section_citations("文档中未明确说明！", docs) == "文档中未明确说明！"
-    assert attach_section_citations("文档中未明确说明相关内容。", docs) == "文档中未明确说明相关内容。"
+    assert (
+        attach_section_citations("文档中未明确说明相关内容。", docs)
+        == "文档中未明确说明相关内容。"
+    )
 
 
 def test_is_no_evidence_summary_only_matches_no_evidence_prefix():
@@ -145,4 +150,7 @@ def test_no_evidence_marker_then_separate_factual_sentence_is_cited():
 def test_pure_no_evidence_expansion_stays_plain():
     # 纯无依据扩写不补引用。
     assert is_no_evidence_summary("文档中未明确说明相关内容。")
-    assert attach_section_citations("文档中未明确说明相关内容。", [_doc("上下文", 0)]) == "文档中未明确说明相关内容。"
+    assert (
+        attach_section_citations("文档中未明确说明相关内容。", [_doc("上下文", 0)])
+        == "文档中未明确说明相关内容。"
+    )

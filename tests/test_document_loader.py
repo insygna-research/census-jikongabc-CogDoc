@@ -62,8 +62,13 @@ def test_select_source_for_summary_matches_full_name_or_stem():
 
 
 def test_select_source_for_summary_does_not_match_short_stem():
-    assert select_source_for_summary("总结 data-arch 的方法", ["a.pdf", "data-arch.pdf"]) == "data-arch.pdf"
-    assert select_source_for_summary("总结一个 ai 比赛", ["ai.pdf", "paper.pdf"]) is None
+    assert (
+        select_source_for_summary("总结 data-arch 的方法", ["a.pdf", "data-arch.pdf"])
+        == "data-arch.pdf"
+    )
+    assert (
+        select_source_for_summary("总结一个 ai 比赛", ["ai.pdf", "paper.pdf"]) is None
+    )
 
 
 def test_select_source_for_summary_does_not_match_cjk_stem_inside_compound_word():
@@ -84,35 +89,59 @@ def test_select_source_for_summary_returns_none_when_ambiguous():
 def test_select_sources_for_compare_requires_two_explicit_sources():
     sources = ["paper-a.pdf", "paper-b.pdf", "paper-c.pdf"]
 
-    assert select_sources_for_compare("对比 paper-a.pdf 和 paper-b.pdf", sources) == ["paper-a.pdf", "paper-b.pdf"]
-    assert select_sources_for_compare("compare paper-a.pdf and paper-b.pdf.", sources) == ["paper-a.pdf", "paper-b.pdf"]
-    assert select_sources_for_compare("对比 paper-c.pdf 和 paper-a.pdf", sources) == ["paper-c.pdf", "paper-a.pdf"]
-    assert select_sources_for_compare("对比 paper-a 和 paper-c 的方法", sources) == ["paper-a.pdf", "paper-c.pdf"]
+    assert select_sources_for_compare("对比 paper-a.pdf 和 paper-b.pdf", sources) == [
+        "paper-a.pdf",
+        "paper-b.pdf",
+    ]
+    assert select_sources_for_compare(
+        "compare paper-a.pdf and paper-b.pdf.", sources
+    ) == ["paper-a.pdf", "paper-b.pdf"]
+    assert select_sources_for_compare("对比 paper-c.pdf 和 paper-a.pdf", sources) == [
+        "paper-c.pdf",
+        "paper-a.pdf",
+    ]
+    assert select_sources_for_compare("对比 paper-a 和 paper-c 的方法", sources) == [
+        "paper-a.pdf",
+        "paper-c.pdf",
+    ]
     assert select_sources_for_compare("对比这些文档", sources) == []
     assert select_sources_for_compare("对比 paper-a.pdf", sources) == []
 
 
 def test_select_sources_for_compare_does_not_substring_match_short_filenames():
-    assert select_sources_for_compare("对比 data.pdf 和 b.pdf", ["a.pdf", "data.pdf", "b.pdf"]) == ["data.pdf", "b.pdf"]
+    assert select_sources_for_compare(
+        "对比 data.pdf 和 b.pdf", ["a.pdf", "data.pdf", "b.pdf"]
+    ) == ["data.pdf", "b.pdf"]
 
 
 def test_select_sources_for_compare_does_not_match_dotted_filename_variants():
     sources = ["data.pdf", "data.v2.pdf", "b.pdf"]
 
-    assert select_sources_for_compare("对比 data.v2.pdf 和 b.pdf", sources) == ["data.v2.pdf", "b.pdf"]
-    assert select_sources_for_compare("对比 data.pdf 和 b.pdf", sources) == ["data.pdf", "b.pdf"]
+    assert select_sources_for_compare("对比 data.v2.pdf 和 b.pdf", sources) == [
+        "data.v2.pdf",
+        "b.pdf",
+    ]
+    assert select_sources_for_compare("对比 data.pdf 和 b.pdf", sources) == [
+        "data.pdf",
+        "b.pdf",
+    ]
     assert select_sources_for_compare("对比 data.pdf.old 和 b.pdf", sources) == []
 
 
 def test_select_sources_for_compare_does_not_match_cjk_stem_inside_compound_word():
     sources = ["技术方案.pdf", "数据报告.pdf"]
 
-    assert select_sources_for_compare("对比 技术方案 和 数据报告", sources) == ["技术方案.pdf", "数据报告.pdf"]
-    assert select_sources_for_compare("对比技术方案设计规范与数据报告体系", sources) == []
+    assert select_sources_for_compare("对比 技术方案 和 数据报告", sources) == [
+        "技术方案.pdf",
+        "数据报告.pdf",
+    ]
+    assert (
+        select_sources_for_compare("对比技术方案设计规范与数据报告体系", sources) == []
+    )
 
 
 def test_bm25_retriever_exposes_indexed_document_loader(tmp_path):
-    retriever = BM25Retriever("summary_loader_test", persist_directory = str(tmp_path))
+    retriever = BM25Retriever("summary_loader_test", persist_directory=str(tmp_path))
     retriever.index([_doc("b.pdf", 1, 0), _doc("a.pdf", 2, 1), _doc("a.pdf", 1, 0)])
 
     assert retriever.list_sources() == ["a.pdf", "b.pdf"]

@@ -3,6 +3,7 @@ from langgraph.graph import StateGraph, START, END
 
 from agents.summary_planner import SectionPlannerAgent
 from agents.summary_generator import GlobalSummaryAgent, SectionSummaryAgent
+from agents.source_resolver import resolve_summary_source
 from graph.state import GraphState
 from graph.subgraphs.qa import RetrieverFactory
 from tools.document_loader import select_source_for_summary
@@ -12,21 +13,38 @@ def document_loader_node(state: GraphState) -> dict:
     # Summary MVP 从当前索引直接加载单个 source 的全部 chunk。
     query = state.get("query", "")
     doc_id = state.get("doc_id", "default")
+    is_local = state.get("is_local", False)
     engine = RetrieverFactory.get_engine(doc_id)
     sources = engine.list_sources()
     selected_source = select_source_for_summary(query, sources)
 
+    resolution_trace = []
+    if selected_source is None and sources and state.get("chat_history"):
+        # 字面匹配不到时，用近期对话消解“总结这个文件/上面那篇”等多轮指代。
+        resolved = resolve_summary_source(
+            query, sources, state.get("chat_history"), is_local
+        )
+        if resolved:
+            selected_source = resolved
+            resolution_trace = [
+                {
+                    "step_name": "summary_source_resolution",
+                    "input_summary": query,
+                    "output_summary": resolved,
+                }
+            ]
+
     if selected_source is None:
         source_list = "，".join(sources) if sources else "当前知识库没有可用文档"
         message = (
-            "请在摘要问题中明确指定要总结的文件名。"
+            "请在摘要问题中明确指定要总结的文件名（可直接说出文件名）。"
             f"当前可用文档：{source_list}"
         )
         return {
             "summary_source": "",
             "summary_docs": [],
             "answer": message,
-            "messages": [AIMessage(content = message)],
+            "messages": [AIMessage(content=message)],
         }
 
     docs = engine.load_source_chunks(selected_source)
@@ -36,13 +54,14 @@ def document_loader_node(state: GraphState) -> dict:
             "summary_source": selected_source,
             "summary_docs": [],
             "answer": message,
-            "messages": [AIMessage(content = message)],
+            "messages": [AIMessage(content=message)],
         }
 
     return {
         "summary_source": selected_source,
         "summary_docs": docs,
-        "steps_trace": [
+        "steps_trace": resolution_trace
+        + [
             {
                 "step_name": "summary_document_loader",
                 "input_summary": query,

@@ -7,11 +7,21 @@ from graph.state import RetrievedDoc
 def sort_document_chunks(chunks: Iterable[RetrievedDoc]) -> List[RetrievedDoc]:
     return sorted(
         chunks,
-        key = lambda doc: (
+        key=lambda doc: (
             str(doc.get("meta", {}).get("source", "")),
-            int(doc.get("meta", {}).get("page_start", doc.get("meta", {}).get("page", 0))),
-            int(doc.get("meta", {}).get("page_end", doc.get("meta", {}).get("page", 0))),
-            int(doc.get("meta", {}).get("local_chunk_index", doc.get("meta", {}).get("chunk_index", 0))),
+            int(
+                doc.get("meta", {}).get(
+                    "page_start", doc.get("meta", {}).get("page", 0)
+                )
+            ),
+            int(
+                doc.get("meta", {}).get("page_end", doc.get("meta", {}).get("page", 0))
+            ),
+            int(
+                doc.get("meta", {}).get(
+                    "local_chunk_index", doc.get("meta", {}).get("chunk_index", 0)
+                )
+            ),
             str(doc.get("meta", {}).get("chunk_id", "")),
         ),
     )
@@ -26,7 +36,9 @@ def list_sources(chunks: Iterable[RetrievedDoc]) -> List[str]:
     return sorted(sources)
 
 
-def load_source_chunks(chunks: Iterable[RetrievedDoc], source: str) -> List[RetrievedDoc]:
+def load_source_chunks(
+    chunks: Iterable[RetrievedDoc], source: str
+) -> List[RetrievedDoc]:
     return sort_document_chunks(
         doc for doc in chunks if str(doc.get("meta", {}).get("source", "")) == source
     )
@@ -40,7 +52,9 @@ def _is_cjk(ch: str) -> bool:
     return "一" <= ch <= "鿿"
 
 
-def _source_match_start(query_lower: str, name_lower: str, allow_trailing_dot: bool) -> Optional[int]:
+def _source_match_start(
+    query_lower: str, name_lower: str, allow_trailing_dot: bool
+) -> Optional[int]:
     if not name_lower:
         return None
 
@@ -57,7 +71,9 @@ def _source_match_start(query_lower: str, name_lower: str, allow_trailing_dot: b
             left_exclude += _CJK_RANGE
         right_boundary = rf"(?![{right_exclude}])"
 
-    match = re.search(rf"(?<![{left_exclude}]){re.escape(name_lower)}{right_boundary}", query_lower)
+    match = re.search(
+        rf"(?<![{left_exclude}]){re.escape(name_lower)}{right_boundary}", query_lower
+    )
     if match is None:
         return None
     return match.start()
@@ -65,12 +81,12 @@ def _source_match_start(query_lower: str, name_lower: str, allow_trailing_dot: b
 
 def _full_source_match_start(query_lower: str, source_lower: str) -> Optional[int]:
     # 完整文件名后允许句末英文句点，例如 "compare a.pdf and b.pdf."。
-    return _source_match_start(query_lower, source_lower, allow_trailing_dot = True)
+    return _source_match_start(query_lower, source_lower, allow_trailing_dot=True)
 
 
 def _stem_source_match_start(query_lower: str, stem_lower: str) -> Optional[int]:
     # stem 匹配不允许右侧点号，避免 stem "data" 命中 data.v2.pdf。
-    return _source_match_start(query_lower, stem_lower, allow_trailing_dot = False)
+    return _source_match_start(query_lower, stem_lower, allow_trailing_dot=False)
 
 
 def select_source_for_summary(query: str, sources: List[str]) -> Optional[str]:
@@ -105,7 +121,9 @@ def select_sources_for_compare(query: str, sources: List[str]) -> List[str]:
         if full_pos is not None:
             positions.append(full_pos)
         stem = os.path.splitext(source)[0].lower()
-        stem_pos = _stem_source_match_start(query_lower, stem) if len(stem) >= 3 else None
+        stem_pos = (
+            _stem_source_match_start(query_lower, stem) if len(stem) >= 3 else None
+        )
         if stem_pos is not None:
             positions.append(stem_pos)
         if positions:

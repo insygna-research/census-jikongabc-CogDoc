@@ -12,21 +12,25 @@ from agents.query_rewriter import QueryRewriteAgent
 from agents.rewrite_verifier import RewriteVerifyAgent
 from agents.citation_validator import CitationValidatorAgent
 
+
 class RetrieverFactory:
     @staticmethod
-    @lru_cache(maxsize = 32)
+    @lru_cache(maxsize=32)
     def get_engine(doc_id: str) -> HybridRetriever:
         return HybridRetriever(
-            vector_retriever = VectorRetriever(collection_id = doc_id),
-            bm25_retriever = BM25Retriever(collection_id = doc_id)
+            vector_retriever=VectorRetriever(collection_id=doc_id),
+            bm25_retriever=BM25Retriever(collection_id=doc_id),
         )
-    
+
+
 def rewrite_node(state: GraphState) -> dict:
     return QueryRewriteAgent.rewrite_query(state)
+
 
 def verify_rewrite_node(state: GraphState) -> dict:
     # 在检索前过滤语义漂移的 query rewrite。
     return RewriteVerifyAgent.verify_rewrites(state)
+
 
 def retrieve_node(state: GraphState) -> dict:
     original_query = state.get("query", "")
@@ -44,7 +48,7 @@ def retrieve_node(state: GraphState) -> dict:
     seen_chunk_keys = set()
 
     for query in queries:
-        docs = engine.search(query = query, top_k = 9)
+        docs = engine.search(query=query, top_k=9)
         for doc in docs:
             meta = doc["meta"]
             # 检索去重只认稳定 chunk_id。
@@ -60,7 +64,7 @@ def retrieve_node(state: GraphState) -> dict:
                 retrieved_docs.append(doc_copy)
 
     return {"retrieved_docs": retrieved_docs}
-    
+
 
 def rerank_node(state: GraphState) -> dict:
     query = state.get("query", "")
@@ -70,19 +74,23 @@ def rerank_node(state: GraphState) -> dict:
     target_device = "cpu" if is_local else BGEReranker.default_device()
     BGEReranker.set_device(target_device)
 
-    reranked_docs = BGEReranker.rerank(query = query, docs = docs, top_n = 3)
+    reranked_docs = BGEReranker.rerank(query=query, docs=docs, top_n=3)
     return {"reranked_docs": reranked_docs}
+
 
 def generate_node(state: GraphState) -> dict:
     query = state.get("query", "")
     is_local = state.get("is_local", False)
     final_docs = state.get("reranked_docs", [])
+    chat_history = state.get("chat_history", [])
 
     critique = state.get("critique", "")
     iteration_count = state.get("iteration_count", 0)
 
-    llm = Generator._get_client(is_local = is_local)
-    base_prompt = Generator.format_prompt(query = query, docs = final_docs)
+    llm = Generator._get_client(is_local=is_local)
+    base_prompt = Generator.format_prompt(
+        query=query, docs=final_docs, chat_history=chat_history
+    )
 
     messages_payload = list(base_prompt)
     if critique and iteration_count > 0:
@@ -93,24 +101,30 @@ def generate_node(state: GraphState) -> dict:
             f"请严格按照上述修正要求重新生成答案，确保每处引用的文件名和页码与 <Document> 标签属性完全吻合。"
         )
         if messages_payload and isinstance(messages_payload[0], SystemMessage):
-            messages_payload[0] = SystemMessage(content = messages_payload[0].content + correction_note)
+            messages_payload[0] = SystemMessage(
+                content=messages_payload[0].content + correction_note
+            )
         else:
-            messages_payload.insert(0, SystemMessage(content = correction_note))
+            messages_payload.insert(0, SystemMessage(content=correction_note))
 
     response_message = llm.invoke(messages_payload)
 
     # Evidence 保留页跨度，引用校验仍按页级格式。
     evidence: list[Evidence] = [
         Evidence(
-            chunk_id = doc.get("meta", {}).get("chunk_id", ""),
-            chunk_index = doc.get("meta", {}).get("chunk_index", -1),
-            source = doc.get("meta", {}).get("source", ""),
-            page = doc.get("meta", {}).get("page", 0),
-            page_start = doc.get("meta", {}).get("page_start", doc.get("meta", {}).get("page", 0)),
-            page_end = doc.get("meta", {}).get("page_end", doc.get("meta", {}).get("page", 0)),
-            rerank_score = doc.get("retrieval", {}).get("rerank_score"),
-            rewrite_query = doc.get("retrieval", {}).get("rewrite_query"),
-            text_preview = doc["text"][:100],
+            chunk_id=doc.get("meta", {}).get("chunk_id", ""),
+            chunk_index=doc.get("meta", {}).get("chunk_index", -1),
+            source=doc.get("meta", {}).get("source", ""),
+            page=doc.get("meta", {}).get("page", 0),
+            page_start=doc.get("meta", {}).get(
+                "page_start", doc.get("meta", {}).get("page", 0)
+            ),
+            page_end=doc.get("meta", {}).get(
+                "page_end", doc.get("meta", {}).get("page", 0)
+            ),
+            rerank_score=doc.get("retrieval", {}).get("rerank_score"),
+            rewrite_query=doc.get("retrieval", {}).get("rewrite_query"),
+            text_preview=doc["text"][:100],
         )
         for doc in final_docs
     ]
@@ -121,6 +135,7 @@ def generate_node(state: GraphState) -> dict:
         "sources": [doc["meta"] for doc in final_docs],
         "evidence": evidence,
     }
+
 
 def citation_node(state: GraphState) -> dict:
     answer = state.get("answer", "")
@@ -133,8 +148,9 @@ def citation_node(state: GraphState) -> dict:
     return {
         "critique": check_res["critique"],
         "iteration_count": iteration_count + 1,
-        "max_iteration_count": max_iteration_count
+        "max_iteration_count": max_iteration_count,
     }
+
 
 def citation_check(state: GraphState) -> str:
     critique = state.get("critique", "")
@@ -148,6 +164,7 @@ def citation_check(state: GraphState) -> str:
         return "generate_node"
 
     return END
+
 
 sub_graph = StateGraph(GraphState)
 
@@ -166,12 +183,7 @@ sub_graph.add_edge("rerank_node", "generate_node")
 sub_graph.add_edge("generate_node", "citation_node")
 
 sub_graph.add_conditional_edges(
-    "citation_node",
-    citation_check,
-    {
-        "generate_node": "generate_node",
-        END: END
-    }
+    "citation_node", citation_check, {"generate_node": "generate_node", END: END}
 )
 
 qa_subgraph_node = sub_graph.compile()

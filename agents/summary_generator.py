@@ -3,6 +3,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Iterable, List, Tuple
 from langchain_core.messages import HumanMessage, SystemMessage
+from agents.answer_markers import CITATION_WARNING_HEADING
 from agents.citation_validator import CitationValidatorAgent
 from agents.qa_generator import Generator
 from graph.state import Evidence, RetrievedDoc, SummarySectionPlan, SummarySectionResult
@@ -11,7 +12,9 @@ from tools.tokenizer import tokenize_mixed_text
 
 MAX_SECTION_CONTEXT_CHUNKS = 8
 LOCAL_LARGE_SECTION_CONTEXT_CHUNKS = 6
-CITATION_PATTERN = re.compile(r'[\[［]\s*([^:：\]］]+?)\s*[:：]\s*[pPｐＰ]?\s*([0-9０-９]+)\s*[\]］]')
+CITATION_PATTERN = re.compile(
+    r"[\[［]\s*([^:：\]］]+?)\s*[:：]\s*[pPｐＰ]?\s*([0-9０-９]+)\s*[\]］]"
+)
 
 # 云端逐单元 LLM 调用相互独立，并发执行降低 Summary/Compare 端到端延迟；本地走串行。
 CLOUD_SECTION_MAX_WORKERS = int(os.getenv("CLOUD_SECTION_MAX_WORKERS", "6"))
@@ -29,7 +32,7 @@ def run_section_cells(tasks: List, worker: Callable, is_local: bool) -> List:
     workers = resolve_section_workers(is_local, len(tasks))
     if workers == 1:
         return [worker(task) for task in tasks]
-    with ThreadPoolExecutor(max_workers = workers) as executor:
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         return list(executor.map(worker, tasks))
 
 
@@ -50,7 +53,9 @@ def select_section_docs(
 
     section_text = f"{query} {plan['title']} {plan['instruction']}"
     section_tokens = tokenize_for_section(section_text)
-    doc_tokens = doc_tokens or [(doc, tokenize_for_section(doc["text"])) for doc in docs]
+    doc_tokens = doc_tokens or [
+        (doc, tokenize_for_section(doc["text"])) for doc in docs
+    ]
 
     scored = []
     for idx, (doc, tokens) in enumerate(doc_tokens):
@@ -61,9 +66,9 @@ def select_section_docs(
     if not selected:
         selected = scored[:max_chunks]
     else:
-        selected = sorted(selected, key = lambda item: (-item[0], item[1]))[:max_chunks]
+        selected = sorted(selected, key=lambda item: (-item[0], item[1]))[:max_chunks]
 
-    return [doc for _, _, doc in sorted(selected, key = lambda item: item[1])]
+    return [doc for _, _, doc in sorted(selected, key=lambda item: item[1])]
 
 
 def format_summary_context(docs: List[RetrievedDoc]) -> str:
@@ -76,8 +81,8 @@ def format_summary_context(docs: List[RetrievedDoc]) -> str:
         chunk_id = meta.get("chunk_id", meta.get("chunk_index", 0))
         blocks.append(
             f'<Document source="{source}" page="{page}" chunk_id="{chunk_id}">\n'
-            f'{doc["text"].strip()}\n'
-            f'</Document>'
+            f"{doc['text'].strip()}\n"
+            f"</Document>"
         )
     return "\n\n".join(blocks)
 
@@ -114,7 +119,7 @@ def is_no_evidence_summary(content: str) -> bool:
     sentences = [s for s in _SENTENCE_SPLIT_RE.split(normalized) if s.strip()]
     if len(sentences) > 1:
         return False
-    return not _CONTENT_TURN_RE.search(normalized[len(NO_EVIDENCE_MARKER):])
+    return not _CONTENT_TURN_RE.search(normalized[len(NO_EVIDENCE_MARKER) :])
 
 
 def attach_section_citations(content: str, docs: List[RetrievedDoc]) -> str:
@@ -134,19 +139,25 @@ def attach_section_citations(content: str, docs: List[RetrievedDoc]) -> str:
 def all_contents_no_evidence(contents: Iterable[str]) -> bool:
     # 仅全为显式无依据声明时才允许跳过缺引用校验。
     contents = list(contents)
-    return bool(contents) and all(is_no_evidence_summary(content) for content in contents)
+    return bool(contents) and all(
+        is_no_evidence_summary(content) for content in contents
+    )
 
 
 def build_summary_evidence(docs: List[RetrievedDoc]) -> List[Evidence]:
     return [
         Evidence(
-            chunk_id = doc.get("meta", {}).get("chunk_id", ""),
-            chunk_index = doc.get("meta", {}).get("chunk_index", -1),
-            source = doc.get("meta", {}).get("source", ""),
-            page = doc.get("meta", {}).get("page", 0),
-            page_start = doc.get("meta", {}).get("page_start", doc.get("meta", {}).get("page", 0)),
-            page_end = doc.get("meta", {}).get("page_end", doc.get("meta", {}).get("page", 0)),
-            text_preview = doc["text"][:100],
+            chunk_id=doc.get("meta", {}).get("chunk_id", ""),
+            chunk_index=doc.get("meta", {}).get("chunk_index", -1),
+            source=doc.get("meta", {}).get("source", ""),
+            page=doc.get("meta", {}).get("page", 0),
+            page_start=doc.get("meta", {}).get(
+                "page_start", doc.get("meta", {}).get("page", 0)
+            ),
+            page_end=doc.get("meta", {}).get(
+                "page_end", doc.get("meta", {}).get("page", 0)
+            ),
+            text_preview=doc["text"][:100],
         )
         for doc in docs
     ]
@@ -203,14 +214,14 @@ def collect_section_evidence(
     return collect_evidence_items(
         (result.get("evidence", []) for result in results),
         fallback_docs,
-        fallback_when_empty = not any("evidence" in result for result in results),
+        fallback_when_empty=not any("evidence" in result for result in results),
     )
 
 
 def append_citation_warning(answer: str, critique: str, unit_label: str) -> str:
     return (
         f"{answer}\n\n"
-        "## 引用校验警告\n"
+        f"{CITATION_WARNING_HEADING}\n"
         f"以下问题需要人工复核或重新生成对应{unit_label}：\n"
         f"{critique}"
     )
@@ -219,7 +230,7 @@ def append_citation_warning(answer: str, critique: str, unit_label: str) -> str:
 def _summary_messages(source: str, plan: SummarySectionPlan, query: str, context: str):
     return [
         SystemMessage(
-            content = (
+            content=(
                 "你是一位严谨的技术文档摘要助手。你的唯一工作是：仅依据给定的 <Document> 标签文本，"
                 "为指定章节写一段简短的中文摘要。\n\n"
                 "【硬性约束】\n"
@@ -240,7 +251,7 @@ def _summary_messages(source: str, plan: SummarySectionPlan, query: str, context
             )
         ),
         HumanMessage(
-            content = (
+            content=(
                 f"【目标文档】{source}\n"
                 f"【本次章节】{plan['title']}\n"
                 f"【章节聚焦】{plan['instruction']}\n"
@@ -253,10 +264,12 @@ def _summary_messages(source: str, plan: SummarySectionPlan, query: str, context
     ]
 
 
-def _summary_retry_messages(source: str, plan: SummarySectionPlan, query: str, context: str):
+def _summary_retry_messages(
+    source: str, plan: SummarySectionPlan, query: str, context: str
+):
     return [
         SystemMessage(
-            content = (
+            content=(
                 "你是一位严谨的中文资料整理助手。下面片段已经由程序筛选为与指定摘要维度相关。"
                 "你的任务是从片段中提炼事实，不要因为文档不是论文而回答“文档中未明确说明”。\n\n"
                 "【要求】\n"
@@ -268,7 +281,7 @@ def _summary_retry_messages(source: str, plan: SummarySectionPlan, query: str, c
             )
         ),
         HumanMessage(
-            content = (
+            content=(
                 f"【目标文档】{source}\n"
                 f"【摘要维度】{plan['title']}\n"
                 f"【维度说明】{plan['instruction']}\n"
@@ -294,11 +307,18 @@ def generate_section_cell(
 ) -> Tuple[str, List[Evidence]]:
     # Summary 和 Compare 共用单元生成、引用绑定与 evidence 契约。
     max_chunks = max_chunks or section_context_limit(is_local, len(docs))
-    section_docs = select_section_docs(docs, plan, query, doc_tokens = doc_tokens, max_chunks = max_chunks)
+    section_docs = select_section_docs(
+        docs, plan, query, doc_tokens=doc_tokens, max_chunks=max_chunks
+    )
     context = format_summary_context(section_docs)
     content = llm.invoke(build_messages(source, plan, query, context)).content
 
-    if is_local and section_docs and is_no_evidence_summary(content) and build_retry_messages is not None:
+    if (
+        is_local
+        and section_docs
+        and is_no_evidence_summary(content)
+        and build_retry_messages is not None
+    ):
         content = llm.invoke(build_retry_messages(source, plan, query, context)).content
 
     content = attach_section_citations(content, section_docs)
@@ -317,7 +337,7 @@ class SectionSummaryAgent:
         if not docs or not plans:
             return {"summary_section_results": []}
 
-        llm = Generator._get_client(is_local = is_local)
+        llm = Generator._get_client(is_local=is_local)
         doc_tokens = [(doc, tokenize_for_section(doc["text"])) for doc in docs]
 
         def build_section_result(plan: SummarySectionPlan) -> SummarySectionResult:
@@ -333,10 +353,10 @@ class SectionSummaryAgent:
                 _summary_retry_messages,
             )
             return SummarySectionResult(
-                section_id = plan["section_id"],
-                title = plan["title"],
-                content = content,
-                evidence = evidence,
+                section_id=plan["section_id"],
+                title=plan["title"],
+                content=content,
+                evidence=evidence,
             )
 
         results = run_section_cells(plans, build_section_result, is_local)
@@ -354,7 +374,10 @@ class GlobalSummaryAgent:
             return {}
         if not results:
             answer = f"未能生成文档 {source} 的摘要章节。"
-            return {"answer": answer, "messages": [{"role": "assistant", "content": answer}]}
+            return {
+                "answer": answer,
+                "messages": [{"role": "assistant", "content": answer}],
+            }
 
         lines = [f"# {source} 结构化摘要"]
         for result in results:

@@ -53,9 +53,9 @@ class SectionPlannerAgent:
 
         plans = [
             SummarySectionPlan(
-                section_id = section["section_id"],
-                title = section["title"],
-                instruction = section["instruction"],
+                section_id=section["section_id"],
+                title=section["title"],
+                instruction=section["instruction"],
             )
             for section in DEFAULT_SUMMARY_SECTIONS
         ]

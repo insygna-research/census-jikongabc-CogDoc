@@ -26,7 +26,9 @@ def test_rule_router_avoids_common_false_positive_phrases():
 
 
 def test_router_falls_back_to_summary_when_structured_llm_fails(monkeypatch):
-    monkeypatch.setattr(Generator, "_get_client", lambda is_local = False: RaisingStructuredLLM())
+    monkeypatch.setattr(
+        Generator, "_get_client", lambda is_local=False: RaisingStructuredLLM()
+    )
 
     result = RouterAgent.route_intent(
         {},
@@ -50,9 +52,9 @@ def test_router_uses_llm_before_keyword_fallback(monkeypatch):
             return self
 
         def invoke(self, messages):
-            return RouteDecision(task_type = "qa", reason = "用户询问方法")
+            return RouteDecision(task_type="qa", reason="用户询问方法")
 
-    monkeypatch.setattr(Generator, "_get_client", lambda is_local = False: LLM())
+    monkeypatch.setattr(Generator, "_get_client", lambda is_local=False: LLM())
 
     result = RouterAgent.route_intent(
         {},
@@ -80,9 +82,9 @@ def test_router_uses_json_mode_for_llm_structured_output(monkeypatch):
             return schema_response("qa", "普通信息诉求")
 
     def schema_response(task_type, reason):
-        return RouteDecision(task_type = task_type, reason = reason)
+        return RouteDecision(task_type=task_type, reason=reason)
 
-    monkeypatch.setattr(Generator, "_get_client", lambda is_local = False: JsonModeLLM())
+    monkeypatch.setattr(Generator, "_get_client", lambda is_local=False: JsonModeLLM())
 
     result = RouterAgent.route_intent(
         {},

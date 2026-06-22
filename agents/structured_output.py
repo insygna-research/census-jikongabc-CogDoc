@@ -16,7 +16,9 @@ def _llm_cache_key(llm) -> str:
 
 def _auto_methods_for_llm(llm) -> list[str]:
     # 本地部署的兼容 OpenAI 接口的服务端，大多会拒绝各类 response_format 格式限定参数；直接返回原始 JSON 可避免无效请求损耗。
-    base_url = str(getattr(llm, "openai_api_base", "") or getattr(llm, "base_url", "")).lower()
+    base_url = str(
+        getattr(llm, "openai_api_base", "") or getattr(llm, "base_url", "")
+    ).lower()
     model = str(getattr(llm, "model_name", "") or getattr(llm, "model", "")).lower()
 
     if "localhost" in base_url or "127.0.0.1" in base_url or "ollama" in base_url:
@@ -29,11 +31,15 @@ def _auto_methods_for_llm(llm) -> list[str]:
     return ["json_mode", "json_schema", "function_calling", "raw_json"]
 
 
-def _configured_methods(llm = None) -> list[str]:
+def _configured_methods(llm=None) -> list[str]:
     # auto 优先走兼容面较广的 json_object，再尝试更严格/更旧的 LangChain 方法。
     configured = os.getenv("LLM_STRUCTURED_OUTPUT_METHOD", "auto").strip()
     if not configured or configured == "auto":
-        return _auto_methods_for_llm(llm) if llm is not None else ["json_mode", "json_schema", "function_calling", "raw_json"]
+        return (
+            _auto_methods_for_llm(llm)
+            if llm is not None
+            else ["json_mode", "json_schema", "function_calling", "raw_json"]
+        )
 
     methods = [item.strip() for item in configured.split(",") if item.strip()]
     invalid = [method for method in methods if method not in STRUCTURED_OUTPUT_METHODS]
@@ -89,7 +95,7 @@ def _extract_json_object(text: str) -> str:
             elif current == "}":
                 depth -= 1
                 if depth == 0:
-                    candidate = stripped[start:idx + 1]
+                    candidate = stripped[start : idx + 1]
                     try:
                         parsed = json.loads(candidate)
                     except json.JSONDecodeError:
@@ -123,7 +129,9 @@ def invoke_structured(llm, schema: Type[BaseModel], messages: Iterable) -> BaseM
     if os.getenv("LLM_STRUCTURED_OUTPUT_METHOD", "auto").strip() in ("", "auto"):
         cached_method = _METHOD_CACHE.get(cache_key)
         if cached_method in methods:
-            methods = [cached_method] + [method for method in methods if method != cached_method]
+            methods = [cached_method] + [
+                method for method in methods if method != cached_method
+            ]
 
     for method in methods:
         try:
@@ -132,7 +140,7 @@ def invoke_structured(llm, schema: Type[BaseModel], messages: Iterable) -> BaseM
                 _METHOD_CACHE[cache_key] = method
                 return output
 
-            structured_llm = llm.with_structured_output(schema, method = method)
+            structured_llm = llm.with_structured_output(schema, method=method)
             output = structured_llm.invoke(messages)
             if isinstance(output, schema):
                 _METHOD_CACHE[cache_key] = method
@@ -151,4 +159,6 @@ def invoke_structured(llm, schema: Type[BaseModel], messages: Iterable) -> BaseM
         except Exception as exc:
             errors.append(f"{method}: {exc}")
 
-    raise RuntimeError("Structured output failed for all methods. " + " | ".join(errors))
+    raise RuntimeError(
+        "Structured output failed for all methods. " + " | ".join(errors)
+    )

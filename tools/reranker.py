@@ -40,7 +40,9 @@ class BGEReranker:
         if cls._tokenizer is None:
             cls._tokenizer = AutoTokenizer.from_pretrained(cls.MODEL_NAME)
         if cls._model is None:
-            cls._model = AutoModelForSequenceClassification.from_pretrained(cls.MODEL_NAME)
+            cls._model = AutoModelForSequenceClassification.from_pretrained(
+                cls.MODEL_NAME
+            )
             cls._model.to(cls.device)
             cls._model.eval()
         return cls._tokenizer, cls._model
@@ -50,7 +52,9 @@ class BGEReranker:
         cls._get_resources()
 
     @classmethod
-    def rerank(cls, query: str, docs: List[RetrievedDoc], top_n: int = 3) -> List[RetrievedDoc]:
+    def rerank(
+        cls, query: str, docs: List[RetrievedDoc], top_n: int = 3
+    ) -> List[RetrievedDoc]:
         # 精排只修改深拷贝结果，避免污染召回缓存。
         if not docs:
             return []  # 无候选文档直接返回
@@ -64,24 +68,28 @@ class BGEReranker:
         with torch.no_grad():  # 关闭梯度计算
             inputs = tokenizer(
                 pairs,
-                padding = True,  # 自动补齐长度
-                truncation = True,  # 超长自动截断
-                max_length = cls.MAX_LENGTH,  # 最大长度限制
-                return_tensors = "pt"  # 返回PyTorch张量
+                padding=True,  # 自动补齐长度
+                truncation=True,  # 超长自动截断
+                max_length=cls.MAX_LENGTH,  # 最大长度限制
+                return_tensors="pt",  # 返回PyTorch张量
             ).to(cls.device)  # 输入迁移到目标设备
 
-            outputs = model(**inputs, return_dict = True)  # 执行前向推理
+            outputs = model(**inputs, return_dict=True)  # 执行前向推理
             scores = outputs.logits.view(-1).float().cpu().numpy()  # 提取相关性得分
 
         ranked_docs: List[RetrievedDoc] = []
         for idx, score in enumerate(scores):
             doc_copy = copy.deepcopy(docs[idx])  # 深拷贝避免污染原数据
 
-            retrieval_meta = doc_copy.setdefault("retrieval", {})  # 获取或创建检索元数据
+            retrieval_meta = doc_copy.setdefault(
+                "retrieval", {}
+            )  # 获取或创建检索元数据
             retrieval_meta["rerank_score"] = float(score)  # 写入精排得分
 
             ranked_docs.append(doc_copy)
 
-        ranked_docs.sort(key = lambda x: x["retrieval"]["rerank_score"], reverse = True)  # 按精排得分降序排序
+        ranked_docs.sort(
+            key=lambda x: x["retrieval"]["rerank_score"], reverse=True
+        )  # 按精排得分降序排序
 
         return ranked_docs[:top_n]  # 返回TopN结果

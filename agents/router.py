@@ -7,15 +7,17 @@ from typing import Literal
 
 
 class RouteDecision(BaseModel):
-    task_type: Literal["qa", "summary", "compare", "unknown"] = Field(description = "任务类型: 'qa', 'summary', 'compare', 'unknown'")
-    reason: str = Field(description = "做出该路由决策的清晰理由。")
+    task_type: Literal["qa", "summary", "compare", "unknown"] = Field(
+        description="任务类型: 'qa', 'summary', 'compare', 'unknown'"
+    )
+    reason: str = Field(description="做出该路由决策的清晰理由。")
 
 
 def classify_intent_by_rule(query: str) -> RouteDecision:
     # LLM 结构化输出不可用时的确定性兜底，不能把明确摘要/对比请求打到 QA。
     normalized = (query or "").strip().lower()
     if not normalized:
-        return RouteDecision(task_type = "unknown", reason = "空问题")
+        return RouteDecision(task_type="unknown", reason="空问题")
 
     compare_patterns = [
         r"(对比|比较).+(和|与|跟|及|以及|vs|versus).+",
@@ -24,7 +26,7 @@ def classify_intent_by_rule(query: str) -> RouteDecision:
         r"compare .+ (and|with|vs|versus) .+",
     ]
     if any(re.search(pattern, normalized) for pattern in compare_patterns):
-        return RouteDecision(task_type = "compare", reason = "命中对比关键词")
+        return RouteDecision(task_type="compare", reason="命中对比关键词")
 
     summary_patterns = [
         r"^(请|帮我|给我|麻烦)?(总结|摘要|概括)(一下|下)?[：:\s]?.+",
@@ -32,9 +34,9 @@ def classify_intent_by_rule(query: str) -> RouteDecision:
         r"^(summarize|summary)\b.+",
     ]
     if any(re.search(pattern, normalized) for pattern in summary_patterns):
-        return RouteDecision(task_type = "summary", reason = "命中摘要关键词")
+        return RouteDecision(task_type="summary", reason="命中摘要关键词")
 
-    return RouteDecision(task_type = "qa", reason = "规则兜底为问答")
+    return RouteDecision(task_type="qa", reason="规则兜底为问答")
 
 
 class RouterAgent:
@@ -42,7 +44,7 @@ class RouterAgent:
     def route_intent(state: dict, config: RunnableConfig) -> dict:
         messages = state.get("messages", [])
         configurable = config.get("configurable", {})
-        
+
         query = configurable.get("query", "")
         doc_id = configurable.get("doc_id", "arch_blueprint_2026")
         is_local = configurable.get("is_local", False)
@@ -67,30 +69,28 @@ class RouterAgent:
             "- reason 字段用一句话简要说明分配依据，不超过 30 字。\n\n"
             "【输出格式】\n"
             "只输出 JSON 对象，不要 Markdown，不要解释。JSON 示例：\n"
-            "{\"task_type\":\"qa\",\"reason\":\"用户询问信息\"}"
+            '{"task_type":"qa","reason":"用户询问信息"}'
         )
 
         user_content = f"请分析以下用户提问的路由意图：\n{query}"
-        
+
         try:
-            llm = Generator._get_client(is_local = is_local)
-            decision = invoke_structured(llm, RouteDecision, [
-                {
-                    "role": "system",
-                    "content": system_prompt
-                },
-                {
-                    "role": "user",
-                    "content": user_content
-                }
-            ])
+            llm = Generator._get_client(is_local=is_local)
+            decision = invoke_structured(
+                llm,
+                RouteDecision,
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+            )
 
             return {
                 "query": query,
                 "doc_id": doc_id,
                 "is_local": is_local,
                 "task_type": decision.task_type,
-                "router_reason": decision.reason
+                "router_reason": decision.reason,
             }
 
         except Exception as e:
@@ -103,5 +103,5 @@ class RouterAgent:
                 "router_reason": (
                     f"结构化路由解析异常，已按规则 fallback 到 {fallback.task_type}。"
                     f"规则原因：{fallback.reason}。错误详情: {str(e)}"
-                )
+                ),
             }

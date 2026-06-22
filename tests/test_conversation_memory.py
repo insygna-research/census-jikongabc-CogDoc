@@ -1,0 +1,172 @@
+from agents.answer_markers import NO_RELEVANT_CONTENT_MARKER
+from agents.conversation_memory import (
+    clean_answer_for_memory,
+    extract_chat_turn,
+    extract_final_answer,
+    format_recent_chat_history,
+)
+
+
+def test_extract_chat_turn_skips_qa_fallback_answer():
+    assert (
+        extract_chat_turn(
+            "qa",
+            {
+                "answer": f"{NO_RELEVANT_CONTENT_MARKER}，建议查阅更多资料。",
+                "critique": "",
+                "reranked_docs": [],
+            },
+            "它的作者是谁？",
+            timestamp="2026-01-01T00:00:00",
+        )
+        == []
+    )
+
+
+def test_extract_chat_turn_skips_unvalidated_qa_answer():
+    assert (
+        extract_chat_turn(
+            "qa",
+            {
+                "answer": "未经过引用校验的答案",
+                "reranked_docs": [{"text": "x", "meta": {}}],
+            },
+            "问题",
+            timestamp="2026-01-01T00:00:00",
+        )
+        == []
+    )
+
+
+def test_extract_chat_turn_keeps_valid_qa_answer():
+    turn = extract_chat_turn(
+        "qa",
+        {
+            "answer": "有效答案。[a.pdf:P1]",
+            "critique": "",
+            "reranked_docs": [{"text": "x", "meta": {}}],
+        },
+        "问题",
+        timestamp="2026-01-01T00:00:00",
+    )
+
+    assert turn == [
+        {"role": "user", "content": "问题", "timestamp": "2026-01-01T00:00:00"},
+        {
+            "role": "assistant",
+            "content": "有效答案。[a.pdf:P1]",
+            "timestamp": "2026-01-01T00:00:00",
+        },
+    ]
+
+
+def test_extract_chat_turn_skips_any_task_with_critique():
+    assert (
+        extract_chat_turn(
+            "compare",
+            {
+                "answer": "## 方法\n- **a.pdf**：方法 A。\n\n## 引用校验警告\n单元格引用错误。",
+                "critique": "单元格引用错误。",
+            },
+            "对比两篇文档",
+            timestamp="2026-01-01T00:00:00",
+        )
+        == []
+    )
+
+
+def test_extract_chat_turn_skips_compare_without_profiles():
+    # 点名不足等早退只产出引导消息、无 document_profiles，不应写入记忆。
+    assert (
+        extract_chat_turn(
+            "compare",
+            {"answer": "请在对比问题中点名至少 2 篇要对比的文件。"},
+            "帮我对比一下",
+            timestamp="2026-01-01T00:00:00",
+        )
+        == []
+    )
+
+
+def test_extract_chat_turn_keeps_valid_compare_answer():
+    turn = extract_chat_turn(
+        "compare",
+        {
+            "answer": "## 方法\n- **a.pdf**：方法 A。[a.pdf:P1]",
+            "critique": "",
+            "document_profiles": [{"source": "a.pdf", "cells": []}],
+        },
+        "对比 a.pdf 和 b.pdf",
+        timestamp="2026-01-01T00:00:00",
+    )
+
+    assert turn[0]["content"] == "对比 a.pdf 和 b.pdf"
+    assert turn[1]["content"] == "## 方法\n- **a.pdf**：方法 A。[a.pdf:P1]"
+
+
+def test_extract_chat_turn_skips_summary_without_sections():
+    # 未指定文件等早退只产出引导消息、无 summary_section_results，不应写入记忆。
+    assert (
+        extract_chat_turn(
+            "summary",
+            {"answer": "请在摘要问题中明确指定要总结的文件名。"},
+            "帮我总结一下",
+            timestamp="2026-01-01T00:00:00",
+        )
+        == []
+    )
+
+
+def test_extract_chat_turn_keeps_valid_summary_answer():
+    turn = extract_chat_turn(
+        "summary",
+        {
+            "answer": "# a.pdf 结构化摘要\n## 方法\n方法 A。[a.pdf:P1]",
+            "critique": "",
+            "summary_section_results": [
+                {"section_id": "method", "content": "方法 A。[a.pdf:P1]"}
+            ],
+        },
+        "总结 a.pdf",
+        timestamp="2026-01-01T00:00:00",
+    )
+
+    assert turn[0]["content"] == "总结 a.pdf"
+    assert turn[1]["content"].startswith("# a.pdf 结构化摘要")
+
+
+def test_clean_answer_for_memory_strips_citation_warning():
+    answer = clean_answer_for_memory(
+        "## 方法\n- **a.pdf**：方法 A。\n\n## 引用校验警告\n单元格引用错误。"
+    )
+
+    assert answer == "## 方法\n- **a.pdf**：方法 A。"
+
+
+def test_extract_final_answer_reads_compare_messages_fallback():
+    assert (
+        extract_final_answer(
+            "compare",
+            {
+                "messages": [{"role": "assistant", "content": "对比答案"}],
+            },
+        )
+        == "对比答案"
+    )
+
+
+def test_clean_answer_for_memory_without_warning_is_noop():
+    assert clean_answer_for_memory("正常答案") == "正常答案"
+
+
+def test_format_recent_chat_history_uses_recent_messages_only():
+    history = [
+        {"role": "user", "content": f"msg-{idx:02d}", "timestamp": None}
+        for idx in range(14)
+    ]
+
+    rendered = format_recent_chat_history(history, limit=12)
+    assert "msg-00" not in rendered
+    assert "msg-01" not in rendered
+    assert "msg-02" in rendered
+    assert "msg-13" in rendered

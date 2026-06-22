@@ -29,7 +29,7 @@ def resolve_default_eval_set() -> Path:
 
 def load_eval_set(path: Path) -> List[dict]:
     items = []
-    for line in path.read_text(encoding = "utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if line:
             items.append(json.loads(line))
@@ -38,10 +38,11 @@ def load_eval_set(path: Path) -> List[dict]:
 
 def retrieve_sources(query: str, doc_id: str, top_k: int, rerank: bool) -> List[str]:
     engine = RetrieverFactory.get_engine(doc_id)
-    docs = engine.search(query = query, top_k = top_k)
+    docs = engine.search(query=query, top_k=top_k)
     if rerank and docs:
         from tools.reranker import BGEReranker
-        docs = BGEReranker.rerank(query = query, docs = docs, top_n = len(docs))
+
+        docs = BGEReranker.rerank(query=query, docs=docs, top_n=len(docs))
     return [doc["meta"]["source"] for doc in docs]
 
 
@@ -51,15 +52,19 @@ def run_eval(items: List[dict], k_values: List[int], rerank: bool) -> dict:
     per_query_metrics: List[Dict[str, float]] = []
 
     for item in items:
-        retrieved = retrieve_sources(item["query"], item.get("doc_id", "default"), top_k, rerank)
+        retrieved = retrieve_sources(
+            item["query"], item.get("doc_id", "default"), top_k, rerank
+        )
         metrics = evaluate_query(retrieved, item["expected_sources"], k_values)
         per_query_metrics.append(metrics)
-        rows.append({
-            "query": item["query"],
-            "expected_sources": item["expected_sources"],
-            "retrieved_sources": retrieved,
-            "metrics": metrics,
-        })
+        rows.append(
+            {
+                "query": item["query"],
+                "expected_sources": item["expected_sources"],
+                "retrieved_sources": retrieved,
+                "metrics": metrics,
+            }
+        )
 
     return {
         "config": {"k_values": k_values, "rerank": rerank, "num_queries": len(items)},
@@ -70,13 +75,17 @@ def run_eval(items: List[dict], k_values: List[int], rerank: bool) -> dict:
 
 def print_report(report: dict) -> None:
     cfg = report["config"]
-    print(f"\n检索评测  |  queries={cfg['num_queries']}  rerank={cfg['rerank']}  k={cfg['k_values']}\n")
+    print(
+        f"\n检索评测  |  queries={cfg['num_queries']}  rerank={cfg['rerank']}  k={cfg['k_values']}\n"
+    )
 
     for row in report["rows"]:
-        recalls = "  ".join(f"r@{k}={row['metrics'][f'recall@{k}']:.2f}" for k in cfg["k_values"])
+        recalls = "  ".join(
+            f"r@{k}={row['metrics'][f'recall@{k}']:.2f}" for k in cfg["k_values"]
+        )
         print(f"  [{row['metrics']['mrr']:.2f} MRR] {recalls}  | {row['query']}")
         print(f"        expected={row['expected_sources']}")
-        print(f"        top={row['retrieved_sources'][:max(cfg['k_values'])]}")
+        print(f"        top={row['retrieved_sources'][: max(cfg['k_values'])]}")
 
     print("\n聚合:")
     for key, value in report["aggregate"].items():
@@ -85,7 +94,7 @@ def print_report(report: dict) -> None:
 
 
 def compare_baseline(report: dict, baseline_path: Path) -> int:
-    baseline = json.loads(baseline_path.read_text(encoding = "utf-8"))
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
     base_agg = baseline.get("aggregate", {})
     cur_agg = report["aggregate"]
     print(f"\n对比基线 {baseline_path}:")
@@ -109,12 +118,28 @@ def compare_baseline(report: dict, baseline_path: Path) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description = "离线检索评测 harness")
-    parser.add_argument("--eval-set", type = Path, default = None, help = "评测集 JSONL；缺省用本地 retrieval_eval.jsonl，没有则回退 example")
-    parser.add_argument("--rerank", action = "store_true", help = "在检索后加 BGE 精排")
-    parser.add_argument("--k", type = int, nargs = "+", default = DEFAULT_K_VALUES, help = "recall/hit 的 k 截断值")
-    parser.add_argument("--json", type = Path, default = None, help = "把报告写入 JSON 文件")
-    parser.add_argument("--baseline", type = Path, default = None, help = "与基线 JSON 报告对比，回退则退出码非零")
+    parser = argparse.ArgumentParser(description="离线检索评测 harness")
+    parser.add_argument(
+        "--eval-set",
+        type=Path,
+        default=None,
+        help="评测集 JSONL；缺省用本地 retrieval_eval.jsonl，没有则回退 example",
+    )
+    parser.add_argument("--rerank", action="store_true", help="在检索后加 BGE 精排")
+    parser.add_argument(
+        "--k",
+        type=int,
+        nargs="+",
+        default=DEFAULT_K_VALUES,
+        help="recall/hit 的 k 截断值",
+    )
+    parser.add_argument("--json", type=Path, default=None, help="把报告写入 JSON 文件")
+    parser.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help="与基线 JSON 报告对比，回退则退出码非零",
+    )
     args = parser.parse_args()
 
     eval_set = args.eval_set or resolve_default_eval_set()
@@ -127,8 +152,10 @@ def main() -> int:
     print_report(report)
 
     if args.json:
-        args.json.parent.mkdir(parents = True, exist_ok = True)
-        args.json.write_text(json.dumps(report, ensure_ascii = False, indent = 2), encoding = "utf-8")
+        args.json.parent.mkdir(parents=True, exist_ok=True)
+        args.json.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         print(f"报告已写入 {args.json}")
 
     if args.baseline:

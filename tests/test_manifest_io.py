@@ -16,7 +16,7 @@ def test_missing_manifest_returns_empty():
 
 def test_corrupt_manifest_returns_empty(manifest_dir):
     # 验证清单文件损坏时返回空 dict。
-    (manifest_dir / "kb.json").write_text("{ not valid json", encoding = "utf-8")
+    (manifest_dir / "kb.json").write_text("{ not valid json", encoding="utf-8")
     assert manifest.load_index_manifest("kb") == {}
 
 
@@ -41,8 +41,11 @@ def test_save_creates_missing_manifest_dir(tmp_path, monkeypatch):
 
 def test_save_preserves_unicode_filenames(manifest_dir):
     # 验证中文文件名会原样落盘且可读回。
-    data = {"doc_id": "kb", "documents": [{"name": "测试论文.pdf", "size": 1, "sha256": "x"}]}
+    data = {
+        "doc_id": "kb",
+        "documents": [{"name": "测试论文.pdf", "size": 1, "sha256": "x"}],
+    }
     manifest.save_index_manifest(data)
-    raw = (manifest_dir / "kb.json").read_text(encoding = "utf-8")
+    raw = (manifest_dir / "kb.json").read_text(encoding="utf-8")
     assert "测试论文.pdf" in raw
     assert manifest.load_index_manifest("kb") == data

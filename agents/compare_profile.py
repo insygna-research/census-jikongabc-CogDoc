@@ -6,7 +6,13 @@ from agents.summary_generator import (
     run_section_cells,
     tokenize_for_section,
 )
-from graph.state import CompareDimensionPlan, CompareCell, DocumentProfile, RetrievedDoc, SummarySectionPlan
+from graph.state import (
+    CompareDimensionPlan,
+    CompareCell,
+    DocumentProfile,
+    RetrievedDoc,
+    SummarySectionPlan,
+)
 
 
 COMPARE_CELL_CONTEXT_CHUNKS = 4
@@ -53,23 +59,27 @@ def default_compare_dimensions(is_local: bool = False) -> List[CompareDimensionP
     # 本地模式只保留核心维度，控制 LLM 调用次数。
     dimensions = [
         CompareDimensionPlan(
-            dimension_id = dimension["dimension_id"],
-            title = dimension["title"],
-            instruction = dimension["instruction"],
+            dimension_id=dimension["dimension_id"],
+            title=dimension["title"],
+            instruction=dimension["instruction"],
         )
         for dimension in DEFAULT_COMPARE_DIMENSIONS
-    ]   
+    ]
     if is_local:
-        return [dimension for dimension in dimensions if dimension["dimension_id"] in LOCAL_COMPARE_DIMENSION_IDS]
+        return [
+            dimension
+            for dimension in dimensions
+            if dimension["dimension_id"] in LOCAL_COMPARE_DIMENSION_IDS
+        ]
     return dimensions
 
 
 def _dimension_as_section_plan(dimension: CompareDimensionPlan) -> SummarySectionPlan:
     # Compare 维度复用 Summary section 生成器的字段契约。
     return SummarySectionPlan(
-        section_id = dimension["dimension_id"],
-        title = dimension["title"],
-        instruction = dimension["instruction"],
+        section_id=dimension["dimension_id"],
+        title=dimension["title"],
+        instruction=dimension["instruction"],
     )
 
 
@@ -77,7 +87,7 @@ def _compare_messages(source: str, plan: SummarySectionPlan, query: str, context
     # 首轮提示禁止模型自造引用，引用由共享 helper 统一绑定。
     return [
         SystemMessage(
-            content = (
+            content=(
                 "你是一位严谨的技术方案对比助手。你的任务是：仅依据给定的 <Document> 标签文本，"
                 "为当前文档的指定对比维度写一段中文短描述。\n\n"
                 "【硬性约束】\n"
@@ -93,7 +103,7 @@ def _compare_messages(source: str, plan: SummarySectionPlan, query: str, context
             )
         ),
         HumanMessage(
-            content = (
+            content=(
                 f"【目标文档】{source}\n"
                 f"【对比维度】{plan['title']}\n"
                 f"【维度聚焦】{plan['instruction']}\n"
@@ -105,11 +115,13 @@ def _compare_messages(source: str, plan: SummarySectionPlan, query: str, context
     ]
 
 
-def _compare_retry_messages(source: str, plan: SummarySectionPlan, query: str, context: str):
+def _compare_retry_messages(
+    source: str, plan: SummarySectionPlan, query: str, context: str
+):
     # 本地模型误判无依据时，用更直接的事实提炼提示重试一次。
     return [
         SystemMessage(
-            content = (
+            content=(
                 "你是一位严谨的中文资料整理助手。下面片段已经由程序筛选为与指定对比维度相关。"
                 "请从片段中提炼事实，不要因为文档类型不是论文而回答“文档中未明确说明”。\n\n"
                 "【要求】只能依据 <Document> 标签内文字；能找到相关事实就写 1-2 句；"
@@ -117,7 +129,7 @@ def _compare_retry_messages(source: str, plan: SummarySectionPlan, query: str, c
             )
         ),
         HumanMessage(
-            content = (
+            content=(
                 f"【目标文档】{source}\n"
                 f"【对比维度】{plan['title']}\n"
                 f"【维度说明】{plan['instruction']}\n"
@@ -133,19 +145,22 @@ class DocumentProfileAgent:
     @staticmethod
     def build_profiles(state: dict) -> dict:
         # 每篇文档按相同维度生成 profile，供后续对齐输出。
-        docs_by_source: dict[str, List[RetrievedDoc]] = state.get("compare_docs_by_source", {})
+        docs_by_source: dict[str, List[RetrievedDoc]] = state.get(
+            "compare_docs_by_source", {}
+        )
         sources: List[str] = state.get("compare_sources", list(docs_by_source.keys()))
-        dimensions: List[CompareDimensionPlan] = state.get("compare_dimensions") or default_compare_dimensions(is_local = state.get("is_local", False))
+        dimensions: List[CompareDimensionPlan] = state.get(
+            "compare_dimensions"
+        ) or default_compare_dimensions(is_local=state.get("is_local", False))
         query = state.get("query", "")
         is_local = state.get("is_local", False)
 
         if len(docs_by_source) < 2 or not dimensions:
             return {"document_profiles": [], "compare_dimensions": dimensions}
 
-        llm = Generator._get_client(is_local = is_local)
+        llm = Generator._get_client(is_local=is_local)
 
-        # 把每个 (文档, 维度) cell 拍平成独立任务；source-major / dimension-minor 顺序
-        # 与回填顺序一致，配合 run_section_cells 的保序返回，结果列序/行序与串行相同。
+        # 按 source-major / dimension-minor 拍平任务，依赖保序返回回填矩阵。
         tasks: List[Tuple[str, CompareDimensionPlan, List[RetrievedDoc], List]] = []
         for source in sources:
             docs = docs_by_source.get(source, [])
@@ -155,7 +170,9 @@ class DocumentProfileAgent:
             for dimension in dimensions:
                 tasks.append((source, dimension, docs, doc_tokens))
 
-        def build_cell(task: Tuple[str, CompareDimensionPlan, List[RetrievedDoc], List]) -> CompareCell:
+        def build_cell(
+            task: Tuple[str, CompareDimensionPlan, List[RetrievedDoc], List],
+        ) -> CompareCell:
             source, dimension, docs, doc_tokens = task
             plan = _dimension_as_section_plan(dimension)
             # 每个 cell 走 Summary 共享的证据绑定和无依据规则。
@@ -169,13 +186,15 @@ class DocumentProfileAgent:
                 doc_tokens,
                 _compare_messages,
                 _compare_retry_messages,
-                max_chunks = LOCAL_COMPARE_CELL_CONTEXT_CHUNKS if is_local else COMPARE_CELL_CONTEXT_CHUNKS,
+                max_chunks=LOCAL_COMPARE_CELL_CONTEXT_CHUNKS
+                if is_local
+                else COMPARE_CELL_CONTEXT_CHUNKS,
             )
             return CompareCell(
-                dimension_id = dimension["dimension_id"],
-                source = source,
-                content = content,
-                evidence = evidence,
+                dimension_id=dimension["dimension_id"],
+                source=source,
+                content=content,
+                evidence=evidence,
             )
 
         cells = run_section_cells(tasks, build_cell, is_local)
@@ -185,7 +204,7 @@ class DocumentProfileAgent:
         for (source, *_), cell in zip(tasks, cells):
             cells_by_source.setdefault(source, []).append(cell)
         profiles: List[DocumentProfile] = [
-            DocumentProfile(source = source, cells = cells_by_source[source])
+            DocumentProfile(source=source, cells=cells_by_source[source])
             for source in cells_by_source
         ]
 

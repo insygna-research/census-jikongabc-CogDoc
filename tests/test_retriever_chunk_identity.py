@@ -16,14 +16,18 @@ class _DummyVectorCollection:
         return {
             "documents": [["legacy text"]],
             "ids": [["legacy-id"]],
-            "metadatas": [[{
-                "chunk_index": 0,
-                "source": "legacy.pdf",
-                "page": 1,
-                "page_start": 1,
-                "page_end": 1,
-                "origin": "file",
-            }]],
+            "metadatas": [
+                [
+                    {
+                        "chunk_index": 0,
+                        "source": "legacy.pdf",
+                        "page": 1,
+                        "page_start": 1,
+                        "page_end": 1,
+                        "origin": "file",
+                    }
+                ]
+            ],
             "distances": [[0.1]],
         }
 
@@ -32,17 +36,19 @@ def test_bm25_search_rejects_legacy_docs_without_chunk_id():
     # 旧 BM25 索引不能现场补 chunk_id，必须提示重建。
     retriever = BM25Retriever.__new__(BM25Retriever)
     retriever.bm25 = _DummyBM25()
-    retriever.doc_registry = [{
-        "text": "legacy text",
-        "meta": {
-            "chunk_index": 0,
-            "source": "legacy.pdf",
-            "page": 1,
-            "page_start": 1,
-            "page_end": 1,
-            "origin": "file",
-        },
-    }]
+    retriever.doc_registry = [
+        {
+            "text": "legacy text",
+            "meta": {
+                "chunk_index": 0,
+                "source": "legacy.pdf",
+                "page": 1,
+                "page_start": 1,
+                "page_end": 1,
+                "origin": "file",
+            },
+        }
+    ]
 
     with pytest.raises(RuntimeError, match="missing stable chunk_id"):
         retriever.search("legacy", top_k=1)

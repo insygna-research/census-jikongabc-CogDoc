@@ -13,13 +13,13 @@ def _tokenize_mixed_text_python(text: str) -> List[str]:
     text = text.lower()
     tokens = []
 
-    english_words = re.findall(r'[a-z0-9_\-\.]+', text)
+    english_words = re.findall(r"[a-z0-9_\-\.]+", text)
     tokens.extend([word for word in english_words if len(word) > 1])
 
-    chinese_pure = re.sub(r'[a-z0-9_\-\.]+', ' ', text)
+    chinese_pure = re.sub(r"[a-z0-9_\-\.]+", " ", text)
     import jieba
 
-    for word in jieba.cut(chinese_pure, cut_all = False):
+    for word in jieba.cut(chinese_pure, cut_all=False):
         word = word.strip()
         if word and len(word) > 1:
             tokens.append(word)

@@ -1,10 +1,13 @@
 import json
 from typing import List, Tuple
+from agents.conversation_memory import format_recent_chat_history
 from tools.embedder import Embedder
 
 
 # 关键词改写与自然句问题的相似度阈值需用真实数据继续标定。
 DEFAULT_SIMILARITY_THRESHOLD = 0.5
+# 相似度基准只取最近 1-2 轮，足以提供指代对象又不过度稀释当前问题语义。
+SIMILARITY_BASELINE_HISTORY_LIMIT = 4
 
 
 def _cosine_normalized(a: List[float], b: List[float]) -> float:
@@ -41,12 +44,20 @@ class RewriteVerifyAgent:
         # 全部改写被过滤时返回空列表，retrieve 节点会只用原问题检索。
         query = state.get("query", "")
         rewrites = state.get("rewritten_queries", [])
-        threshold = state.get("rewrite_similarity_threshold", DEFAULT_SIMILARITY_THRESHOLD)
+        threshold = state.get(
+            "rewrite_similarity_threshold", DEFAULT_SIMILARITY_THRESHOLD
+        )
 
         if not query or not rewrites:
             return {"rewritten_queries": rewrites}
 
-        vectors = Embedder.embed_documents([query] + rewrites)
+        # 有历史时用近期对话补全相似度基准，避免指代改写被裸省略句误杀。
+        history_text = format_recent_chat_history(
+            state.get("chat_history"), limit=SIMILARITY_BASELINE_HISTORY_LIMIT
+        )
+        baseline_text = f"{history_text}\n{query}" if history_text else query
+
+        vectors = Embedder.embed_documents([baseline_text] + rewrites)
         original_vec = vectors[0] if vectors else []
         rewrite_vecs = vectors[1:] if len(vectors) > 1 else []
 
@@ -69,8 +80,8 @@ class RewriteVerifyAgent:
             "steps_trace": [
                 {
                     "step_name": "verify_rewrite",
-                    "input_summary": json.dumps(rewrites, ensure_ascii = False),
-                    "output_summary": json.dumps(trace_payload, ensure_ascii = False),
+                    "input_summary": json.dumps(rewrites, ensure_ascii=False),
+                    "output_summary": json.dumps(trace_payload, ensure_ascii=False),
                 }
             ],
         }

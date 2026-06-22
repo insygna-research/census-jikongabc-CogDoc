@@ -44,7 +44,9 @@ def test_native_returns_invalid_page_items_with_valid_pages():
 
 def test_native_accepts_full_width_citation():
     # 全角括号和冒号保持与旧 Python 正则等价。
-    result = rust_core.validate_citations_native("方法见原文［a.pdf：P5］。", VALID_DOCS)
+    result = rust_core.validate_citations_native(
+        "方法见原文［a.pdf：P5］。", VALID_DOCS
+    )
 
     assert result["is_valid"] is True
     assert result["missing_citations"] is False
@@ -54,7 +56,9 @@ def test_native_accepts_full_width_citation():
 
 def test_native_accepts_full_width_digit_citation():
     # 全角数字页码应归一为普通整数。
-    result = rust_core.validate_citations_native("方法见原文［a.pdf：P５］。", VALID_DOCS)
+    result = rust_core.validate_citations_native(
+        "方法见原文［a.pdf：P５］。", VALID_DOCS
+    )
 
     assert result["is_valid"] is True
     assert result["missing_citations"] is False
@@ -76,7 +80,9 @@ def test_native_rejects_invalid_full_width_digit_page_as_page_error():
 
 def test_native_accepts_float_page_metadata():
     # 原生 float 页码按旧 int(page) 语义处理。
-    result = rust_core.validate_citations_native("依据见[a.pdf:P5]。", [_doc("a.pdf", 5.0)])
+    result = rust_core.validate_citations_native(
+        "依据见[a.pdf:P5]。", [_doc("a.pdf", 5.0)]
+    )
 
     assert result["is_valid"] is True
     assert result["invalid_sources"] == []

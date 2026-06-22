@@ -3,6 +3,7 @@ from langgraph.graph import StateGraph, START, END
 
 from agents.compare_generator import CompareGeneratorAgent
 from agents.compare_profile import DocumentProfileAgent, default_compare_dimensions
+from agents.source_resolver import resolve_compare_sources
 from graph.state import GraphState
 from graph.subgraphs.qa import RetrieverFactory
 from tools.document_loader import select_sources_for_compare
@@ -20,17 +21,33 @@ def document_loader_node(state: GraphState) -> dict:
     sources = engine.list_sources()
     selected_sources = select_sources_for_compare(query, sources)
 
+    resolution_trace = []
+    if len(selected_sources) < 2 and sources and state.get("chat_history"):
+        # 字面匹配不足时，用近期对话消解“这个文件/上面那篇”等多轮指代。
+        resolved = resolve_compare_sources(
+            query, sources, state.get("chat_history"), is_local
+        )
+        if len(resolved) >= 2:
+            selected_sources = resolved
+            resolution_trace = [
+                {
+                    "step_name": "compare_source_resolution",
+                    "input_summary": query,
+                    "output_summary": "，".join(resolved),
+                }
+            ]
+
     if len(selected_sources) < 2:
         source_list = "，".join(sources) if sources else "当前知识库没有可用文档"
         message = (
-            "请在对比问题中点名至少 2 篇要对比的文件。"
+            "请在对比问题中点名至少 2 篇要对比的文件（可直接说出文件名）。"
             f"当前可用文档：{source_list}"
         )
         return {
             "compare_sources": [],
             "compare_docs_by_source": {},
             "answer": message,
-            "messages": [AIMessage(content = message)],
+            "messages": [AIMessage(content=message)],
         }
 
     if is_local and len(selected_sources) > LOCAL_COMPARE_MAX_SOURCES:
@@ -45,7 +62,7 @@ def document_loader_node(state: GraphState) -> dict:
             "compare_sources": [],
             "compare_docs_by_source": {},
             "answer": message,
-            "messages": [AIMessage(content = message)],
+            "messages": [AIMessage(content=message)],
         }
 
     docs_by_source = {}
@@ -64,19 +81,24 @@ def document_loader_node(state: GraphState) -> dict:
             "compare_sources": list(docs_by_source.keys()),
             "compare_docs_by_source": docs_by_source,
             "answer": message,
-            "messages": [AIMessage(content = message)],
+            "messages": [AIMessage(content=message)],
         }
 
     compare_sources = list(docs_by_source.keys())
     return {
         "compare_sources": compare_sources,
         "compare_docs_by_source": docs_by_source,
-        "compare_dimensions": state.get("compare_dimensions") or default_compare_dimensions(is_local = is_local),
-        "steps_trace": [
+        "compare_dimensions": state.get("compare_dimensions")
+        or default_compare_dimensions(is_local=is_local),
+        "steps_trace": resolution_trace
+        + [
             {
                 "step_name": "compare_document_loader",
                 "input_summary": query,
-                "output_summary": "，".join(f"{source}: {len(docs_by_source[source])} chunks" for source in compare_sources),
+                "output_summary": "，".join(
+                    f"{source}: {len(docs_by_source[source])} chunks"
+                    for source in compare_sources
+                ),
             }
         ],
     }
@@ -91,11 +113,13 @@ def document_profile_node(state: GraphState) -> dict:
             suggestion = "建议：释放内存或执行 `ollama stop <model>` 后重试；也可以切换到更小的本地模型或云端 API。"
         else:
             suggestion = "建议：稍后重试，或检查云端 API 配置与网络状态。"
-        message = f"模型生成对比画像失败。错误：{type(exc).__name__}: {exc}\n{suggestion}"
+        message = (
+            f"模型生成对比画像失败。错误：{type(exc).__name__}: {exc}\n{suggestion}"
+        )
         return {
             "document_profiles": [],
             "answer": message,
-            "messages": [AIMessage(content = message)],
+            "messages": [AIMessage(content=message)],
             "error": str(exc),
             "steps_trace": [
                 {

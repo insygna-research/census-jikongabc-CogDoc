@@ -88,6 +88,58 @@ def test_verify_rewrites_overwrites_with_filtered_queries(monkeypatch):
     assert "bad" in result["steps_trace"][0]["output_summary"]
 
 
+def test_baseline_augmented_with_chat_history(monkeypatch):
+    # 覆盖历史补全改写不再被裸省略句基准误杀。
+    captured = {}
+
+    def capture(texts):
+        captured["texts"] = texts
+        return [[1.0, 0.0]] * len(texts)
+
+    monkeypatch.setattr(rewrite_verifier.Embedder, "embed_documents", capture)
+
+    result = RewriteVerifyAgent.verify_rewrites(
+        {
+            "query": "它的作者是谁？",
+            "rewritten_queries": ["Transformer 作者"],
+            "chat_history": [
+                {
+                    "role": "user",
+                    "content": "讲讲 Transformer 这篇论文",
+                    "timestamp": None,
+                },
+                {
+                    "role": "assistant",
+                    "content": "它提出了自注意力架构。",
+                    "timestamp": None,
+                },
+            ],
+        }
+    )
+
+    baseline_text = captured["texts"][0]
+    assert "Transformer" in baseline_text
+    assert "它的作者是谁？" in baseline_text
+    assert result["rewritten_queries"] == ["Transformer 作者"]
+
+
+def test_baseline_is_bare_query_without_history(monkeypatch):
+    # 单轮（无历史）基准仍是原问题，行为与改造前一致。
+    captured = {}
+
+    def capture(texts):
+        captured["texts"] = texts
+        return [[1.0, 0.0]] * len(texts)
+
+    monkeypatch.setattr(rewrite_verifier.Embedder, "embed_documents", capture)
+
+    RewriteVerifyAgent.verify_rewrites(
+        {"query": "原始问题", "rewritten_queries": ["改写"]}
+    )
+
+    assert captured["texts"][0] == "原始问题"
+
+
 def test_verify_rewrites_skips_empty_inputs(monkeypatch):
     # 空原问题或空改写无需加载 embedding 模型。
     def fail_if_called(_texts):
@@ -95,12 +147,12 @@ def test_verify_rewrites_skips_empty_inputs(monkeypatch):
 
     monkeypatch.setattr(rewrite_verifier.Embedder, "embed_documents", fail_if_called)
 
-    assert RewriteVerifyAgent.verify_rewrites({"query": "", "rewritten_queries": ["x"]}) == {
-        "rewritten_queries": ["x"]
-    }
-    assert RewriteVerifyAgent.verify_rewrites({"query": "q", "rewritten_queries": []}) == {
-        "rewritten_queries": []
-    }
+    assert RewriteVerifyAgent.verify_rewrites(
+        {"query": "", "rewritten_queries": ["x"]}
+    ) == {"rewritten_queries": ["x"]}
+    assert RewriteVerifyAgent.verify_rewrites(
+        {"query": "q", "rewritten_queries": []}
+    ) == {"rewritten_queries": []}
 
 
 def test_verify_rewrites_handles_empty_embedding_result(monkeypatch):

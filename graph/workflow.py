@@ -6,7 +6,10 @@ from graph.subgraphs.qa import qa_subgraph_node
 from graph.subgraphs.summary import summary_subgraph_node
 from graph.subgraphs.compare import compare_subgraph_node
 
-def route_by_task(state: GraphState) -> Literal["qa_subgraph", "summary_subgraph", "compare_subgraph", "__end__"]:
+
+def route_by_task(
+    state: GraphState,
+) -> Literal["qa_subgraph", "summary_subgraph", "compare_subgraph", "__end__"]:
     # 路由结果只允许落到已注册的子图节点。
     task = state.get("task_type", "qa")
 
@@ -18,6 +21,7 @@ def route_by_task(state: GraphState) -> Literal["qa_subgraph", "summary_subgraph
         return "compare_subgraph"
     else:
         return "__end__"
+
 
 workflow = StateGraph(GraphState)
 
@@ -35,8 +39,8 @@ workflow.add_conditional_edges(
         "qa_subgraph": "qa_subgraph",
         "summary_subgraph": "summary_subgraph",
         "compare_subgraph": "compare_subgraph",
-        "__end__": END
-    }
+        "__end__": END,
+    },
 )
 workflow.add_edge("qa_subgraph", END)
 workflow.add_edge("summary_subgraph", END)

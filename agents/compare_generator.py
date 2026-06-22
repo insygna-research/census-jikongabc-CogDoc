@@ -2,7 +2,11 @@ from typing import Dict, List, Tuple
 from langchain_core.messages import HumanMessage, SystemMessage
 from agents.citation_validator import CitationValidatorAgent
 from agents.qa_generator import Generator
-from agents.summary_generator import all_contents_no_evidence, append_citation_warning, collect_evidence_items
+from agents.summary_generator import (
+    all_contents_no_evidence,
+    append_citation_warning,
+    collect_evidence_items,
+)
 from graph.state import CompareDimensionPlan, DocumentProfile, RetrievedDoc
 
 
@@ -16,7 +20,9 @@ def _profile_lookup(profiles: List[DocumentProfile]) -> Dict[Tuple[str, str], st
     return lookup
 
 
-def _union_compare_docs(docs_by_source: Dict[str, List[RetrievedDoc]], sources: List[str]) -> List[RetrievedDoc]:
+def _union_compare_docs(
+    docs_by_source: Dict[str, List[RetrievedDoc]], sources: List[str]
+) -> List[RetrievedDoc]:
     # 引用校验必须拿到所有参与对比文档的原始 chunk。
     docs: List[RetrievedDoc] = []
     for source in sources:
@@ -36,7 +42,9 @@ def _format_compare_blocks(
     for dimension in dimensions:
         lines.append(f"\n## {dimension['title']}")
         for source in sources:
-            content = lookup.get((source, dimension["dimension_id"]), "文档中未明确说明")
+            content = lookup.get(
+                (source, dimension["dimension_id"]), "文档中未明确说明"
+            )
             content = str(content or "文档中未明确说明").replace("\n", " ").strip()
             lines.append(f"- **{source}**：{content}")
 
@@ -49,7 +57,9 @@ class CompareGeneratorAgent:
         sources: List[str] = state.get("compare_sources", [])
         dimensions: List[CompareDimensionPlan] = state.get("compare_dimensions", [])
         profiles: List[DocumentProfile] = state.get("document_profiles", [])
-        docs_by_source: Dict[str, List[RetrievedDoc]] = state.get("compare_docs_by_source", {})
+        docs_by_source: Dict[str, List[RetrievedDoc]] = state.get(
+            "compare_docs_by_source", {}
+        )
 
         if len(sources) < 2 or not dimensions or not profiles:
             answer = "未能生成对比表：请在问题中点名至少 2 篇可用文档。"
@@ -63,10 +73,14 @@ class CompareGeneratorAgent:
             conclusion_warning = "本地 Ollama 模式已跳过简短结论生成，以降低内存占用。"
         else:
             try:
-                conclusion = CompareGeneratorAgent._generate_conclusion(state, table_answer)
+                conclusion = CompareGeneratorAgent._generate_conclusion(
+                    state, table_answer
+                )
             except Exception as exc:
                 conclusion = ""
-                conclusion_warning = f"结论生成失败，已降级为纯表格：{type(exc).__name__}: {exc}"
+                conclusion_warning = (
+                    f"结论生成失败，已降级为纯表格：{type(exc).__name__}: {exc}"
+                )
         answer = table_answer
         if conclusion:
             answer = f"{table_answer}\n\n## 简短结论\n{conclusion}"
@@ -102,7 +116,7 @@ class CompareGeneratorAgent:
                     for cell in profile.get("cells", [])
                 ),
                 union_docs,
-                fallback_when_empty = not any(
+                fallback_when_empty=not any(
                     "evidence" in cell
                     for profile in profiles
                     for cell in profile.get("cells", [])
@@ -117,10 +131,10 @@ class CompareGeneratorAgent:
         is_local = state.get("is_local", False)
         query = state.get("query", "")
 
-        llm = Generator._get_client(is_local = is_local)
+        llm = Generator._get_client(is_local=is_local)
         messages = [
             SystemMessage(
-                content = (
+                content=(
                     "你是一位严谨的技术方案对比助手。只能依据用户提供的 Markdown 对比内容写结论。\n\n"
                     "【硬性约束】\n"
                     "1. 只能复用对比条目中已经出现的事实，禁止引入新事实、新指标、新评价。\n"
@@ -129,7 +143,7 @@ class CompareGeneratorAgent:
                 )
             ),
             HumanMessage(
-                content = (
+                content=(
                     f"【用户对比意图】{query}\n\n"
                     f"【对比内容开始】\n{table_answer}\n【对比内容结束】\n\n"
                     "请基于上述内容写简短结论。"
@@ -142,7 +156,9 @@ class CompareGeneratorAgent:
     def validate_compare_answer(state: dict) -> dict:
         # 结论单独校验，避免表格引用掩盖无引用结论。
         sources: List[str] = state.get("compare_sources", [])
-        docs_by_source: Dict[str, List[RetrievedDoc]] = state.get("compare_docs_by_source", {})
+        docs_by_source: Dict[str, List[RetrievedDoc]] = state.get(
+            "compare_docs_by_source", {}
+        )
         profiles: List[DocumentProfile] = state.get("document_profiles", [])
         union_docs = _union_compare_docs(docs_by_source, sources)
         table_answer = state.get("compare_table_answer", state.get("answer", ""))
@@ -157,7 +173,9 @@ class CompareGeneratorAgent:
         critiques = []
         if conclusion:
             # 先查结论，防止表格里的合法引用掩盖结论缺引用。
-            conclusion_check = CitationValidatorAgent.validate_citations(conclusion, union_docs)
+            conclusion_check = CitationValidatorAgent.validate_citations(
+                conclusion, union_docs
+            )
             if not conclusion_check["is_valid"]:
                 critiques.append(conclusion_check["critique"])
                 answer = table_answer
@@ -166,7 +184,9 @@ class CompareGeneratorAgent:
         if not all_contents_no_evidence(cell_contents):
             # 结论失败后仍校验纯对比块，避免单元格错误被提前降级吞掉。
             table_or_answer = table_answer if critiques else answer
-            full_check = CitationValidatorAgent.validate_citations(table_or_answer, union_docs)
+            full_check = CitationValidatorAgent.validate_citations(
+                table_or_answer, union_docs
+            )
             if not full_check["is_valid"]:
                 critiques.append(full_check["critique"])
                 answer = table_answer

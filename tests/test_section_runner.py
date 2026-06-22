@@ -5,15 +5,15 @@ from agents.summary_generator import resolve_section_workers, run_section_cells
 
 
 def test_resolve_workers_serializes_local_and_single_task():
-    assert resolve_section_workers(is_local = True, task_count = 10) == 1
-    assert resolve_section_workers(is_local = False, task_count = 1) == 1
-    assert resolve_section_workers(is_local = False, task_count = 0) == 1
+    assert resolve_section_workers(is_local=True, task_count=10) == 1
+    assert resolve_section_workers(is_local=False, task_count=1) == 1
+    assert resolve_section_workers(is_local=False, task_count=0) == 1
 
 
 def test_resolve_workers_caps_at_task_count_and_pool_limit():
     # 任务数小于上限时按任务数；超过上限时被 CLOUD_SECTION_MAX_WORKERS 钳制。
-    assert resolve_section_workers(is_local = False, task_count = 3) == 3
-    assert resolve_section_workers(is_local = False, task_count = 100) == 6
+    assert resolve_section_workers(is_local=False, task_count=3) == 3
+    assert resolve_section_workers(is_local=False, task_count=100) == 6
 
 
 def test_run_section_cells_preserves_input_order_under_jitter():
@@ -22,7 +22,7 @@ def test_run_section_cells_preserves_input_order_under_jitter():
         time.sleep((5 - index) * 0.02)
         return index
 
-    result = run_section_cells(list(range(5)), worker, is_local = False)
+    result = run_section_cells(list(range(5)), worker, is_local=False)
     assert result == [0, 1, 2, 3, 4]
 
 
@@ -42,7 +42,7 @@ def test_run_section_cells_runs_concurrently_when_cloud():
             active -= 1
         return _
 
-    run_section_cells([0, 1, 2], worker, is_local = False)
+    run_section_cells([0, 1, 2], worker, is_local=False)
     assert peak > 1
 
 
@@ -58,6 +58,6 @@ def test_run_section_cells_local_runs_serially():
         active -= 1
         return _
 
-    result = run_section_cells([0, 1, 2], worker, is_local = True)
+    result = run_section_cells([0, 1, 2], worker, is_local=True)
     assert result == [0, 1, 2]
     assert peak == 1

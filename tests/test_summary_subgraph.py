@@ -28,7 +28,7 @@ class FakeStructuredRouter:
         self.schema = schema
 
     def invoke(self, messages):
-        return self.schema(task_type = "summary", reason = "用户要求总结文档")
+        return self.schema(task_type="summary", reason="用户要求总结文档")
 
 
 def _doc(source: str, page: int, local_chunk_index: int) -> dict:
@@ -82,8 +82,48 @@ def test_document_loader_returns_actionable_message_when_ambiguous(monkeypatch):
     assert document_loader_check(result) == "__end__"
 
 
+def test_document_loader_resolves_referential_source(monkeypatch):
+    engine = FakeEngine([_doc("a.pdf", 1, 0), _doc("b.pdf", 1, 0)])
+    monkeypatch.setattr(summary.RetrieverFactory, "get_engine", lambda doc_id: engine)
+    # 「这个文件」字面匹配不到，靠近期对话消解出 a.pdf。
+    monkeypatch.setattr(
+        summary, "resolve_summary_source", lambda *args, **kwargs: "a.pdf"
+    )
+
+    result = document_loader_node(
+        {
+            "query": "总结这个文件",
+            "doc_id": "kb",
+            "chat_history": [
+                {"role": "user", "content": "讲讲 a.pdf", "timestamp": None}
+            ],
+        }
+    )
+
+    assert result["summary_source"] == "a.pdf"
+    assert result["steps_trace"][0]["step_name"] == "summary_source_resolution"
+
+
+def test_document_loader_skips_resolution_without_history(monkeypatch):
+    engine = FakeEngine([_doc("a.pdf", 1, 0), _doc("b.pdf", 1, 0)])
+    monkeypatch.setattr(summary.RetrieverFactory, "get_engine", lambda doc_id: engine)
+
+    def fail(*args, **kwargs):
+        raise AssertionError("无历史时不应触发指代消解")
+
+    monkeypatch.setattr(summary, "resolve_summary_source", fail)
+
+    result = document_loader_node({"query": "总结这个文件", "doc_id": "kb"})
+
+    assert result["summary_docs"] == []
+    assert "可直接说出文件名" in result["answer"]
+
+
 def test_document_loader_check_continues_when_docs_exist():
-    assert document_loader_check({"summary_docs": [_doc("a.pdf", 1, 0)]}) == "section_planner_node"
+    assert (
+        document_loader_check({"summary_docs": [_doc("a.pdf", 1, 0)]})
+        == "section_planner_node"
+    )
 
 
 def test_section_planner_node_delegates_to_agent():
@@ -103,7 +143,9 @@ def test_section_summary_node_generates_each_planned_section(monkeypatch):
         def invoke(self, messages):
             return FakeMessage("该章节内容来自文档。[a.pdf:P1]")
 
-    monkeypatch.setattr(summary_generator.Generator, "_get_client", lambda is_local = False: FakeLLM())
+    monkeypatch.setattr(
+        summary_generator.Generator, "_get_client", lambda is_local=False: FakeLLM()
+    )
 
     result = section_summary_node(
         {
@@ -116,9 +158,18 @@ def test_section_summary_node_generates_each_planned_section(monkeypatch):
         }
     )
 
-    assert [section["title"] for section in result["summary_section_results"]] == ["研究问题", "方法"]
-    assert result["summary_section_results"][0]["content"] == "该章节内容来自文档。[a.pdf:P1]"
-    assert result["summary_section_results"][0]["evidence"][0]["chunk_id"] == "chunk:a.pdf:0"
+    assert [section["title"] for section in result["summary_section_results"]] == [
+        "研究问题",
+        "方法",
+    ]
+    assert (
+        result["summary_section_results"][0]["content"]
+        == "该章节内容来自文档。[a.pdf:P1]"
+    )
+    assert (
+        result["summary_section_results"][0]["evidence"][0]["chunk_id"]
+        == "chunk:a.pdf:0"
+    )
 
 
 def test_section_summary_node_retries_local_no_evidence(monkeypatch):
@@ -133,21 +184,30 @@ def test_section_summary_node_retries_local_no_evidence(monkeypatch):
             return FakeMessage("文档说明了竞赛背景和目标。")
 
     fake_llm = FakeLLM()
-    monkeypatch.setattr(summary_generator.Generator, "_get_client", lambda is_local = False: fake_llm)
+    monkeypatch.setattr(
+        summary_generator.Generator, "_get_client", lambda is_local=False: fake_llm
+    )
 
     result = section_summary_node(
         {
             "summary_source": "a.pdf",
             "summary_docs": [_doc("a.pdf", 1, 0)],
             "summary_section_plans": [
-                {"section_id": "one", "title": "背景与目标", "instruction": "概括背景目标"},
+                {
+                    "section_id": "one",
+                    "title": "背景与目标",
+                    "instruction": "概括背景目标",
+                },
             ],
             "is_local": True,
         }
     )
 
     assert fake_llm.calls == 2
-    assert result["summary_section_results"][0]["content"] == "文档说明了竞赛背景和目标。[a.pdf:P1]"
+    assert (
+        result["summary_section_results"][0]["content"]
+        == "文档说明了竞赛背景和目标。[a.pdf:P1]"
+    )
 
 
 def test_section_summary_node_limits_local_context(monkeypatch):
@@ -155,7 +215,9 @@ def test_section_summary_node_limits_local_context(monkeypatch):
         def invoke(self, messages):
             return FakeMessage("这是本地摘要。")
 
-    monkeypatch.setattr(summary_generator.Generator, "_get_client", lambda is_local = False: FakeLLM())
+    monkeypatch.setattr(
+        summary_generator.Generator, "_get_client", lambda is_local=False: FakeLLM()
+    )
 
     result = section_summary_node(
         {
@@ -182,7 +244,9 @@ def test_section_summary_node_uses_six_chunks_for_large_local_documents(monkeypa
         def invoke(self, messages):
             return FakeMessage("这是本地摘要。")
 
-    monkeypatch.setattr(summary_generator.Generator, "_get_client", lambda is_local = False: FakeLLM())
+    monkeypatch.setattr(
+        summary_generator.Generator, "_get_client", lambda is_local=False: FakeLLM()
+    )
 
     result = section_summary_node(
         {
@@ -205,7 +269,9 @@ def test_section_summary_node_keeps_small_local_documents_intact(monkeypatch):
         def invoke(self, messages):
             return FakeMessage("这是本地摘要。")
 
-    monkeypatch.setattr(summary_generator.Generator, "_get_client", lambda is_local = False: FakeLLM())
+    monkeypatch.setattr(
+        summary_generator.Generator, "_get_client", lambda is_local=False: FakeLLM()
+    )
 
     result = section_summary_node(
         {
@@ -348,11 +414,15 @@ def test_global_summary_node_accepts_all_no_evidence_sections():
 def test_workflow_routes_to_summary_subgraph_smoke(monkeypatch):
     engine = FakeEngine([_doc("a.pdf", 1, 0), _doc("b.pdf", 1, 0)])
     monkeypatch.setattr(summary.RetrieverFactory, "get_engine", lambda doc_id: engine)
-    monkeypatch.setattr(summary_generator.Generator, "_get_client", lambda is_local = False: FakeSummaryLLM())
+    monkeypatch.setattr(
+        summary_generator.Generator,
+        "_get_client",
+        lambda is_local=False: FakeSummaryLLM(),
+    )
 
     result = workflow.app.invoke(
         {"messages": []},
-        config = {
+        config={
             "configurable": {
                 "query": "请总结 a.pdf",
                 "doc_id": "kb",

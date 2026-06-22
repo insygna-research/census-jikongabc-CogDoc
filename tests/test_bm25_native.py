@@ -11,14 +11,29 @@ _rust_core = ensure_rust_core("Bm25Index")
 def _python_topk(corpus, query, top_k):
     bm25 = BM25Okapi(corpus)
     scores = bm25.get_scores(query)
-    order = sorted(range(len(scores)), key = lambda i: scores[i], reverse = True)[:top_k]
+    order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
     return [(i, float(scores[i])) for i in order]
 
 
 def _build_corpus(seed, size):
     rng = random.Random(seed)
-    vocab = ["模型", "方法", "架构", "检索", "向量", "bm25", "rrf", "chunk",
-             "page", "摘要", "对比", "实验", "结论", "数据", "指标"]
+    vocab = [
+        "模型",
+        "方法",
+        "架构",
+        "检索",
+        "向量",
+        "bm25",
+        "rrf",
+        "chunk",
+        "page",
+        "摘要",
+        "对比",
+        "实验",
+        "结论",
+        "数据",
+        "指标",
+    ]
     return [[rng.choice(vocab) for _ in range(rng.randint(3, 25))] for _ in range(size)]
 
 
@@ -34,7 +49,7 @@ def _build_corpus(seed, size):
     ],
 )
 def test_native_bm25_matches_rank_bm25_ranking(query):
-    corpus = _build_corpus(seed = 7, size = 120)
+    corpus = _build_corpus(seed=7, size=120)
     index = _rust_core.Bm25Index(corpus)
 
     native = list(index.score_topk(query, 10))
@@ -42,7 +57,7 @@ def test_native_bm25_matches_rank_bm25_ranking(query):
 
     assert [doc_id for doc_id, _ in native] == [doc_id for doc_id, _ in reference]
     for (_, native_score), (_, ref_score) in zip(native, reference):
-        assert native_score == pytest.approx(ref_score, abs = 1e-9)
+        assert native_score == pytest.approx(ref_score, abs=1e-9)
 
 
 def test_native_bm25_handles_empty_corpus():

@@ -6,7 +6,13 @@ def test_default_summary_sections_are_stable():
     result = SectionPlannerAgent.plan_sections({"query": "总结这篇文档"})
 
     titles = [section["title"] for section in result["summary_section_plans"]]
-    assert titles == ["背景与目标", "方案与流程", "规则与要求", "价值与产出", "限制与注意事项"]
+    assert titles == [
+        "背景与目标",
+        "方案与流程",
+        "规则与要求",
+        "价值与产出",
+        "限制与注意事项",
+    ]
     assert result["steps_trace"][0]["step_name"] == "summary_section_planner"
 
 

@@ -1,12 +1,18 @@
-import sys  
-import os 
+import sys
+import os
 import signal
+
 try:
     import readline
 except ImportError:
     readline = None
 from tools.rust_core_loader import ensure_rust_core
-from tools.manifest import load_index_manifest, manifests_match, save_index_manifest, stamp_chunk_identity_contract
+from tools.manifest import (
+    load_index_manifest,
+    manifests_match,
+    save_index_manifest,
+    stamp_chunk_identity_contract,
+)
 
 try:
     rust_core = ensure_rust_core("scan_pdf_manifest_native", "rrf_fusion_native")
@@ -15,12 +21,18 @@ except RuntimeError as exc:
     raise SystemExit(1) from exc
 from graph.workflow import app
 from graph.subgraphs.qa import RetrieverFactory
-from tools.parser import smart_parse 
+from agents.conversation_memory import (
+    CHAT_HISTORY_MESSAGE_LIMIT,
+    extract_chat_turn,
+    extract_final_answer,
+)
+from tools.parser import smart_parse
 from tools.chunker import chunk_paper
 from tools.embedder import Embedder
-from tools.reranker import BGEReranker 
+from tools.reranker import BGEReranker
 
 DEFAULT_DOC_DIR = os.getenv("COGDOC_DOC_DIR", "测试论文")
+
 
 def safe_print_on_interrupt(message: str) -> None:
     # 打印退出提示时临时忽略 SIGINT，避免 Ctrl+C 连按打断清理路径。
@@ -31,6 +43,7 @@ def safe_print_on_interrupt(message: str) -> None:
     finally:
         signal.signal(signal.SIGINT, previous_handler)
 
+
 def _index_is_current(doc_id: str, doc_dir: str, engine):
     # 任一路索引缺失都视为不可复用。
     if not (engine.vector_retriever.exists() and engine.bm25_retriever.exists()):
@@ -39,8 +52,13 @@ def _index_is_current(doc_id: str, doc_dir: str, engine):
         return False, None
 
     abs_dir = os.path.abspath(doc_dir)
-    current_manifest = stamp_chunk_identity_contract(rust_core.scan_pdf_manifest_native(doc_id, abs_dir))
-    return manifests_match(current_manifest, load_index_manifest(doc_id)), current_manifest
+    current_manifest = stamp_chunk_identity_contract(
+        rust_core.scan_pdf_manifest_native(doc_id, abs_dir)
+    )
+    return manifests_match(
+        current_manifest, load_index_manifest(doc_id)
+    ), current_manifest
+
 
 def warm_up_runtime(engine) -> None:
     print("🧠 正在预热检索与重排模型，请稍候...")
@@ -49,7 +67,10 @@ def warm_up_runtime(engine) -> None:
     BGEReranker.warm_up()
     print("✅ 模型与分词资源预热完成。")
 
-def build_index(doc_id: str, doc_dir: str = DEFAULT_DOC_DIR, current_manifest: dict = None):
+
+def build_index(
+    doc_id: str, doc_dir: str = DEFAULT_DOC_DIR, current_manifest: dict = None
+):
     # 重建索引时同步刷新 manifest 和 chunk 身份契约。
     if not os.path.exists(doc_dir):
         os.makedirs(doc_dir)
@@ -70,8 +91,7 @@ def build_index(doc_id: str, doc_dir: str = DEFAULT_DOC_DIR, current_manifest: d
     # chunk_id 依赖 manifest 里的文件 sha。
     current_manifest = stamp_chunk_identity_contract(current_manifest)
     source_hash_by_name = {
-        doc["name"]: doc["sha256"]
-        for doc in current_manifest.get("documents", [])
+        doc["name"]: doc["sha256"] for doc in current_manifest.get("documents", [])
     }
 
     all_chunks = []
@@ -82,9 +102,9 @@ def build_index(doc_id: str, doc_dir: str = DEFAULT_DOC_DIR, current_manifest: d
     for pdf in pdf_files:
         pdf_path = os.path.join(doc_dir, pdf)
         print(f" 正在深度解析文档: {pdf}")
-        
+
         pages = smart_parse(pdf_path)
-        chunks = chunk_paper(pages, source_sha256 = source_hash_by_name[pdf])
+        chunks = chunk_paper(pages, source_sha256=source_hash_by_name[pdf])
         for chunk in chunks:
             chunk["meta"]["chunk_index"] = next_chunk_index
             next_chunk_index += 1
@@ -96,7 +116,7 @@ def build_index(doc_id: str, doc_dir: str = DEFAULT_DOC_DIR, current_manifest: d
             source = meta.get("source", pdf)
             page = meta.get("page", 1)
             chunk_idx = meta.get("chunk_index", i)
-            
+
             print(f"📄 [Chunk #{chunk_idx}] 来源: {source} | 页码: P{page}")
             print(f"📝 文本内容:\n{chunk['text'].strip()}")
             print("-" * 30)
@@ -110,7 +130,7 @@ def build_index(doc_id: str, doc_dir: str = DEFAULT_DOC_DIR, current_manifest: d
 
     print(f"\n📊 全量清洗完成，共生成 {len(all_chunks)} 个标准知识片段。")
     print("正在写入双轨融合索引（Vector + BM25）...")
-    
+
     engine = RetrieverFactory.get_engine(doc_id)
     engine.index(all_chunks)
 
@@ -118,32 +138,30 @@ def build_index(doc_id: str, doc_dir: str = DEFAULT_DOC_DIR, current_manifest: d
 
     print("✅ 物理多轨索引构建成功并落盘，数据管线安全关闭。\n")
 
-def ask(doc_id: str, query: str, is_local: bool = False):
+
+def ask(doc_id: str, query: str, is_local: bool = False, chat_history: list = None):
     # 控制台运行时只输出通过引用校验的最终答案。
     initial_state = {
         "messages": [],
+        "chat_history": list(chat_history or []),
         "iteration_count": 0,
-        "max_iteration_count": 2
+        "max_iteration_count": 2,
     }
-    
+
     runtime_config = {
-        "configurable": {
-            "doc_id": doc_id,
-            "query": query,
-            "is_local": is_local
-        }
+        "configurable": {"doc_id": doc_id, "query": query, "is_local": is_local}
     }
 
     try:
         print(f"\n[运行模式]: {'本地 Ollama' if is_local else '云端 API'}")
-        
+
         token_stream = app.stream(
             initial_state,
-            config = runtime_config,
-            stream_mode = ["messages", "updates"],
-            subgraphs = True,
+            config=runtime_config,
+            stream_mode=["messages", "updates"],
+            subgraphs=True,
         )
-        
+
         current_task = "qa"
         saw_parent_output = False
         fallback_outputs = {
@@ -151,6 +169,7 @@ def ask(doc_id: str, query: str, is_local: bool = False):
             "summary": {},
             "compare": {},
         }
+        final_outputs = {}
 
         def print_final_qa_output(subgraph_output: dict) -> None:
             final_docs = subgraph_output.get("reranked_docs", [])
@@ -162,9 +181,13 @@ def ask(doc_id: str, query: str, is_local: bool = False):
                 for idx, doc in enumerate(final_docs):
                     meta = doc.get("meta", {})
                     retrieval_info = doc.get("retrieval", {})
-                    print(f"  📍 [{idx+1}] 来源: {meta.get('source')} | 页码: P{meta.get('page')}")
-                    print(f"     📊 融合得分(RRF): {retrieval_info.get('rrf_score', 'N/A')}")
-                    preview_text = doc['text'].strip().replace('\n', ' ')
+                    print(
+                        f"  📍 [{idx + 1}] 来源: {meta.get('source')} | 页码: P{meta.get('page')}"
+                    )
+                    print(
+                        f"     📊 融合得分(RRF): {retrieval_info.get('rrf_score', 'N/A')}"
+                    )
+                    preview_text = doc["text"].strip().replace("\n", " ")
                     print(f"     📄 核心内容: {preview_text[:120]}...")
                     print("     " + "-" * 40)
 
@@ -202,12 +225,7 @@ def ask(doc_id: str, query: str, is_local: bool = False):
             print("=" * 50)
 
         def print_final_compare_output(subgraph_output: dict) -> None:
-            messages = subgraph_output.get("messages", [])
-            content = ""
-            if messages:
-                latest = messages[-1]
-                content = latest.get("content", "") if isinstance(latest, dict) else getattr(latest, "content", "")
-            content = content or subgraph_output.get("answer", "")
+            content = extract_final_answer("compare", subgraph_output)
 
             print("\n📊 [CompareAgent 文档对比]:")
             if content:
@@ -222,8 +240,7 @@ def ask(doc_id: str, query: str, is_local: bool = False):
             "compare_subgraph": ("compare", print_final_compare_output),
         }
         fallback_printers = {
-            task_name: printer
-            for task_name, printer in parent_printers.values()
+            task_name: printer for task_name, printer in parent_printers.values()
         }
 
         try:
@@ -244,7 +261,7 @@ def ask(doc_id: str, query: str, is_local: bool = False):
                     queries = rewrite_output.get("rewritten_queries", [])
                     print(f"🔮 [QueryRewriteAgent 多路改写报告]:")
                     for q_idx, q in enumerate(queries):
-                        print(f"   ├── ➔ 检索分支 #{q_idx+1}: '{q}'")
+                        print(f"   ├── ➔ 检索分支 #{q_idx + 1}: '{q}'")
                     print("   └── 🚀 正在拉起多路并行召回与全局大去重机制...")
                     print("-" * 50)
                 elif mode == "updates" and in_subgraph and "citation_node" in data:
@@ -252,7 +269,10 @@ def ask(doc_id: str, query: str, is_local: bool = False):
                     fallback_outputs["qa"].update(citation_output)
                     critique = citation_output.get("critique", "")
                     iter_num = citation_output.get("iteration_count", 1)
-                    max_iter = citation_output.get("max_iteration_count", initial_state.get("max_iteration_count", 2))
+                    max_iter = citation_output.get(
+                        "max_iteration_count",
+                        initial_state.get("max_iteration_count", 2),
+                    )
 
                     if critique:
                         if "未标出任何知识来源" in critique:
@@ -264,18 +284,30 @@ def ask(doc_id: str, query: str, is_local: bool = False):
                         round_answer = fallback_outputs["qa"].get("answer", "")
                         if round_answer:
                             preview = round_answer.replace("\n", " ")[:200]
-                            print(f"   ↳ 本轮模型回答预览 >>> {preview}{'...' if len(round_answer) > 200 else ''}")
+                            print(
+                                f"   ↳ 本轮模型回答预览 >>> {preview}{'...' if len(round_answer) > 200 else ''}"
+                            )
 
                         print(f"   ↳ 拒绝原因 >>> {critique}")
                         if iter_num < max_iter:
-                            print(f"   ↳ 🔄 正在强行打回控制流，驱使大模型执行自愈修正...")
+                            print(
+                                f"   ↳ 🔄 正在强行打回控制流，驱使大模型执行自愈修正..."
+                            )
                         else:
-                            print(f"   ↳ ⛔ 已达到最大自愈次数，系统将拦截本轮未通过校验的答案。")
+                            print(
+                                f"   ↳ ⛔ 已达到最大自愈次数，系统将拦截本轮未通过校验的答案。"
+                            )
                         print("-" * 50)
                     else:
-                        print(f"\n🛡️ [CitationAgent 审计通过]: 第 {iter_num} 轮回答物理引用契约完全匹配，无名义页码幻觉。")
+                        print(
+                            f"\n🛡️ [CitationAgent 审计通过]: 第 {iter_num} 轮回答物理引用契约完全匹配，无名义页码幻觉。"
+                        )
                         print("-" * 50)
-                elif mode == "updates" and in_subgraph and "compare_citation_node" in data:
+                elif (
+                    mode == "updates"
+                    and in_subgraph
+                    and "compare_citation_node" in data
+                ):
                     # compare 单遍校验、无自愈迭代；此分支会短路下方通用分支，需自行补缓存。
                     compare_citation_output = data["compare_citation_node"]
                     fallback_outputs["compare"].update(compare_citation_output)
@@ -285,13 +317,17 @@ def ask(doc_id: str, query: str, is_local: bool = False):
                         if "未包含任何引用标签" in critique:
                             reject_reason = "对比结论未携带任何引用标签"
                         else:
-                            reject_reason = "对比结论或单元格存在捏造引证（错误页码/文件名）"
+                            reject_reason = (
+                                "对比结论或单元格存在捏造引证（错误页码/文件名）"
+                            )
                         print(f"\n🚨 [CompareAgent 引用校验未通过]: {reject_reason}")
                         print(f"   ↳ 已降级为纯对比表，并在答案末尾追加引用校验警告。")
                         print(f"   ↳ 拒绝原因 >>> {critique}")
                         print("-" * 50)
                     else:
-                        print(f"\n🛡️ [CompareAgent 审计通过]: 对比表与简短结论的引用契约完全匹配，无名义页码幻觉。")
+                        print(
+                            f"\n🛡️ [CompareAgent 审计通过]: 对比表与简短结论的引用契约完全匹配，无名义页码幻觉。"
+                        )
                         print("-" * 50)
                 elif mode == "updates" and in_subgraph:
                     task_output = fallback_outputs.setdefault(current_task, {})
@@ -303,36 +339,50 @@ def ask(doc_id: str, query: str, is_local: bool = False):
                         if parent_key in data:
                             saw_parent_output = True
                             printer(data[parent_key])
+                            final_outputs[task_name] = data[parent_key]
                             break
 
             if not saw_parent_output:
                 task_output = fallback_outputs.get(current_task, {})
                 if task_output:
-                    fallback_printers.get(current_task, print_final_compare_output)(task_output)
-                        
+                    fallback_printers.get(current_task, print_final_compare_output)(
+                        task_output
+                    )
+                    final_outputs[current_task] = task_output
+
         except Exception as stream_err:
             print(f"\n⚠️ [大模型流式通信管道在运行时遭遇意外中断]: {stream_err}")
-            
+
         print("\n" + "-" * 50)
-        
+        task_output = final_outputs.get(current_task, {})
+        return extract_chat_turn(current_task, task_output, query)
+
     except Exception as e:
         print(f"\n❌ [Pipeline 核心图调度执行失败]: {e}")
+    return []
+
 
 def main():
     # CLI 默认绑定一个本地知识库隔离域。
     TARGET_DOC_ID = "arch_blueprint_2026"
     TARGET_DOC_DIR = DEFAULT_DOC_DIR
-    
+
     engine = RetrieverFactory.get_engine(TARGET_DOC_ID)
 
-    index_is_current, current_manifest = _index_is_current(TARGET_DOC_ID, TARGET_DOC_DIR, engine)
+    index_is_current, current_manifest = _index_is_current(
+        TARGET_DOC_ID, TARGET_DOC_DIR, engine
+    )
     if not index_is_current:
         print(f"⚠️ 预检提示: 知识库 【{TARGET_DOC_ID}】 的本地索引缺失或已过期。")
         try:
             build_index(TARGET_DOC_ID, TARGET_DOC_DIR, current_manifest)
-            if not (engine.vector_retriever.exists() and engine.bm25_retriever.exists()):
+            if not (
+                engine.vector_retriever.exists() and engine.bm25_retriever.exists()
+            ):
                 print("❌ 错误: 知识库目录中由于缺乏源文件，无法建立有效索引。")
-                input("⚙️ 请在上述目标文件夹内放入 PDF 文档后，按回车键退出并重新拉起系统...")
+                input(
+                    "⚙️ 请在上述目标文件夹内放入 PDF 文档后，按回车键退出并重新拉起系统..."
+                )
                 sys.exit(1)
         except Exception as e:
             print(f"❌ 自动化索引流构建失败: {e}")
@@ -353,19 +403,20 @@ def main():
     print("=" * 60)
 
     is_local = True
-    
+    chat_history = []
+
     while True:
         try:
             mode_str = "本地Ollama" if is_local else "云端API"
             user_input = input(f"[{mode_str}] 请输入您的问题 >>> ").strip()
-            
+
             if not user_input:
                 continue
-                
+
             if user_input.lower() in ["exit", "quit"]:
                 print("👋 接收到安全退出指令，控制台正在释放资源，再见。")
                 break
-                
+
             if user_input.lower() == "/local":
                 is_local = True
                 print("🔄 控制面配置已成功切换到：本地 Ollama 模式。")
@@ -376,13 +427,21 @@ def main():
                 print("🔄 控制面配置已成功切换到：云端 API 模式。")
                 continue
 
-            ask(doc_id = TARGET_DOC_ID, query = user_input, is_local = is_local)
-            
+            new_messages = ask(
+                doc_id=TARGET_DOC_ID,
+                query=user_input,
+                is_local=is_local,
+                chat_history=chat_history,
+            )
+            chat_history.extend(new_messages)
+            chat_history = chat_history[-CHAT_HISTORY_MESSAGE_LIMIT:]
+
         except KeyboardInterrupt:
             safe_print_on_interrupt("\n👋 检测到系统中断信号（Ctrl+C），安全关闭。")
             break
         except Exception as e:
             print(f"⚠️ [控制台内部异常捕获]: {e}")
+
 
 if __name__ == "__main__":
     main()

@@ -8,7 +8,9 @@ rust_core = ensure_rust_core("validate_citations_native")
 
 class CitationValidatorAgent:
     @staticmethod
-    def validate_citations(answer: str, valid_docs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def validate_citations(
+        answer: str, valid_docs: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
         # Rust 负责确定性规则校验，Python 负责生成 critique。
         native_result = rust_core.validate_citations_native(answer or "", valid_docs)
         if native_result["is_valid"]:
@@ -22,10 +24,12 @@ class CitationValidatorAgent:
                     "要求：每陈述一处来自文档的事实，须在该句句尾附加 [文件名.pdf:P页码] 格式的引用标签，"
                     "其中文件名和页码直接取自对应 <Document> 标签的 source 和 page 属性。\n"
                     "请重新生成回答，确保每条事实都有对应的引用标注。"
-                )
+                ),
             }
 
-        critique_lines = ["【引用校验未通过】检测到以下引用存在错误，请逐一核查后重新生成："]
+        critique_lines = [
+            "【引用校验未通过】检测到以下引用存在错误，请逐一核查后重新生成："
+        ]
         for err in native_result["invalid_sources"]:
             critique_lines.append(
                 f"  - 文件名错误：[{err['source']}:P{err['page']}] (该文件根本不在本次检索的上下文中)"
@@ -41,7 +45,4 @@ class CitationValidatorAgent:
             "不得引用未出现在参考资料中的文件或页码。"
         )
 
-        return {
-            "is_valid": False,
-            "critique": "\n".join(critique_lines)
-        }
+        return {"is_valid": False, "critique": "\n".join(critique_lines)}
