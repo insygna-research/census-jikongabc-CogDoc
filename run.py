@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 import signal
 
 try:
@@ -13,13 +14,8 @@ from tools.manifest import (
     save_index_manifest,
     stamp_chunk_identity_contract,
 )
-
-try:
-    rust_core = ensure_rust_core("scan_pdf_manifest_native", "rrf_fusion_native")
-except RuntimeError as exc:
-    print(f"❌ {exc}")
-    raise SystemExit(1) from exc
-from graph.workflow import app
+from agents.router import FORCED_TASK_TYPES
+from graph.workflow import UNKNOWN_RESPONSE, app
 from graph.subgraphs.qa import RetrieverFactory
 from agents.conversation_memory import (
     CHAT_HISTORY_MESSAGE_LIMIT,
@@ -32,6 +28,25 @@ from tools.embedder import Embedder
 from tools.reranker import BGEReranker
 
 DEFAULT_DOC_DIR = os.getenv("COGDOC_DOC_DIR", "测试论文")
+FORCED_MODE_PATTERN = re.compile(
+    rf"^/({'|'.join(re.escape(task) for task in FORCED_TASK_TYPES)})(?:\s+(.*))?$",
+    re.I,
+)
+rust_core = None
+
+
+def get_rust_core():
+    global rust_core
+    if rust_core is None:
+        rust_core = ensure_rust_core("scan_pdf_manifest_native", "rrf_fusion_native")
+    return rust_core
+
+
+def parse_forced_mode(user_input: str) -> tuple[str | None, str]:
+    match = FORCED_MODE_PATTERN.match(user_input.strip())
+    if not match:
+        return None, user_input
+    return match.group(1).lower(), (match.group(2) or "").strip()
 
 
 def safe_print_on_interrupt(message: str) -> None:
@@ -53,7 +68,7 @@ def _index_is_current(doc_id: str, doc_dir: str, engine):
 
     abs_dir = os.path.abspath(doc_dir)
     current_manifest = stamp_chunk_identity_contract(
-        rust_core.scan_pdf_manifest_native(doc_id, abs_dir)
+        get_rust_core().scan_pdf_manifest_native(doc_id, abs_dir)
     )
     return manifests_match(
         current_manifest, load_index_manifest(doc_id)
@@ -87,7 +102,7 @@ def build_index(
 
     if current_manifest is None:
         abs_dir = os.path.abspath(doc_dir)
-        current_manifest = rust_core.scan_pdf_manifest_native(doc_id, abs_dir)
+        current_manifest = get_rust_core().scan_pdf_manifest_native(doc_id, abs_dir)
     # chunk_id 依赖 manifest 里的文件 sha。
     current_manifest = stamp_chunk_identity_contract(current_manifest)
     source_hash_by_name = {
@@ -139,7 +154,13 @@ def build_index(
     print("✅ 物理多轨索引构建成功并落盘，数据管线安全关闭。\n")
 
 
-def ask(doc_id: str, query: str, is_local: bool = False, chat_history: list = None):
+def ask(
+    doc_id: str,
+    query: str,
+    is_local: bool = False,
+    chat_history: list = None,
+    forced_task: str | None = None,
+):
     # 控制台运行时只输出通过引用校验的最终答案。
     initial_state = {
         "messages": [],
@@ -148,9 +169,10 @@ def ask(doc_id: str, query: str, is_local: bool = False, chat_history: list = No
         "max_iteration_count": 2,
     }
 
-    runtime_config = {
-        "configurable": {"doc_id": doc_id, "query": query, "is_local": is_local}
-    }
+    configurable = {"doc_id": doc_id, "query": query, "is_local": is_local}
+    if forced_task in FORCED_TASK_TYPES:
+        configurable["forced_task"] = forced_task
+    runtime_config = {"configurable": configurable}
 
     try:
         print(f"\n[运行模式]: {'本地 Ollama' if is_local else '云端 API'}")
@@ -168,6 +190,7 @@ def ask(doc_id: str, query: str, is_local: bool = False, chat_history: list = No
             "qa": {},
             "summary": {},
             "compare": {},
+            "unknown": {},
         }
         final_outputs = {}
 
@@ -234,10 +257,18 @@ def ask(doc_id: str, query: str, is_local: bool = False, chat_history: list = No
                 print("\n⚠️ [CompareAgent]: 对比子图未返回可打印内容。")
             print("=" * 50)
 
+        def print_final_unknown_output(subgraph_output: dict) -> None:
+            content = (
+                extract_final_answer("unknown", subgraph_output) or UNKNOWN_RESPONSE
+            )
+            print(f"\n🤖 [AI]: {content}")
+            print("=" * 50)
+
         parent_printers = {
             "qa_subgraph": ("qa", print_final_qa_output),
             "summary_subgraph": ("summary", print_final_summary_output),
             "compare_subgraph": ("compare", print_final_compare_output),
+            "unknown_node": ("unknown", print_final_unknown_output),
         }
         fallback_printers = {
             task_name: printer for task_name, printer in parent_printers.values()
@@ -367,6 +398,12 @@ def main():
     TARGET_DOC_ID = "arch_blueprint_2026"
     TARGET_DOC_DIR = DEFAULT_DOC_DIR
 
+    try:
+        get_rust_core()
+    except RuntimeError as exc:
+        print(f"❌ {exc}")
+        sys.exit(1)
+
     engine = RetrieverFactory.get_engine(TARGET_DOC_ID)
 
     index_is_current, current_manifest = _index_is_current(
@@ -427,11 +464,17 @@ def main():
                 print("🔄 控制面配置已成功切换到：云端 API 模式。")
                 continue
 
+            forced_task, cleaned_query = parse_forced_mode(user_input)
+            if forced_task and not cleaned_query:
+                print(f"⚠️ 请输入 /{forced_task} 后面的具体问题或文档指令。")
+                continue
+
             new_messages = ask(
                 doc_id=TARGET_DOC_ID,
-                query=user_input,
+                query=cleaned_query,
                 is_local=is_local,
                 chat_history=chat_history,
+                forced_task=forced_task,
             )
             chat_history.extend(new_messages)
             chat_history = chat_history[-CHAT_HISTORY_MESSAGE_LIMIT:]

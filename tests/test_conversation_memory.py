@@ -75,6 +75,18 @@ def test_extract_chat_turn_skips_any_task_with_critique():
     )
 
 
+def test_extract_chat_turn_skips_unknown_task():
+    assert (
+        extract_chat_turn(
+            "unknown",
+            {"answer": "我是面向本地知识库的文档问答助手。"},
+            "你好",
+            timestamp="2026-01-01T00:00:00",
+        )
+        == []
+    )
+
+
 def test_extract_chat_turn_skips_compare_without_profiles():
     # 点名不足等早退只产出引导消息、无 document_profiles，不应写入记忆。
     assert (

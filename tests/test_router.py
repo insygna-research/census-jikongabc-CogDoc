@@ -99,3 +99,61 @@ def test_router_uses_json_mode_for_llm_structured_output(monkeypatch):
 
     assert result["task_type"] == "qa"
     assert result["router_reason"] == "普通信息诉求"
+
+
+def test_router_forced_task_short_circuits_llm(monkeypatch):
+    def raise_if_called(is_local=False):
+        raise AssertionError("forced_task should bypass LLM routing")
+
+    monkeypatch.setattr(Generator, "_get_client", raise_if_called)
+
+    result = RouterAgent.route_intent(
+        {"chat_history": [{"role": "user", "content": "总结 a.pdf"}]},
+        {
+            "configurable": {
+                "query": "对比 a.pdf 和 b.pdf",
+                "doc_id": "kb",
+                "is_local": False,
+                "forced_task": "compare",
+            }
+        },
+    )
+
+    assert result["task_type"] == "compare"
+    assert result["router_reason"] == "用户显式指定"
+
+
+def test_router_injects_recent_history_for_llm_routing(monkeypatch):
+    captured = {}
+
+    class CapturingLLM:
+        def with_structured_output(self, schema, **kwargs):
+            return self
+
+        def invoke(self, messages):
+            captured["messages"] = messages
+            return RouteDecision(task_type="summary", reason="结合历史判断摘要")
+
+    monkeypatch.setattr(Generator, "_get_client", lambda is_local=False: CapturingLLM())
+
+    result = RouterAgent.route_intent(
+        {
+            "chat_history": [
+                {"role": "user", "content": "介绍 a.pdf 的核心方法"},
+                {"role": "assistant", "content": "a.pdf 主要提出方法 A。"},
+            ]
+        },
+        {
+            "configurable": {
+                "query": "那总结一下呢",
+                "doc_id": "kb",
+                "is_local": False,
+            }
+        },
+    )
+
+    user_message = captured["messages"][1]["content"]
+    assert result["task_type"] == "summary"
+    assert "【近期对话】" in user_message
+    assert "用户: 介绍 a.pdf 的核心方法" in user_message
+    assert "【当前提问】\n那总结一下呢" in user_message

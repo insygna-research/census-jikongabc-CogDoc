@@ -65,6 +65,9 @@ def extract_chat_turn(
     query: str,
     timestamp: str | None = None,
 ) -> list[dict]:
+    if task_type not in {"qa", "compare", "summary"}:
+        return []
+
     answer = clean_answer_for_memory(extract_final_answer(task_type, output))
     query = (query or "").strip()
     if not query or not answer:
