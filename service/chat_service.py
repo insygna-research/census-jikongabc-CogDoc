@@ -10,6 +10,22 @@ from observability.logger import configure_logging, log_event, new_trace_id
 from observability.trace import build_trace_step, export_trace, monotonic_ms
 
 
+class ChatServiceError(Exception):
+    # 服务层灾难失败时携带稳定的错误归因，交付层据此映射 error_code，不漏栈。
+    def __init__(
+        self,
+        stage: str,
+        error_class: str,
+        message: str,
+        trace_id: str | None = None,
+    ):
+        super().__init__(message)
+        self.stage = stage
+        self.error_class = error_class
+        self.message = message
+        self.trace_id = trace_id
+
+
 @dataclass(frozen=True)
 class ChatEvent:
     type: str
@@ -300,6 +316,7 @@ def run_chat(
                     "error_class": type(stream_err).__name__,
                     "message": str(stream_err),
                     "stage": "stream",
+                    "trace_id": trace_id,
                 },
             )
 
@@ -352,15 +369,33 @@ def run_chat(
                 "error_class": type(exc).__name__,
                 "message": str(exc),
                 "stage": "runtime",
+                "trace_id": trace_id,
             },
         )
 
 
 def run_chat_sync(*args: Any, **kwargs: Any) -> ChatResult:
     result = None
+    last_error: dict[str, Any] | None = None
     for event in run_chat(*args, **kwargs):
         if event.type == "final":
             result = event.payload["result"]
-    if result is None:
-        raise RuntimeError("chat service did not produce a final result")
-    return result
+        elif event.type == "error":
+            last_error = event.payload
+    # 出现 error 事件且最终无可信输出（raw_output 为空）即视为失败，不把空答案当成功返回。
+    has_trustworthy_output = result is not None and bool(result.raw_output)
+    if last_error is not None and not has_trustworthy_output:
+        raise ChatServiceError(
+            stage=last_error.get("stage", "runtime"),
+            error_class=last_error.get("error_class", "RuntimeError"),
+            message=last_error.get("message", "")
+            or "chat service did not produce a usable result",
+            trace_id=last_error.get("trace_id"),
+        )
+    if result is not None:
+        return result
+    raise ChatServiceError(
+        stage="runtime",
+        error_class="RuntimeError",
+        message="chat service did not produce a final result",
+    )

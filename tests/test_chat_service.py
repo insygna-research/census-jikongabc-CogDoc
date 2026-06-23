@@ -1,5 +1,7 @@
+import pytest
+
 from service import chat_service
-from service.chat_service import run_chat_sync
+from service.chat_service import ChatServiceError, run_chat_sync
 
 
 def _doc() -> dict:
@@ -103,3 +105,54 @@ def test_run_chat_emits_golden_event_sequence(monkeypatch):
         "citation_passed",
         "final",
     ]
+
+
+class StreamInterruptApp:
+    # 路由后流式迭代中途崩溃，父子图始终未产出可信输出。
+    def stream(self, initial_state, config, stream_mode, subgraphs):
+        yield (
+            (),
+            "updates",
+            {"intent_router": {"task_type": "qa", "router_reason": "x"}},
+        )
+        raise TimeoutError("流中断")
+
+
+def test_run_chat_sync_raises_on_stream_interrupt_without_output(monkeypatch):
+    monkeypatch.setattr(chat_service, "app", StreamInterruptApp())
+    monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
+    monkeypatch.setattr(chat_service, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(chat_service, "export_trace", lambda **kwargs: None)
+
+    with pytest.raises(ChatServiceError) as excinfo:
+        run_chat_sync("kb", "报名要求是什么", is_local=False)
+
+    assert excinfo.value.stage == "stream"
+    assert excinfo.value.error_class == "TimeoutError"
+
+
+class StreamInterruptWithPartialApp:
+    # 父子图输出已落地后流才中断，属于可降级返回而非彻底失败。
+    def stream(self, initial_state, config, stream_mode, subgraphs):
+        yield (
+            (),
+            "updates",
+            {"intent_router": {"task_type": "qa", "router_reason": "x"}},
+        )
+        yield (
+            (),
+            "updates",
+            {"qa_subgraph": {"answer": "部分答案", "critique": "", "reranked_docs": []}},
+        )
+        raise TimeoutError("流中断")
+
+
+def test_run_chat_sync_returns_degraded_result_when_partial_output(monkeypatch):
+    monkeypatch.setattr(chat_service, "app", StreamInterruptWithPartialApp())
+    monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
+    monkeypatch.setattr(chat_service, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(chat_service, "export_trace", lambda **kwargs: None)
+
+    result = run_chat_sync("kb", "报名要求是什么", is_local=False)
+
+    assert result.raw_output.get("answer") == "部分答案"
