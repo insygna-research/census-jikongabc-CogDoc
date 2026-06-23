@@ -2,7 +2,6 @@ import sys
 import os
 import re
 import signal
-import logging
 
 try:
     import readline
@@ -17,13 +16,12 @@ from tools.manifest import (
     stamp_chunk_identity_contract,
 )
 from agents.router import FORCED_TASK_TYPES
-from graph.workflow import UNKNOWN_RESPONSE, app
+from graph.workflow import UNKNOWN_RESPONSE
 from graph.subgraphs.qa import RetrieverFactory
-from observability.logger import configure_logging, log_event, new_trace_id
-from observability.trace import build_trace_step, export_trace, monotonic_ms
+from observability.logger import configure_logging
+from service.chat_service import ChatEvent, ChatResult, run_chat
 from agents.conversation_memory import (
     CHAT_HISTORY_MESSAGE_LIMIT,
-    extract_chat_turn,
     extract_final_answer,
 )
 from tools.parser import smart_parse
@@ -158,6 +156,157 @@ def build_index(
     print("✅ 物理多轨索引构建成功并落盘，数据管线安全关闭。\n")
 
 
+def print_final_qa_output(subgraph_output: dict) -> None:
+    final_docs = subgraph_output.get("reranked_docs", [])
+
+    print("\n🎯 [RAG 召回与精排切块结果预览]:")
+    if not final_docs:
+        print("  （未检索到任何相关的参考本地知识库内容。）")
+    else:
+        for idx, doc in enumerate(final_docs):
+            meta = doc.get("meta", {})
+            retrieval_info = doc.get("retrieval", {})
+            print(
+                f"  📍 [{idx + 1}] 来源: {meta.get('source')} | 页码: P{meta.get('page')}"
+            )
+            print(f"     📊 融合得分(RRF): {retrieval_info.get('rrf_score', 'N/A')}")
+            preview_text = doc["text"].strip().replace("\n", " ")
+            print(f"     📄 核心内容: {preview_text[:120]}...")
+            print("     " + "-" * 40)
+
+    final_answer = subgraph_output.get("answer", "")
+    has_critique_state = "critique" in subgraph_output
+    final_critique = subgraph_output.get("critique")
+    if not has_critique_state:
+        print("\n⚠️ [AI]: QA 子图未返回引证校验状态，已拒绝打印未确认答案。")
+    elif final_critique:
+        print("\n❌ [AI]: 引证校验未通过，已达到最大自愈次数，本轮答案已拦截。")
+        print(f"   ↳ 最终批注 >>>\n{final_critique}")
+    elif final_answer:
+        print(f"\n🤖 [AI]: {final_answer}")
+    else:
+        print("\n⚠️ [AI]: 模型返回了空内容，但引证校验已通过。")
+    print("=" * 50)
+
+
+def print_final_summary_output(subgraph_output: dict) -> None:
+    summary_source = subgraph_output.get("summary_source", "")
+    final_answer = subgraph_output.get("answer", "")
+    evidence = subgraph_output.get("evidence", [])
+
+    if summary_source:
+        print(f"\n📝 [SummaryAgent 文档摘要]: {summary_source}")
+    else:
+        print("\n📝 [SummaryAgent 文档摘要]:")
+
+    if final_answer:
+        print(f"\n{final_answer}")
+    else:
+        print("\n⚠️ [SummaryAgent]: 摘要子图未返回可打印内容。")
+
+    if evidence:
+        print(f"\n📚 [摘要 Evidence]: 共 {len(evidence)} 个 chunk 参与摘要。")
+    print("=" * 50)
+
+
+def print_final_compare_output(subgraph_output: dict) -> None:
+    content = extract_final_answer("compare", subgraph_output)
+
+    print("\n📊 [CompareAgent 文档对比]:")
+    if content:
+        print(f"\n{content}")
+    else:
+        print("\n⚠️ [CompareAgent]: 对比子图未返回可打印内容。")
+    print("=" * 50)
+
+
+def print_final_unknown_output(subgraph_output: dict) -> None:
+    content = extract_final_answer("unknown", subgraph_output) or UNKNOWN_RESPONSE
+    print(f"\n🤖 [AI]: {content}")
+    print("=" * 50)
+
+
+def render_chat_event(event: ChatEvent) -> ChatResult | None:
+    if event.type == "router_decided":
+        task = event.payload.get("task_type", "qa")
+        reason = event.payload.get("reason", "无")
+        print(f"🧠 [RouterAgent 智能路由判别报告]:")
+        print(f"   ↳ 判定任务类型 -> 【{task.upper()}】")
+        print(f"   ↳ 判定分类逻辑 -> {reason}\n")
+        print("-" * 50)
+    elif event.type == "rewrite_queries":
+        queries = event.payload.get("queries", [])
+        print(f"🔮 [QueryRewriteAgent 多路改写报告]:")
+        for q_idx, q in enumerate(queries):
+            print(f"   ├── ➔ 检索分支 #{q_idx + 1}: '{q}'")
+        print("   └── 🚀 正在拉起多路并行召回与全局大去重机制...")
+        print("-" * 50)
+    elif event.type == "citation_rejected":
+        critique = event.payload.get("critique", "")
+        iter_num = event.payload.get("iteration_count", 1)
+        max_iter = event.payload.get("max_iteration_count", 2)
+        if "未标出任何知识来源" in critique:
+            reject_title = f"模型第 {iter_num} 轮回答未添加任何引用标签"
+        else:
+            reject_title = f"模型第 {iter_num} 轮回答包含捏造引证（错误页码/文件名）"
+        print(f"\n🚨 [CitationAgent 拒绝]: {reject_title}")
+
+        round_answer = event.payload.get("round_answer", "")
+        if round_answer:
+            preview = round_answer.replace("\n", " ")[:200]
+            print(
+                f"   ↳ 本轮模型回答预览 >>> {preview}{'...' if len(round_answer) > 200 else ''}"
+            )
+
+        print(f"   ↳ 拒绝原因 >>> {critique}")
+        if event.payload.get("will_retry", False):
+            print(f"   ↳ 🔄 正在强行打回控制流，驱使大模型执行自愈修正...")
+        else:
+            print(f"   ↳ ⛔ 已达到最大自愈次数，系统将拦截本轮未通过校验的答案。")
+        print("-" * 50)
+    elif event.type == "citation_passed":
+        iter_num = event.payload.get("iteration_count", 1)
+        print(
+            f"\n🛡️ [CitationAgent 审计通过]: 第 {iter_num} 轮回答物理引用契约完全匹配，无名义页码幻觉。"
+        )
+        print("-" * 50)
+    elif event.type == "compare_citation_rejected":
+        critique = event.payload.get("critique", "")
+        if "未包含任何引用标签" in critique:
+            reject_reason = "对比结论未携带任何引用标签"
+        else:
+            reject_reason = "对比结论或单元格存在捏造引证（错误页码/文件名）"
+        print(f"\n🚨 [CompareAgent 引用校验未通过]: {reject_reason}")
+        print(f"   ↳ 已降级为纯对比表，并在答案末尾追加引用校验警告。")
+        print(f"   ↳ 拒绝原因 >>> {critique}")
+        print("-" * 50)
+    elif event.type == "compare_citation_passed":
+        print(
+            f"\n🛡️ [CompareAgent 审计通过]: 对比表与简短结论的引用契约完全匹配，无名义页码幻觉。"
+        )
+        print("-" * 50)
+    elif event.type == "error":
+        if event.payload.get("stage") == "stream":
+            print(
+                f"\n⚠️ [大模型流式通信管道在运行时遭遇意外中断]: {event.payload.get('message', '')}"
+            )
+        else:
+            print(f"\n❌ [Pipeline 核心图调度执行失败]: {event.payload.get('message', '')}")
+    elif event.type == "final":
+        result = event.payload["result"]
+        output = event.payload.get("output", result.raw_output)
+        printers = {
+            "qa": print_final_qa_output,
+            "summary": print_final_summary_output,
+            "compare": print_final_compare_output,
+            "unknown": print_final_unknown_output,
+        }
+        printers.get(result.task_type, print_final_compare_output)(output)
+        print("\n" + "-" * 50)
+        return result
+    return None
+
+
 def ask(
     doc_id: str,
     query: str,
@@ -166,366 +315,20 @@ def ask(
     forced_task: str | None = None,
 ):
     # 控制台运行时只输出通过引用校验的最终答案。
-    configure_logging()
-    settings = get_settings()
-    trace_id = new_trace_id()
-    trace_steps = []
-    request_start_ms = monotonic_ms()
-    last_trace_ms = None
-    initial_state = {
-        "messages": [],
-        "chat_history": list(chat_history or []),
-        "iteration_count": 0,
-        "max_iteration_count": 2,
-        "request_id": trace_id,
-        "trace_id": trace_id,
-    }
-
-    configurable = {
-        "doc_id": doc_id,
-        "query": query,
-        "is_local": is_local,
-        "request_id": trace_id,
-        "trace_id": trace_id,
-    }
-    if forced_task in FORCED_TASK_TYPES:
-        configurable["forced_task"] = forced_task
-    runtime_config = {"configurable": configurable}
-
-    try:
-        log_event(
-            "runtime",
-            "request_start",
-            initial_state,
-            doc_id=doc_id,
-            is_local=is_local,
-            forced_task=forced_task,
-            query_length=len(query),
-        )
-        print(f"\n[运行模式]: {'本地 Ollama' if is_local else '云端 API'}")
-
-        token_stream = app.stream(
-            initial_state,
-            config=runtime_config,
-            stream_mode=["messages", "updates"],
-            subgraphs=True,
-        )
-
-        current_task = "qa"
-        saw_parent_output = False
-        fallback_outputs = {
-            "qa": {},
-            "summary": {},
-            "compare": {},
-            "unknown": {},
-        }
-        final_outputs = {}
-
-        def print_final_qa_output(subgraph_output: dict) -> None:
-            final_docs = subgraph_output.get("reranked_docs", [])
-
-            print("\n🎯 [RAG 召回与精排切块结果预览]:")
-            if not final_docs:
-                print("  （未检索到任何相关的参考本地知识库内容。）")
-            else:
-                for idx, doc in enumerate(final_docs):
-                    meta = doc.get("meta", {})
-                    retrieval_info = doc.get("retrieval", {})
-                    print(
-                        f"  📍 [{idx + 1}] 来源: {meta.get('source')} | 页码: P{meta.get('page')}"
-                    )
-                    print(
-                        f"     📊 融合得分(RRF): {retrieval_info.get('rrf_score', 'N/A')}"
-                    )
-                    preview_text = doc["text"].strip().replace("\n", " ")
-                    print(f"     📄 核心内容: {preview_text[:120]}...")
-                    print("     " + "-" * 40)
-
-            final_answer = subgraph_output.get("answer", "")
-            has_critique_state = "critique" in subgraph_output
-            final_critique = subgraph_output.get("critique")
-            if not has_critique_state:
-                print("\n⚠️ [AI]: QA 子图未返回引证校验状态，已拒绝打印未确认答案。")
-            elif final_critique:
-                print("\n❌ [AI]: 引证校验未通过，已达到最大自愈次数，本轮答案已拦截。")
-                print(f"   ↳ 最终批注 >>>\n{final_critique}")
-            elif final_answer:
-                print(f"\n🤖 [AI]: {final_answer}")
-            else:
-                print("\n⚠️ [AI]: 模型返回了空内容，但引证校验已通过。")
-            print("=" * 50)
-
-        def print_final_summary_output(subgraph_output: dict) -> None:
-            summary_source = subgraph_output.get("summary_source", "")
-            final_answer = subgraph_output.get("answer", "")
-            evidence = subgraph_output.get("evidence", [])
-
-            if summary_source:
-                print(f"\n📝 [SummaryAgent 文档摘要]: {summary_source}")
-            else:
-                print("\n📝 [SummaryAgent 文档摘要]:")
-
-            if final_answer:
-                print(f"\n{final_answer}")
-            else:
-                print("\n⚠️ [SummaryAgent]: 摘要子图未返回可打印内容。")
-
-            if evidence:
-                print(f"\n📚 [摘要 Evidence]: 共 {len(evidence)} 个 chunk 参与摘要。")
-            print("=" * 50)
-
-        def print_final_compare_output(subgraph_output: dict) -> None:
-            content = extract_final_answer("compare", subgraph_output)
-
-            print("\n📊 [CompareAgent 文档对比]:")
-            if content:
-                print(f"\n{content}")
-            else:
-                print("\n⚠️ [CompareAgent]: 对比子图未返回可打印内容。")
-            print("=" * 50)
-
-        def print_final_unknown_output(subgraph_output: dict) -> None:
-            content = (
-                extract_final_answer("unknown", subgraph_output) or UNKNOWN_RESPONSE
-            )
-            print(f"\n🤖 [AI]: {content}")
-            print("=" * 50)
-
-        parent_printers = {
-            "qa_subgraph": ("qa", print_final_qa_output),
-            "summary_subgraph": ("summary", print_final_summary_output),
-            "compare_subgraph": ("compare", print_final_compare_output),
-            "unknown_node": ("unknown", print_final_unknown_output),
-        }
-        fallback_printers = {
-            task_name: printer for task_name, printer in parent_printers.values()
-        }
-
-        try:
-            for ns, mode, data in token_stream:
-                in_subgraph = len(ns) > 0
-                if mode == "updates":
-                    now_ms = monotonic_ms()
-                    if last_trace_ms is None:
-                        trace_steps.append(
-                            {
-                                "node_name": "runtime.setup",
-                                "duration_ms": round(
-                                    max(now_ms - request_start_ms, 0.0), 3
-                                ),
-                                "model": None,
-                                "token": None,
-                                "retrieval_top_k": None,
-                                "critique": None,
-                                "error_class": None,
-                                "counts": {},
-                                "evidence": [],
-                            }
-                        )
-                        duration_ms = 0.0
-                    else:
-                        duration_ms = now_ms - last_trace_ms
-                    last_trace_ms = now_ms
-                    namespace = ".".join(str(item) for item in ns)
-                    model_name = (
-                        settings.ollama_model_name
-                        if is_local
-                        else settings.llm_model_name
-                    )
-                    for node_name, node_output in data.items():
-                        if isinstance(node_output, dict):
-                            full_node_name = (
-                                f"{namespace}.{node_name}" if namespace else node_name
-                            )
-                            retrieval_top_k = (
-                                settings.qa_retrieval_top_k
-                                if node_name == "retrieve_node"
-                                else None
-                            )
-                            trace_steps.append(
-                                build_trace_step(
-                                    full_node_name,
-                                    node_output,
-                                    duration_ms,
-                                    model_name=model_name,
-                                    retrieval_top_k=retrieval_top_k,
-                                )
-                            )
-
-                if mode == "updates" and not in_subgraph and "intent_router" in data:
-                    router_output = data["intent_router"]
-                    task = router_output.get("task_type", "qa")
-                    current_task = task
-                    reason = router_output.get("router_reason", "无")
-                    print(f"🧠 [RouterAgent 智能路由判别报告]:")
-                    print(f"   ↳ 判定任务类型 -> 【{task.upper()}】")
-                    print(f"   ↳ 判定分类逻辑 -> {reason}\n")
-                    print("-" * 50)
-                elif mode == "updates" and in_subgraph and "rewrite_node" in data:
-                    rewrite_output = data["rewrite_node"]
-                    queries = rewrite_output.get("rewritten_queries", [])
-                    print(f"🔮 [QueryRewriteAgent 多路改写报告]:")
-                    for q_idx, q in enumerate(queries):
-                        print(f"   ├── ➔ 检索分支 #{q_idx + 1}: '{q}'")
-                    print("   └── 🚀 正在拉起多路并行召回与全局大去重机制...")
-                    print("-" * 50)
-                elif mode == "updates" and in_subgraph and "citation_node" in data:
-                    citation_output = data["citation_node"]
-                    fallback_outputs["qa"].update(citation_output)
-                    critique = citation_output.get("critique", "")
-                    iter_num = citation_output.get("iteration_count", 1)
-                    max_iter = citation_output.get(
-                        "max_iteration_count",
-                        initial_state.get("max_iteration_count", 2),
-                    )
-
-                    if critique:
-                        if "未标出任何知识来源" in critique:
-                            reject_title = f"模型第 {iter_num} 轮回答未添加任何引用标签"
-                        else:
-                            reject_title = f"模型第 {iter_num} 轮回答包含捏造引证（错误页码/文件名）"
-                        print(f"\n🚨 [CitationAgent 拒绝]: {reject_title}")
-
-                        round_answer = fallback_outputs["qa"].get("answer", "")
-                        if round_answer:
-                            preview = round_answer.replace("\n", " ")[:200]
-                            print(
-                                f"   ↳ 本轮模型回答预览 >>> {preview}{'...' if len(round_answer) > 200 else ''}"
-                            )
-
-                        print(f"   ↳ 拒绝原因 >>> {critique}")
-                        if iter_num < max_iter:
-                            print(
-                                f"   ↳ 🔄 正在强行打回控制流，驱使大模型执行自愈修正..."
-                            )
-                        else:
-                            print(
-                                f"   ↳ ⛔ 已达到最大自愈次数，系统将拦截本轮未通过校验的答案。"
-                            )
-                        print("-" * 50)
-                    else:
-                        print(
-                            f"\n🛡️ [CitationAgent 审计通过]: 第 {iter_num} 轮回答物理引用契约完全匹配，无名义页码幻觉。"
-                        )
-                        print("-" * 50)
-                elif (
-                    mode == "updates"
-                    and in_subgraph
-                    and "compare_citation_node" in data
-                ):
-                    # compare 单遍校验、无自愈迭代；此分支会短路下方通用分支，需自行补缓存。
-                    compare_citation_output = data["compare_citation_node"]
-                    fallback_outputs["compare"].update(compare_citation_output)
-                    critique = compare_citation_output.get("critique", "")
-
-                    if critique:
-                        if "未包含任何引用标签" in critique:
-                            reject_reason = "对比结论未携带任何引用标签"
-                        else:
-                            reject_reason = (
-                                "对比结论或单元格存在捏造引证（错误页码/文件名）"
-                            )
-                        print(f"\n🚨 [CompareAgent 引用校验未通过]: {reject_reason}")
-                        print(f"   ↳ 已降级为纯对比表，并在答案末尾追加引用校验警告。")
-                        print(f"   ↳ 拒绝原因 >>> {critique}")
-                        print("-" * 50)
-                    else:
-                        print(
-                            f"\n🛡️ [CompareAgent 审计通过]: 对比表与简短结论的引用契约完全匹配，无名义页码幻觉。"
-                        )
-                        print("-" * 50)
-                elif mode == "updates" and in_subgraph:
-                    task_output = fallback_outputs.setdefault(current_task, {})
-                    for value in data.values():
-                        if isinstance(value, dict):
-                            task_output.update(value)
-                elif mode == "updates" and not in_subgraph:
-                    for parent_key, (task_name, printer) in parent_printers.items():
-                        if parent_key in data:
-                            saw_parent_output = True
-                            printer(data[parent_key])
-                            final_outputs[task_name] = data[parent_key]
-                            break
-
-            if not saw_parent_output:
-                task_output = fallback_outputs.get(current_task, {})
-                if task_output:
-                    fallback_printers.get(current_task, print_final_compare_output)(
-                        task_output
-                    )
-                    final_outputs[current_task] = task_output
-
-        except Exception as stream_err:
-            trace_steps.append(
-                {
-                    "node_name": "runtime.stream",
-                    "duration_ms": 0.0,
-                    "model": None,
-                    "token": None,
-                    "retrieval_top_k": None,
-                    "critique": None,
-                    "error_class": type(stream_err).__name__,
-                    "counts": {},
-                    "evidence": [],
-                }
-            )
-            log_event(
-                "runtime",
-                "request_stream_error",
-                initial_state,
-                level=logging.ERROR,
-                error_class=type(stream_err).__name__,
-            )
-            print(f"\n⚠️ [大模型流式通信管道在运行时遭遇意外中断]: {stream_err}")
-
-        print("\n" + "-" * 50)
-        task_output = final_outputs.get(current_task, {})
-        trace_path = export_trace(
-            trace_id=trace_id,
-            request_id=trace_id,
-            task_type=current_task,
-            steps=trace_steps,
-            settings=settings,
-        )
-        log_event(
-            "runtime",
-            "request_end",
-            initial_state,
-            task_type=current_task,
-            has_output=bool(task_output),
-            trace_path=str(trace_path) if trace_path else None,
-        )
-        return extract_chat_turn(current_task, task_output, query)
-
-    except Exception as e:
-        trace_steps.append(
-            {
-                "node_name": "runtime.failed",
-                "duration_ms": 0.0,
-                "model": None,
-                "token": None,
-                "retrieval_top_k": None,
-                "critique": None,
-                "error_class": type(e).__name__,
-                "counts": {},
-                "evidence": [],
-            }
-        )
-        export_trace(
-            trace_id=trace_id,
-            request_id=trace_id,
-            task_type="unknown",
-            steps=trace_steps,
-            settings=settings,
-        )
-        log_event(
-            "runtime",
-            "request_failed",
-            initial_state,
-            level=logging.ERROR,
-            error_class=type(e).__name__,
-        )
-        print(f"\n❌ [Pipeline 核心图调度执行失败]: {e}")
+    print(f"\n[运行模式]: {'本地 Ollama' if is_local else '云端 API'}")
+    final_result = None
+    for event in run_chat(
+        doc_id=doc_id,
+        query=query,
+        is_local=is_local,
+        chat_history=chat_history,
+        forced_task=forced_task,
+    ):
+        rendered = render_chat_event(event)
+        if rendered is not None:
+            final_result = rendered
+    if final_result is not None:
+        return final_result.chat_messages
     return []
 
 
