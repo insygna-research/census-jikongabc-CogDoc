@@ -1,0 +1,7 @@
+{"case_type":"router","layer":"easy","query":"请总结 a.pdf 的主要内容","expected_task_type":"summary"}
+{"case_type":"router","layer":"compare","query":"请对比 a.pdf 和 b.pdf 的方法差异","expected_task_type":"compare"}
+{"case_type":"router","layer":"no-answer","query":"这个文档有没有说明量子计算获奖名单","expected_task_type":"qa"}
+{"case_type":"citation","layer":"easy","answer":"文档介绍了报名要求。[a.pdf:P1]","expected_valid":true,"docs":[{"text":"报名要求。","meta":{"chunk_id":"chunk:a:1","source":"a.pdf","page":1,"page_start":1,"page_end":1,"chunk_index":0,"local_chunk_index":0,"source_sha256":"sha","origin":"file"}}]}
+{"case_type":"citation","layer":"hard","answer":"文档介绍了报名要求。[missing.pdf:P1]","expected_valid":false,"docs":[{"text":"报名要求。","meta":{"chunk_id":"chunk:a:1","source":"a.pdf","page":1,"page_start":1,"page_end":1,"chunk_index":0,"local_chunk_index":0,"source_sha256":"sha","origin":"file"}}]}
+{"case_type":"faithfulness","layer":"easy","answer":"示例答案完全由引用片段支持。","is_faithful":true,"reviewer":"example"}
+{"case_type":"faithfulness","layer":"hard","answer":"示例答案含有引用片段外的断言。","is_faithful":false,"reviewer":"example"}

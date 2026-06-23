@@ -72,6 +72,13 @@ class Settings(BaseSettings):
         default="eval/retrieval_eval.example.jsonl",
         validation_alias="COGDOC_EVAL_EXAMPLE_SET",
     )
+    quality_eval_set_path: str = Field(
+        default="eval/quality_eval.jsonl", validation_alias="COGDOC_QUALITY_EVAL_SET"
+    )
+    quality_eval_example_set_path: str = Field(
+        default="eval/quality_eval.example.jsonl",
+        validation_alias="COGDOC_QUALITY_EVAL_EXAMPLE_SET",
+    )
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",
