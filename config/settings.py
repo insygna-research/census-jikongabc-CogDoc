@@ -121,6 +121,11 @@ class Settings(BaseSettings):
         return str(self.data_dir / "kb" / kb_id / "sources")
 
     @property
+    def state_db_path(self) -> str:
+        # 会话与入库任务的 SQLite 落盘，进程重启不丢对话与任务状态。
+        return str(self.data_dir / "state.db")
+
+    @property
     def feedback_log_path(self) -> str:
         return str(self.data_dir / "feedback" / "feedback.jsonl")
 

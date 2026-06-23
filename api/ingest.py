@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from threading import RLock
 from typing import Callable
 from uuid import uuid4
+from api.persistence import InMemoryJobStore
 from config.settings import get_settings
 from observability.logger import log_event
 from service.ingest_service import build_kb_index
@@ -100,11 +101,12 @@ class IndexJobManager:
         ingest_fn: Callable[[str, str], object] = build_kb_index,
         source_dir_for: Callable[[str], str] | None = None,
         max_workers: int = 1,
+        job_store: object | None = None,
     ):
         self._ingest_fn = ingest_fn
         self._source_dir_for = source_dir_for or get_settings().kb_source_dir
-        self._jobs: dict[str, dict] = {}
-        self._lock = RLock()
+        # 记录存储可插拔：默认内存版（测试隔离），生产传 SqliteJobStore 做重启不丢。
+        self._store = job_store or InMemoryJobStore()
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="cogdoc-ingest"
         )
@@ -122,24 +124,25 @@ class IndexJobManager:
             "error_code": None,
             "message": None,
         }
-        with self._lock:
-            self._jobs[job_id] = record
+        self._store.create(record)
         self._executor.submit(self._run, job_id)
         return dict(record)
 
     def _run(self, job_id: str) -> None:
-        with self._lock:
-            self._jobs[job_id]["status"] = "running"
-            kb_id = self._jobs[job_id]["kb_id"]
+        record = self._store.get(job_id)
+        if record is None:
+            return
+        kb_id = record["kb_id"]
+        self._store.update(job_id, status="running")
         try:
             result = self._ingest_fn(kb_id, self._source_dir_for(kb_id))
-            with self._lock:
-                self._jobs[job_id].update(
-                    status="succeeded",
-                    document_count=result.document_count,
-                    chunk_count=result.chunk_count,
-                    finished_at=_now_iso(),
-                )
+            self._store.update(
+                job_id,
+                status="succeeded",
+                document_count=result.document_count,
+                chunk_count=result.chunk_count,
+                finished_at=_now_iso(),
+            )
             log_event(
                 "ingest",
                 "index_job_succeeded",
@@ -148,13 +151,13 @@ class IndexJobManager:
                 document_count=result.document_count,
             )
         except Exception as exc:
-            with self._lock:
-                self._jobs[job_id].update(
-                    status="failed",
-                    error_code="INGEST_FAILED",
-                    message=str(exc),
-                    finished_at=_now_iso(),
-                )
+            self._store.update(
+                job_id,
+                status="failed",
+                error_code="INGEST_FAILED",
+                message=str(exc),
+                finished_at=_now_iso(),
+            )
             log_event(
                 "ingest",
                 "index_job_failed",
@@ -165,9 +168,7 @@ class IndexJobManager:
             )
 
     def get(self, job_id: str) -> dict | None:
-        with self._lock:
-            record = self._jobs.get(job_id)
-            return dict(record) if record else None
+        return self._store.get(job_id)
 
     def shutdown(self) -> None:
         self._executor.shutdown(wait=False)

@@ -5,6 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from api.feedback_store import FeedbackStore
 from api.ingest import IndexJobManager, KnowledgeBaseRegistry
+from api.persistence import SqliteJobStore, SqliteSessionStore
 from api.routes import (
     chat_router,
     documents_router,
@@ -13,6 +14,7 @@ from api.routes import (
 )
 from api.schemas import ErrorCode, build_error_response
 from api.session_store import SessionStore
+from config.settings import get_settings
 from observability.logger import configure_logging
 from service.chat_service import ChatResult, run_chat, run_chat_sync
 
@@ -79,4 +81,9 @@ def create_app(
     return app
 
 
-app = create_app()
+# 生产入口：会话与入库任务落 SQLite，进程重启不丢；create_app 默认仍是内存版便于测试隔离。
+_db_path = get_settings().state_db_path
+app = create_app(
+    session_store=SqliteSessionStore(_db_path),
+    index_jobs=IndexJobManager(job_store=SqliteJobStore(_db_path)),
+)
