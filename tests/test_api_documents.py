@@ -85,6 +85,29 @@ async def test_create_list_get_knowledge_base(tmp_path, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_delete_knowledge_base(tmp_path, monkeypatch):
+    import os
+
+    app, source_dir_for = _make_app(tmp_path, monkeypatch=monkeypatch)
+    # 删库要清索引，打桩避免触碰真实 chroma/bm25。
+    import api.routes.documents as docs_module
+
+    monkeypatch.setattr(docs_module, "delete_kb_index", lambda kb_id: None)
+
+    async with app.router.lifespan_context(app):
+        async with await _client(app) as client:
+            await client.post("/v1/knowledge-bases", json={"kb_id": "kb"})
+            deleted = await client.delete("/v1/knowledge-bases/kb")
+            after = await client.get("/v1/knowledge-bases")
+            missing = await client.delete("/v1/knowledge-bases/ghost")
+
+    assert deleted.status_code == 204
+    assert after.json() == []
+    assert not os.path.exists(os.path.dirname(source_dir_for("kb")))
+    assert missing.status_code == 404 and missing.json()["error_code"] == "KB_NOT_FOUND"
+
+
+@pytest.mark.anyio
 async def test_create_kb_rejects_overlong_id(tmp_path, monkeypatch):
     app, _ = _make_app(tmp_path, monkeypatch=monkeypatch)
     async with app.router.lifespan_context(app):

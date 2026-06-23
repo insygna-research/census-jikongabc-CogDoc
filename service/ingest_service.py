@@ -2,7 +2,11 @@ import os
 from dataclasses import dataclass, field
 from graph.subgraphs.qa import RetrieverFactory
 from tools.chunker import chunk_paper
-from tools.manifest import save_index_manifest, stamp_chunk_identity_contract
+from tools.manifest import (
+    manifest_path,
+    save_index_manifest,
+    stamp_chunk_identity_contract,
+)
 from tools.parser import smart_parse
 from tools.rust_core_loader import ensure_rust_core
 
@@ -30,6 +34,15 @@ def list_pdf_files(source_dir: str) -> list[str]:
 def _invalidate_engine_cache(kb_id: str) -> None:
     # 只失效本库引擎，否则 /chat 命中旧引擎读旧索引；不波及其他 kb。
     RetrieverFactory.invalidate(kb_id)
+
+
+def delete_kb_index(kb_id: str) -> None:
+    # 删库索引：清向量/BM25 + 删 manifest + 失效引擎缓存。
+    RetrieverFactory.get_engine(kb_id).clear()
+    manifest_file = manifest_path(kb_id)
+    if os.path.exists(manifest_file):
+        os.remove(manifest_file)
+    _invalidate_engine_cache(kb_id)
 
 
 def build_kb_index(kb_id: str, source_dir: str) -> IngestResult:

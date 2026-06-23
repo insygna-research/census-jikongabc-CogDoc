@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from threading import RLock
@@ -79,6 +80,17 @@ class KnowledgeBaseRegistry:
     def list(self) -> list[dict]:
         with self._lock:
             return [dict(record) for record in self._entries.values()]
+
+    def delete(self, kb_id: str) -> bool:
+        # 删注册表项 + 整个 kb 源目录；索引清理由调用方先做。
+        with self._lock:
+            if kb_id not in self._entries:
+                return False
+            kb_dir = os.path.dirname(self._source_dir_for(kb_id))
+            shutil.rmtree(kb_dir, ignore_errors=True)
+            self._entries.pop(kb_id, None)
+            self._save()
+            return True
 
 
 class IndexJobManager:

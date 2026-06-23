@@ -133,6 +133,83 @@ async def test_chat_endpoint_reuses_session_history(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_session_history_endpoint_returns_stored_turns(monkeypatch):
+    import api.app as app_module
+
+    monkeypatch.setattr(app_module, "configure_logging", lambda: None)
+
+    def fake_runner(doc_id, query, is_local, chat_history, forced_task):
+        return _result("答案", "trace-h")
+
+    store = SessionStore()
+    app = create_app(chat_runner=fake_runner, session_store=store)
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            await client.post(
+                "/v1/chat", json={"query": "问题", "doc_id": "kb", "session_id": "s1"}
+            )
+            history = await client.get(
+                "/v1/sessions/s1/history", params={"doc_id": "kb"}
+            )
+            empty = await client.get(
+                "/v1/sessions/other/history", params={"doc_id": "kb"}
+            )
+
+    assert history.status_code == 200
+    body = history.json()
+    assert body["session_id"] == "s1" and body["doc_id"] == "kb"
+    # 刷新后能拉回多轮（user + assistant）。
+    assert [m["role"] for m in body["messages"]] == ["user", "assistant"]
+    assert empty.json()["messages"] == []
+
+
+@pytest.mark.anyio
+async def test_list_and_delete_sessions(monkeypatch):
+    import api.app as app_module
+
+    monkeypatch.setattr(app_module, "configure_logging", lambda: None)
+
+    def fake_runner(doc_id, query, is_local, chat_history, forced_task):
+        return _result(
+            "答案",
+            "trace-x",
+            messages=[
+                {"role": "user", "content": query, "timestamp": None},
+                {"role": "assistant", "content": "答案", "timestamp": None},
+            ],
+        )
+
+    app = create_app(chat_runner=fake_runner, session_store=SessionStore())
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            await client.post(
+                "/v1/chat", json={"query": "第一问", "doc_id": "kb", "session_id": "s1"}
+            )
+            await client.post(
+                "/v1/chat", json={"query": "另一问", "doc_id": "kb", "session_id": "s2"}
+            )
+            listed = await client.get("/v1/sessions", params={"doc_id": "kb"})
+            deleted = await client.delete(
+                "/v1/sessions/s1", params={"doc_id": "kb"}
+            )
+            after = await client.get("/v1/sessions", params={"doc_id": "kb"})
+
+    sessions = listed.json()["sessions"]
+    assert {s["session_id"] for s in sessions} == {"s1", "s2"}
+    # title 取首条用户消息。
+    assert any(s["title"] == "第一问" for s in sessions)
+    assert deleted.status_code == 204
+    assert {s["session_id"] for s in after.json()["sessions"]} == {"s2"}
+
+
+@pytest.mark.anyio
 async def test_chat_endpoint_offloads_runner(monkeypatch):
     import api.app as app_module
 
@@ -229,8 +306,8 @@ async def test_chat_stream_maps_error_event_and_skips_session(monkeypatch):
 
 def test_session_store_uses_doc_id_in_key_and_evicts_oldest():
     store = SessionStore(max_sessions=1, ttl_seconds=3600)
-    store.append_messages("kb-a", "s1", [{"role": "user", "content": "a"}])
-    store.append_messages("kb-b", "s1", [{"role": "user", "content": "b"}])
+    store.record("kb-a", "s1", [{"role": "user", "content": "a"}], [])
+    store.record("kb-b", "s1", [{"role": "user", "content": "b"}], [])
 
     assert store.get_history("kb-a", "s1") == []
     assert store.get_history("kb-b", "s1") == [{"role": "user", "content": "b"}]
@@ -238,7 +315,7 @@ def test_session_store_uses_doc_id_in_key_and_evicts_oldest():
 
 def test_session_store_purges_expired_history():
     store = SessionStore(max_sessions=10, ttl_seconds=1)
-    store.append_messages("kb", "s1", [{"role": "user", "content": "a"}])
+    store.record("kb", "s1", [{"role": "user", "content": "a"}], [])
     store._entries[("kb", "s1")].updated_at -= 2
 
     assert store.get_history("kb", "s1") == []

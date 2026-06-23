@@ -1,6 +1,6 @@
 import os
 
-from fastapi import APIRouter, File, Request, UploadFile
+from fastapi import APIRouter, File, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 
 from api.ingest import KBExistsError
@@ -14,6 +14,7 @@ from api.schemas import (
     build_error_response,
 )
 from config.settings import get_settings
+from service.ingest_service import delete_kb_index
 from tools.manifest import load_index_manifest
 
 router = APIRouter(prefix="/v1", tags=["documents"])
@@ -65,6 +66,17 @@ async def get_knowledge_base(kb_id: str, request: Request):
     if record is None:
         return _error(ErrorCode.KB_NOT_FOUND, f"知识库不存在: {kb_id}", 404)
     return KnowledgeBase(**record, document_count=len(_kb_documents(kb_id)))
+
+
+@router.delete("/knowledge-bases/{kb_id}", status_code=204, responses=_ERROR_RESPONSES)
+async def delete_knowledge_base(kb_id: str, request: Request):
+    # 删库：先清索引（向量/BM25/manifest），再删源目录与注册表项。
+    registry = request.app.state.kb_registry
+    if not registry.exists(kb_id):
+        return _error(ErrorCode.KB_NOT_FOUND, f"知识库不存在: {kb_id}", 404)
+    delete_kb_index(kb_id)
+    registry.delete(kb_id)
+    return Response(status_code=204)
 
 
 @router.get("/knowledge-bases/{kb_id}/documents", responses=_ERROR_RESPONSES)

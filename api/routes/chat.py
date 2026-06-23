@@ -1,16 +1,19 @@
 import asyncio
 import json
 from typing import Callable
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from api.schemas import (
     ChatRequest,
     ChatResponse,
     ErrorCode,
     ErrorResponse,
+    SessionHistoryResponse,
+    SessionListResponse,
     build_error_response,
     chat_result_to_response,
 )
+from config.settings import get_settings
 from service.chat_service import (
     ChatEvent,
     ChatResult,
@@ -43,6 +46,7 @@ _ERROR_RESPONSES = {
 
 @router.post("/chat", response_model=ChatResponse, responses=_ERROR_RESPONSES)
 async def chat(request_body: ChatRequest, request: Request, response: Response):
+    # 同步问答：offload 跑图 → 写会话 → 映射结构化响应；服务层异常转稳定错误码。
     runner: ChatRunner = getattr(request.app.state, "chat_runner", run_chat_sync)
     session_store = request.app.state.session_store
     chat_history = session_store.get_history(
@@ -77,10 +81,15 @@ async def chat(request_body: ChatRequest, request: Request, response: Response):
             headers={"X-Trace-Id": exc.trace_id or ""},
         )
 
-    session_store.append_messages(
+    # 记忆走门控后的 chat_messages；展示存「用户问题 + 实际答案」，切对话时能看到内容。
+    session_store.record(
         request_body.doc_id,
         request_body.session_id,
         result.chat_messages,
+        [
+            {"role": "user", "content": request_body.query},
+            {"role": "assistant", "content": result.answer},
+        ],
     )
     chat_response = chat_result_to_response(
         result,
@@ -89,6 +98,34 @@ async def chat(request_body: ChatRequest, request: Request, response: Response):
     )
     response.headers["X-Trace-Id"] = chat_response.trace_id
     return chat_response
+
+
+@router.get("/sessions", response_model=SessionListResponse)
+async def list_sessions(request: Request, doc_id: str = Query(default="")):
+    # 列出某库下的全部对话，供前端多对话列表。
+    kb_id = doc_id or get_settings().cogdoc_default_doc_id
+    sessions = request.app.state.session_store.list_sessions(kb_id)
+    return SessionListResponse(doc_id=kb_id, sessions=sessions)
+
+
+@router.get("/sessions/{session_id}/history", response_model=SessionHistoryResponse)
+async def session_history(
+    session_id: str, request: Request, doc_id: str = Query(default="")
+):
+    # 前端刷新后凭 URL 里的 session_id 拉回多轮历史；会话态仍在内存（服务存活期内）。
+    kb_id = doc_id or get_settings().cogdoc_default_doc_id
+    messages = request.app.state.session_store.get_display(kb_id, session_id)
+    return SessionHistoryResponse(session_id=session_id, doc_id=kb_id, messages=messages)
+
+
+@router.delete("/sessions/{session_id}", status_code=204)
+async def delete_session(
+    session_id: str, request: Request, doc_id: str = Query(default="")
+):
+    # 删除一个对话的多轮历史（幂等，不存在也返回 204）。
+    kb_id = doc_id or get_settings().cogdoc_default_doc_id
+    request.app.state.session_store.clear(kb_id, session_id)
+    return Response(status_code=204)
 
 
 # 流式进度事件直接转发；token/final/error 单独成结构化帧。
@@ -110,6 +147,7 @@ def _sse_frame(event_name: str, data: dict) -> str:
 def _event_to_frame(
     event: ChatEvent, *, doc_id: str, session_id: str | None
 ) -> str | None:
+    # 把服务层 ChatEvent 转成 SSE 帧；final 发结构化响应、error 转稳定错误码、其余为进度。
     if event.type == "request_started":
         return _sse_frame(
             "start",
@@ -147,6 +185,7 @@ def _event_to_frame(
 
 @router.post("/chat/stream", responses=_ERROR_RESPONSES)
 async def chat_stream(request_body: ChatRequest, request: Request):
+    # SSE 流式问答：worker 线程跑事件流 → 队列桥到事件循环 → 逐帧输出。
     stream_runner = getattr(request.app.state, "chat_stream_runner", run_chat)
     session_store = request.app.state.session_store
     doc_id = request_body.doc_id
@@ -195,10 +234,16 @@ async def chat_stream(request_body: ChatRequest, request: Request):
             frame = _event_to_frame(event, doc_id=doc_id, session_id=session_id)
             if frame is not None:
                 yield frame
-        # 只有真正产出 final 才写会话；断连或失败不污染历史。
+        # 只有真正产出 final 才写会话；记忆走门控、展示存完整问答。
         if final_result is not None:
-            session_store.append_messages(
-                doc_id, session_id, final_result.chat_messages
+            session_store.record(
+                doc_id,
+                session_id,
+                final_result.chat_messages,
+                [
+                    {"role": "user", "content": request_body.query},
+                    {"role": "assistant", "content": final_result.answer},
+                ],
             )
 
     return StreamingResponse(event_source(), media_type="text/event-stream")

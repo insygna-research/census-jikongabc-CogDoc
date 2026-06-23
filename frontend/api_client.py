@@ -41,6 +41,11 @@ class CogDocClient:
             timeout=self.timeout,
         )
 
+    def delete_knowledge_base(self, kb_id: str) -> httpx.Response:
+        return httpx.delete(
+            self._url(f"/v1/knowledge-bases/{kb_id}"), timeout=self.timeout
+        )
+
     def list_documents(self, kb_id: str) -> httpx.Response:
         return httpx.get(
             self._url(f"/v1/knowledge-bases/{kb_id}/documents"), timeout=self.timeout
@@ -64,6 +69,25 @@ class CogDocClient:
 
     def get_job(self, job_id: str) -> httpx.Response:
         return httpx.get(self._url(f"/v1/index-jobs/{job_id}"), timeout=self.timeout)
+
+    def get_session_history(self, session_id: str, kb_id: str) -> httpx.Response:
+        return httpx.get(
+            self._url(f"/v1/sessions/{session_id}/history"),
+            params={"doc_id": kb_id},
+            timeout=self.timeout,
+        )
+
+    def list_sessions(self, kb_id: str) -> httpx.Response:
+        return httpx.get(
+            self._url("/v1/sessions"), params={"doc_id": kb_id}, timeout=self.timeout
+        )
+
+    def delete_session(self, session_id: str, kb_id: str) -> httpx.Response:
+        return httpx.delete(
+            self._url(f"/v1/sessions/{session_id}"),
+            params={"doc_id": kb_id},
+            timeout=self.timeout,
+        )
 
     def submit_feedback(
         self,
