@@ -28,6 +28,14 @@ class Settings(BaseSettings):
         default="logs/traces", validation_alias="COGDOC_TRACE_DIR"
     )
 
+    # 访问控制：API key 逗号分隔，留空则鉴权关闭（本地/测试透明）。
+    cogdoc_api_keys: str = Field(default="", validation_alias="COGDOC_API_KEYS")
+    # 限流令牌桶：每分钟补充速率 + 突发容量；容量<=0 关闭限流。
+    rate_limit_per_minute: int = Field(
+        default=120, validation_alias="RATE_LIMIT_PER_MINUTE"
+    )
+    rate_limit_burst: int = Field(default=120, validation_alias="RATE_LIMIT_BURST")
+
     # 云端 OpenAI 兼容后端。
     llm_model_name: str = Field(
         default="deepseek-chat", validation_alias="LLM_MODEL_NAME"
@@ -129,6 +137,11 @@ class Settings(BaseSettings):
     def kb_source_dir(self, kb_id: str) -> str:
         # 每个知识库一个源 PDF 目录；chroma/bm25/manifest 已按 collection_id=kb_id 隔离。
         return str(self.data_dir / "kb" / kb_id / "sources")
+
+    @property
+    def api_key_set(self) -> set[str]:
+        # 解析逗号分隔的 key 列表，去空白与空项；空集合表示鉴权关闭。
+        return {k.strip() for k in self.cogdoc_api_keys.split(",") if k.strip()}
 
     @property
     def state_db_path(self) -> str:

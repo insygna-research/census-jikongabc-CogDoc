@@ -3,6 +3,11 @@ from contextlib import asynccontextmanager
 from typing import Callable
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from api.access_control import (
+    AccessControlMiddleware,
+    TokenBucketRateLimiter,
+    build_rate_limiter,
+)
 from api.feedback_store import FeedbackStore
 from api.ingest import IndexJobManager, KnowledgeBaseRegistry
 from api.persistence import SqliteJobStore, SqliteSessionStore
@@ -14,8 +19,9 @@ from api.routes import (
 )
 from api.schemas import ErrorCode, build_error_response
 from api.session_store import SessionStore
+import logging
 from config.settings import get_settings
-from observability.logger import configure_logging
+from observability.logger import configure_logging, log_event
 from service.chat_service import ChatResult, run_chat, run_chat_sync
 
 
@@ -42,12 +48,22 @@ def create_app(
     kb_registry: KnowledgeBaseRegistry | None = None,
     index_jobs: IndexJobManager | None = None,
     feedback_store: FeedbackStore | None = None,
+    api_keys: set[str] | None = None,
+    rate_limiter: TokenBucketRateLimiter | None = None,
     offload_workers: int = 8,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # 非 CLI 入口也要在启动时配一次日志，否则节点 log_event 全部静默丢失。
         configure_logging()
+        # 鉴权未配置=所有 /v1 对外开放，生产忘配 key 时启动即告警。
+        if not app.state.auth_enabled:
+            log_event(
+                "startup",
+                "auth_disabled",
+                {},
+                level=logging.WARNING,
+            )
         yield
         app.state.offload_executor.shutdown(wait=False)
         app.state.index_jobs.shutdown()
@@ -69,6 +85,19 @@ def create_app(
     app.state.kb_registry = kb_registry or KnowledgeBaseRegistry()
     app.state.index_jobs = index_jobs or IndexJobManager()
     app.state.feedback_store = feedback_store or FeedbackStore()
+
+    # 访问控制：key 留空则鉴权关闭；限流默认按 settings 的令牌桶。两者均可注入测试。
+    settings = get_settings()
+    resolved_keys = settings.api_key_set if api_keys is None else api_keys
+    resolved_limiter = rate_limiter or build_rate_limiter(
+        settings.rate_limit_per_minute, settings.rate_limit_burst
+    )
+    app.state.auth_enabled = bool(resolved_keys)
+    app.add_middleware(
+        AccessControlMiddleware,
+        api_keys=resolved_keys,
+        rate_limiter=resolved_limiter,
+    )
 
     @app.exception_handler(Exception)
     async def handle_unexpected(request: Request, exc: Exception) -> JSONResponse:

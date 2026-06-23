@@ -1,4 +1,5 @@
 import json
+import os
 from typing import Iterable, Iterator
 import httpx
 
@@ -24,31 +25,48 @@ def iter_sse_events(lines: Iterable[str]) -> Iterator[tuple[str, dict]]:
 
 class CogDocClient:
     # 交付层瘦客户端：只打 /v1，不碰后端智能逻辑。
-    def __init__(self, base_url: str, timeout: float = DEFAULT_TIMEOUT):
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = DEFAULT_TIMEOUT,
+        api_key: str | None = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        # 后端开启鉴权时带上 key；缺省读环境变量，未配置则不带头（鉴权关闭场景）。
+        key = api_key if api_key is not None else os.getenv("COGDOC_API_KEY", "")
+        self._headers = {"Authorization": f"Bearer {key}"} if key else {}
 
     def _url(self, path: str) -> str:
         return f"{self.base_url}{path}"
 
     def list_knowledge_bases(self) -> list[dict]:
-        return httpx.get(self._url("/v1/knowledge-bases"), timeout=self.timeout).json()
+        return httpx.get(
+            self._url("/v1/knowledge-bases"),
+            timeout=self.timeout,
+            headers=self._headers,
+        ).json()
 
     def create_knowledge_base(self, kb_id: str) -> httpx.Response:
         return httpx.post(
             self._url("/v1/knowledge-bases"),
             json={"kb_id": kb_id},
             timeout=self.timeout,
+            headers=self._headers,
         )
 
     def delete_knowledge_base(self, kb_id: str) -> httpx.Response:
         return httpx.delete(
-            self._url(f"/v1/knowledge-bases/{kb_id}"), timeout=self.timeout
+            self._url(f"/v1/knowledge-bases/{kb_id}"),
+            timeout=self.timeout,
+            headers=self._headers,
         )
 
     def list_documents(self, kb_id: str) -> httpx.Response:
         return httpx.get(
-            self._url(f"/v1/knowledge-bases/{kb_id}/documents"), timeout=self.timeout
+            self._url(f"/v1/knowledge-bases/{kb_id}/documents"),
+            timeout=self.timeout,
+            headers=self._headers,
         )
 
     def upload_document(
@@ -59,27 +77,37 @@ class CogDocClient:
             self._url(f"/v1/knowledge-bases/{kb_id}/documents"),
             files=files,
             timeout=self.timeout,
+            headers=self._headers,
         )
 
     def delete_document(self, kb_id: str, name: str) -> httpx.Response:
         return httpx.delete(
             self._url(f"/v1/knowledge-bases/{kb_id}/documents/{name}"),
             timeout=self.timeout,
+            headers=self._headers,
         )
 
     def get_job(self, job_id: str) -> httpx.Response:
-        return httpx.get(self._url(f"/v1/index-jobs/{job_id}"), timeout=self.timeout)
+        return httpx.get(
+            self._url(f"/v1/index-jobs/{job_id}"),
+            timeout=self.timeout,
+            headers=self._headers,
+        )
 
     def get_session_history(self, session_id: str, kb_id: str) -> httpx.Response:
         return httpx.get(
             self._url(f"/v1/sessions/{session_id}/history"),
             params={"doc_id": kb_id},
             timeout=self.timeout,
+            headers=self._headers,
         )
 
     def list_sessions(self, kb_id: str) -> httpx.Response:
         return httpx.get(
-            self._url("/v1/sessions"), params={"doc_id": kb_id}, timeout=self.timeout
+            self._url("/v1/sessions"),
+            params={"doc_id": kb_id},
+            timeout=self.timeout,
+            headers=self._headers,
         )
 
     def delete_session(self, session_id: str, kb_id: str) -> httpx.Response:
@@ -87,6 +115,7 @@ class CogDocClient:
             self._url(f"/v1/sessions/{session_id}"),
             params={"doc_id": kb_id},
             timeout=self.timeout,
+            headers=self._headers,
         )
 
     def submit_feedback(
@@ -108,6 +137,7 @@ class CogDocClient:
             self._url("/v1/feedback"),
             json={k: v for k, v in payload.items() if v is not None},
             timeout=self.timeout,
+            headers=self._headers,
         )
 
     def _chat_payload(
@@ -128,7 +158,11 @@ class CogDocClient:
     ) -> Iterator[tuple[str, dict]]:
         payload = self._chat_payload(kb_id, query, mode, session_id, is_local)
         with httpx.stream(
-            "POST", self._url("/v1/chat/stream"), json=payload, timeout=self.timeout
+            "POST",
+            self._url("/v1/chat/stream"),
+            json=payload,
+            timeout=self.timeout,
+            headers=self._headers,
         ) as response:
             if response.status_code != 200:
                 # 流式响应非 200 不会抛异常，需读出 body 转成 error 事件，避免静默成空答案。
