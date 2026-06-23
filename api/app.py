@@ -10,6 +10,7 @@ from api.access_control import (
 )
 from api.feedback_store import FeedbackStore
 from api.ingest import IndexJobManager, KnowledgeBaseRegistry
+from api.metrics import Metrics, MetricsMiddleware
 from api.persistence import SqliteJobStore, SqliteSessionStore
 from api.routes import (
     chat_router,
@@ -98,6 +99,9 @@ def create_app(
         api_keys=resolved_keys,
         rate_limiter=resolved_limiter,
     )
+    # 指标中间件在访问控制外层（后加=最外层），故 401/429 也被计入请求统计。
+    app.state.metrics = Metrics()
+    app.add_middleware(MetricsMiddleware, metrics=app.state.metrics)
 
     @app.exception_handler(Exception)
     async def handle_unexpected(request: Request, exc: Exception) -> JSONResponse:

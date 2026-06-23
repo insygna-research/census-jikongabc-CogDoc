@@ -1,5 +1,6 @@
-from fastapi import APIRouter
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse, Response
+from api.metrics import CONTENT_TYPE_LATEST
 from tools.rust_core_loader import REQUIRED_NATIVE_SYMBOLS, ensure_rust_core
 
 router = APIRouter(tags=["health"])
@@ -22,3 +23,12 @@ async def readyz():
             content={"status": "not_ready", "rust_core": False, "reason": str(exc)},
         )
     return {"status": "ready", "rust_core": True}
+
+
+@router.get("/metrics")
+async def metrics(request: Request):
+    # Prometheus 抓取端点：返回每 app 注册表的文本快照，鉴权/限流已豁免。
+    return Response(
+        content=request.app.state.metrics.render(),
+        media_type=CONTENT_TYPE_LATEST,
+    )

@@ -84,6 +84,9 @@ async def chat(request_body: ChatRequest, request: Request, response: Response):
             {"role": "assistant", "content": result.answer},
         ],
     )
+    request.app.state.metrics.chat_results.labels(
+        result.task_type, str(result.is_valid).lower()
+    ).inc()
     chat_response = chat_result_to_response(
         result,
         doc_id=request_body.doc_id,
@@ -231,6 +234,9 @@ async def chat_stream(request_body: ChatRequest, request: Request):
                 yield frame
         # 只有真正产出 final 才写会话；记忆走门控、展示存完整问答。
         if final_result is not None:
+            request.app.state.metrics.chat_results.labels(
+                final_result.task_type, str(final_result.is_valid).lower()
+            ).inc()
             session_store.record(
                 doc_id,
                 session_id,

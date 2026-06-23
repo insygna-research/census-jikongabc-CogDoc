@@ -10,7 +10,7 @@ from api.schemas import ErrorCode, build_error_response
 
 # 探针与文档路径永远放行：鉴权/限流不能挡住存活就绪检查与 OpenAPI。
 _EXEMPT_PATHS = frozenset(
-    {"/healthz", "/readyz", "/docs", "/redoc", "/openapi.json"}
+    {"/healthz", "/readyz", "/metrics", "/docs", "/redoc", "/openapi.json"}
 )
 # 仅豁免限流（仍走鉴权）：入库 job 状态是高频轮询端点，令牌桶会误杀长任务的轮询。
 _RATE_LIMIT_EXEMPT_PREFIXES = ("/v1/index-jobs/",)
