@@ -8,12 +8,20 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from config.settings import get_settings
 from graph.subgraphs.qa import RetrieverFactory
 from tools.eval.retrieval_metrics import aggregate, evaluate_query
 
-DEFAULT_EVAL_SET = ROOT / "eval" / "retrieval_eval.jsonl"
+
+def _project_path(path: str) -> Path:
+    resolved = Path(path)
+    return resolved if resolved.is_absolute() else ROOT / resolved
+
+
+_settings = get_settings()
+DEFAULT_EVAL_SET = _project_path(_settings.eval_set_path)
 # 真实评测集不入库；clean checkout 回退到 example，保证零参数命令可运行。
-EXAMPLE_EVAL_SET = ROOT / "eval" / "retrieval_eval.example.jsonl"
+EXAMPLE_EVAL_SET = _project_path(_settings.eval_example_set_path)
 DEFAULT_K_VALUES = [1, 3, 5, 9]
 
 

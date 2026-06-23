@@ -1,5 +1,5 @@
-import os
 import torch
+from config.settings import get_settings
 
 
 def cuda_free_bytes() -> int:
@@ -17,9 +17,9 @@ def mps_available() -> bool:
     return backend is not None and backend.is_available()
 
 
-def required_cuda_free_bytes(env_var: str, default_mb: int) -> int:
+def required_cuda_free_bytes(env_var: str) -> int:
     # 阈值支持环境变量按 MB 覆盖，内部统一换算为字节比较。
-    return int(os.getenv(env_var, str(default_mb))) * 1024 * 1024
+    return get_settings().cuda_min_free_bytes(env_var)
 
 
 def resolve_device(min_cuda_free_bytes: int, current_device: str = None, model_loaded: bool = False) -> str:

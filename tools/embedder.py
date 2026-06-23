@@ -9,7 +9,7 @@ class Embedder:
     MODEL_NAME = "BAAI/bge-small-zh-v1.5"
 
     # bge-small-zh-v1.5 权重约 0.4G + 批量活化余量，空闲低于此值回落 CPU，避免 CUDA OOM。
-    REQUIRED_CUDA_FREE_BYTES = required_cuda_free_bytes("EMBEDDER_MIN_CUDA_FREE_MB", 800)
+    REQUIRED_CUDA_FREE_BYTES = required_cuda_free_bytes("EMBEDDER_MIN_CUDA_FREE_MB")
 
     device = "cpu"  # 实际设备在首次加载时按空闲显存动态判定，默认安全回落 CPU
 

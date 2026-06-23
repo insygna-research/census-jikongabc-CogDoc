@@ -2,6 +2,7 @@ import copy
 from functools import lru_cache
 from langchain_core.messages import SystemMessage
 from langgraph.graph import StateGraph, START, END
+from config.settings import get_settings
 from graph.state import GraphState, Evidence
 from tools.retriever.vector_retriever import VectorRetriever
 from tools.retriever.bm25_retriever import BM25Retriever
@@ -46,9 +47,10 @@ def retrieve_node(state: GraphState) -> dict:
 
     retrieved_docs = []
     seen_chunk_keys = set()
+    settings = get_settings()
 
     for query in queries:
-        docs = engine.search(query=query, top_k=9)
+        docs = engine.search(query=query, top_k=settings.qa_retrieval_top_k)
         for doc in docs:
             meta = doc["meta"]
             # 检索去重只认稳定 chunk_id。
@@ -74,7 +76,9 @@ def rerank_node(state: GraphState) -> dict:
     target_device = "cpu" if is_local else BGEReranker.default_device()
     BGEReranker.set_device(target_device)
 
-    reranked_docs = BGEReranker.rerank(query=query, docs=docs, top_n=3)
+    reranked_docs = BGEReranker.rerank(
+        query=query, docs=docs, top_n=get_settings().qa_rerank_top_n
+    )
     return {"reranked_docs": reranked_docs}
 
 

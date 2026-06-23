@@ -1,13 +1,15 @@
 import os
 import chromadb
 from typing import List
+from config.settings import get_settings
 from graph.state import RetrievedDoc
 from tools.embedder import Embedder
 from tools.retriever.base_retriever import BaseRetriever
 
 
 class VectorRetriever(BaseRetriever):
-    def __init__(self, collection_id: str, persist_directory: str = "./data/chroma_db"):
+    def __init__(self, collection_id: str, persist_directory: str = None):
+        persist_directory = persist_directory or get_settings().chroma_persist_dir
         os.makedirs(persist_directory, exist_ok=True)
         self.client = chromadb.PersistentClient(path=persist_directory)
 

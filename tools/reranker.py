@@ -13,7 +13,7 @@ class BGEReranker:
     MAX_LENGTH = 512  # 模型单次处理的最大Token长度保护
 
     # bge-reranker-v2-m3 权重约 2.3G + 推理活化余量，空闲低于此值回落 CPU，避免 CUDA OOM。
-    REQUIRED_CUDA_FREE_BYTES = required_cuda_free_bytes("RERANKER_MIN_CUDA_FREE_MB", 2800)
+    REQUIRED_CUDA_FREE_BYTES = required_cuda_free_bytes("RERANKER_MIN_CUDA_FREE_MB")
 
     device = None  # None=未显式指定，加载时按空闲显存自动判定；set_device 后固定
 

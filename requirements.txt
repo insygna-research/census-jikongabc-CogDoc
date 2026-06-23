@@ -8,3 +8,4 @@ torch
 transformers
 jieba
 pydantic
+pydantic-settings

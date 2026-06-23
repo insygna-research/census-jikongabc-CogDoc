@@ -1,8 +1,7 @@
-import os
-from pathlib import Path
 from typing import List
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
+from config.settings import get_settings
 from graph.state import RetrievedDoc
 from agents.answer_markers import NO_RELEVANT_CONTENT_ANSWER
 from agents.conversation_memory import (
@@ -11,52 +10,25 @@ from agents.conversation_memory import (
 )
 
 
-def _load_local_env() -> None:
-    # 轻量读取项目根目录 .env；真实密钥只留在本地文件或进程环境中。
-    env_path = Path(__file__).resolve().parents[1] / ".env"
-    if not env_path.exists():
-        return
-
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key:
-            os.environ.setdefault(key, value)
-
-
-_load_local_env()
-
-
 class Generator:
     # 不同后端和模型使用独立客户端缓存。
     _clients = {}
-
-    CLOUD_MODEL = os.getenv("LLM_MODEL_NAME", "deepseek-chat")
-    CLOUD_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1")
-    CLOUD_API_KEY = os.getenv("LLM_API_KEY", "")
-
-    OLLAMA_MODEL = os.getenv("OLLAMA_MODEL_NAME", "qwen2.5:7b")
-    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-    OLLAMA_API_KEY = "ollama"
 
     @classmethod
     def _get_client(
         cls, is_local: bool = False, custom_model_name: str = None
     ) -> ChatOpenAI:
         # client_key 必须包含后端、地址和模型名。
+        settings = get_settings()
         if is_local:
-            base_url = cls.OLLAMA_BASE_URL
-            api_key = cls.OLLAMA_API_KEY
-            model_name = custom_model_name if custom_model_name else cls.OLLAMA_MODEL
+            base_url = settings.ollama_base_url
+            api_key = settings.ollama_api_key
+            model_name = custom_model_name if custom_model_name else settings.ollama_model_name
             client_key = f"local_{base_url}_{model_name}"
         else:
-            base_url = cls.CLOUD_BASE_URL
-            api_key = cls.CLOUD_API_KEY
-            model_name = custom_model_name if custom_model_name else cls.CLOUD_MODEL
+            base_url = settings.llm_base_url
+            api_key = settings.llm_api_key
+            model_name = custom_model_name if custom_model_name else settings.llm_model_name
             client_key = f"cloud_{base_url}_{model_name}"
             if not api_key:
                 raise RuntimeError(

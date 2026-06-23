@@ -1,7 +1,7 @@
 import json
-import os
 from typing import Iterable, Type
 from pydantic import BaseModel
+from config.settings import get_settings
 
 
 STRUCTURED_OUTPUT_METHODS = ("json_mode", "json_schema", "function_calling", "raw_json")
@@ -33,7 +33,7 @@ def _auto_methods_for_llm(llm) -> list[str]:
 
 def _configured_methods(llm=None) -> list[str]:
     # auto 优先走兼容面较广的 json_object，再尝试更严格/更旧的 LangChain 方法。
-    configured = os.getenv("LLM_STRUCTURED_OUTPUT_METHOD", "auto").strip()
+    configured = get_settings().llm_structured_output_method.strip()
     if not configured or configured == "auto":
         return (
             _auto_methods_for_llm(llm)
@@ -126,7 +126,7 @@ def invoke_structured(llm, schema: Type[BaseModel], messages: Iterable) -> BaseM
     methods = _configured_methods(llm)
     cache_key = _llm_cache_key(llm)
 
-    if os.getenv("LLM_STRUCTURED_OUTPUT_METHOD", "auto").strip() in ("", "auto"):
+    if get_settings().llm_structured_output_method.strip() in ("", "auto"):
         cached_method = _METHOD_CACHE.get(cache_key)
         if cached_method in methods:
             methods = [cached_method] + [

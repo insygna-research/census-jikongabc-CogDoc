@@ -2,6 +2,7 @@ import os
 import pickle
 import copy
 from typing import List
+from config.settings import get_settings
 from graph.state import RetrievedDoc
 from tools.document_loader import list_sources, load_source_chunks
 from tools.tokenizer import tokenize_mixed_text
@@ -14,7 +15,8 @@ _rust_core = ensure_rust_core("Bm25Index")
 
 
 class BM25Retriever(BaseRetriever):
-    def __init__(self, collection_id: str, persist_directory: str = "./data/bm25_db"):
+    def __init__(self, collection_id: str, persist_directory: str = None):
+        persist_directory = persist_directory or get_settings().bm25_persist_dir
         os.makedirs(persist_directory, exist_ok=True)
         self.db_path = os.path.join(persist_directory, f"bm25_{collection_id}.pkl")
 

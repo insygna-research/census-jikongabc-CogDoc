@@ -1,12 +1,18 @@
 import json
 import os
+from config.settings import get_settings
 from tools.chunk_identity import CHUNK_IDENTITY_VERSION
 
-MANIFEST_DIR = os.path.join("data", "manifests")
+# 测试和本地工具可覆盖该路径；默认从 COGDOC_DATA_DIR 派生。
+MANIFEST_DIR = None
+
+
+def manifest_dir() -> str:
+    return MANIFEST_DIR or get_settings().manifest_dir
 
 
 def manifest_path(doc_id: str) -> str:
-    return os.path.join(MANIFEST_DIR, f"{doc_id}.json")
+    return os.path.join(manifest_dir(), f"{doc_id}.json")
 
 
 def load_index_manifest(doc_id: str) -> dict:
@@ -22,13 +28,13 @@ def load_index_manifest(doc_id: str) -> dict:
 
 
 def save_index_manifest(manifest: dict) -> None:
-    os.makedirs(MANIFEST_DIR, exist_ok=True)
+    os.makedirs(manifest_dir(), exist_ok=True)
     with open(manifest_path(manifest["doc_id"]), "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
 
 
 def manifests_match(current_manifest: dict, saved_manifest: dict) -> bool:
-    # chunk_identity_version 变化必须触发重建。
+    # 分块身份版本变化必须触发重建。
     return (
         current_manifest.get("doc_id") == saved_manifest.get("doc_id")
         and current_manifest.get("chunk_identity_version")

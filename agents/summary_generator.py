@@ -1,8 +1,8 @@
-import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Iterable, List, Tuple
 from langchain_core.messages import HumanMessage, SystemMessage
+from config.settings import get_settings
 from agents.answer_markers import CITATION_WARNING_HEADING
 from agents.citation_validator import CitationValidatorAgent
 from agents.qa_generator import Generator
@@ -17,7 +17,7 @@ CITATION_PATTERN = re.compile(
 )
 
 # 云端逐单元 LLM 调用相互独立，并发执行降低 Summary/Compare 端到端延迟；本地走串行。
-CLOUD_SECTION_MAX_WORKERS = int(os.getenv("CLOUD_SECTION_MAX_WORKERS", "6"))
+CLOUD_SECTION_MAX_WORKERS = get_settings().cloud_section_max_workers
 
 
 def resolve_section_workers(is_local: bool, task_count: int) -> int:

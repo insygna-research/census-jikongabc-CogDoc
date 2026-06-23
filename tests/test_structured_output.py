@@ -1,14 +1,23 @@
 from langchain_core.messages import AIMessage
 from pydantic import BaseModel
+import pytest
 from agents.structured_output import (
     _METHOD_CACHE,
     _extract_json_object,
     invoke_structured,
 )
+from config.settings import get_settings
 
 
 class DemoSchema(BaseModel):
     value: str
+
+
+@pytest.fixture(autouse=True)
+def clear_settings_cache():
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 class MethodAwareLLM:

@@ -1,4 +1,5 @@
 from typing import List
+from config.settings import get_settings
 from graph.state import RetrievedDoc
 from tools.retriever.base_retriever import BaseRetriever
 from tools.rust_core_loader import ensure_rust_core
@@ -13,11 +14,11 @@ class HybridRetriever(BaseRetriever):
         self,
         vector_retriever: BaseRetriever,
         bm25_retriever: BaseRetriever,
-        k: int = 60,
+        k: int = None,
     ):
         self.vector_retriever = vector_retriever  # 向量检索器
         self.bm25_retriever = bm25_retriever  # BM25检索器
-        self.k = k  # RRF平滑系数
+        self.k = k if k is not None else get_settings().hybrid_rrf_k  # RRF平滑系数
 
     def exists(self) -> bool:
         return (

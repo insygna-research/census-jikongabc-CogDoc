@@ -7,6 +7,7 @@ try:
     import readline
 except ImportError:
     readline = None
+from config.settings import get_settings
 from tools.rust_core_loader import ensure_rust_core
 from tools.manifest import (
     load_index_manifest,
@@ -27,7 +28,7 @@ from tools.chunker import chunk_paper
 from tools.embedder import Embedder
 from tools.reranker import BGEReranker
 
-DEFAULT_DOC_DIR = os.getenv("COGDOC_DOC_DIR", "测试论文")
+DEFAULT_DOC_DIR = get_settings().cogdoc_doc_dir
 FORCED_MODE_PATTERN = re.compile(
     rf"^/({'|'.join(re.escape(task) for task in FORCED_TASK_TYPES)})(?:\s+(.*))?$",
     re.I,
@@ -395,8 +396,9 @@ def ask(
 
 def main():
     # CLI 默认绑定一个本地知识库隔离域。
-    TARGET_DOC_ID = "arch_blueprint_2026"
-    TARGET_DOC_DIR = DEFAULT_DOC_DIR
+    settings = get_settings()
+    TARGET_DOC_ID = settings.cogdoc_default_doc_id
+    TARGET_DOC_DIR = settings.cogdoc_doc_dir
 
     try:
         get_rust_core()
