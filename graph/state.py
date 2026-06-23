@@ -112,6 +112,8 @@ class GraphState(TypedDict):
 
     query: NotRequired[str]
     doc_id: NotRequired[str]
+    request_id: NotRequired[str]
+    trace_id: NotRequired[str]
     is_local: NotRequired[bool]
     task_type: NotRequired[str]
     router_reason: NotRequired[str]

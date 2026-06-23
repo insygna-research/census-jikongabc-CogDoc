@@ -2,6 +2,7 @@ import sys
 import os
 import re
 import signal
+import logging
 
 try:
     import readline
@@ -18,6 +19,7 @@ from tools.manifest import (
 from agents.router import FORCED_TASK_TYPES
 from graph.workflow import UNKNOWN_RESPONSE, app
 from graph.subgraphs.qa import RetrieverFactory
+from observability.logger import configure_logging, log_event, new_trace_id
 from agents.conversation_memory import (
     CHAT_HISTORY_MESSAGE_LIMIT,
     extract_chat_turn,
@@ -163,19 +165,38 @@ def ask(
     forced_task: str | None = None,
 ):
     # 控制台运行时只输出通过引用校验的最终答案。
+    configure_logging()
+    trace_id = new_trace_id()
     initial_state = {
         "messages": [],
         "chat_history": list(chat_history or []),
         "iteration_count": 0,
         "max_iteration_count": 2,
+        "request_id": trace_id,
+        "trace_id": trace_id,
     }
 
-    configurable = {"doc_id": doc_id, "query": query, "is_local": is_local}
+    configurable = {
+        "doc_id": doc_id,
+        "query": query,
+        "is_local": is_local,
+        "request_id": trace_id,
+        "trace_id": trace_id,
+    }
     if forced_task in FORCED_TASK_TYPES:
         configurable["forced_task"] = forced_task
     runtime_config = {"configurable": configurable}
 
     try:
+        log_event(
+            "runtime",
+            "request_start",
+            initial_state,
+            doc_id=doc_id,
+            is_local=is_local,
+            forced_task=forced_task,
+            query_length=len(query),
+        )
         print(f"\n[运行模式]: {'本地 Ollama' if is_local else '云端 API'}")
 
         token_stream = app.stream(
@@ -383,19 +404,41 @@ def ask(
                     final_outputs[current_task] = task_output
 
         except Exception as stream_err:
+            log_event(
+                "runtime",
+                "request_stream_error",
+                initial_state,
+                level=logging.ERROR,
+                error_class=type(stream_err).__name__,
+            )
             print(f"\n⚠️ [大模型流式通信管道在运行时遭遇意外中断]: {stream_err}")
 
         print("\n" + "-" * 50)
         task_output = final_outputs.get(current_task, {})
+        log_event(
+            "runtime",
+            "request_end",
+            initial_state,
+            task_type=current_task,
+            has_output=bool(task_output),
+        )
         return extract_chat_turn(current_task, task_output, query)
 
     except Exception as e:
+        log_event(
+            "runtime",
+            "request_failed",
+            initial_state,
+            level=logging.ERROR,
+            error_class=type(e).__name__,
+        )
         print(f"\n❌ [Pipeline 核心图调度执行失败]: {e}")
     return []
 
 
 def main():
     # CLI 默认绑定一个本地知识库隔离域。
+    configure_logging()
     settings = get_settings()
     TARGET_DOC_ID = settings.cogdoc_default_doc_id
     TARGET_DOC_DIR = settings.cogdoc_doc_dir

@@ -20,6 +20,9 @@ def test_settings_defaults_match_current_runtime_contract():
     assert settings.qa_retrieval_top_k == 9
     assert settings.qa_rerank_top_n == 3
     assert settings.hybrid_rrf_k == 60
+    assert settings.cogdoc_log_level == "INFO"
+    assert settings.cogdoc_log_file == "logs/cogdoc.jsonl"
+    assert settings.cogdoc_log_to_console is False
 
 
 def test_settings_reads_environment_overrides(monkeypatch):

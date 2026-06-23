@@ -4,6 +4,7 @@ from langchain_core.messages import SystemMessage
 from langgraph.graph import StateGraph, START, END
 from config.settings import get_settings
 from graph.state import GraphState, Evidence
+from observability.logger import log_event
 from tools.retriever.vector_retriever import VectorRetriever
 from tools.retriever.bm25_retriever import BM25Retriever
 from tools.retriever.hybrid import HybridRetriever
@@ -65,6 +66,14 @@ def retrieve_node(state: GraphState) -> dict:
                     doc_copy = doc
                 retrieved_docs.append(doc_copy)
 
+    log_event(
+        "qa",
+        "qa_retrieve",
+        state,
+        query_count=len(queries),
+        retrieved_count=len(retrieved_docs),
+        retrieval_top_k=settings.qa_retrieval_top_k,
+    )
     return {"retrieved_docs": retrieved_docs}
 
 
@@ -78,6 +87,14 @@ def rerank_node(state: GraphState) -> dict:
 
     reranked_docs = BGEReranker.rerank(
         query=query, docs=docs, top_n=get_settings().qa_rerank_top_n
+    )
+    log_event(
+        "qa",
+        "qa_rerank",
+        state,
+        candidate_count=len(docs),
+        reranked_count=len(reranked_docs),
+        device=target_device,
     )
     return {"reranked_docs": reranked_docs}
 
@@ -148,6 +165,14 @@ def citation_node(state: GraphState) -> dict:
     max_iteration_count = state.get("max_iteration_count", 2)
 
     check_res = CitationValidatorAgent.validate_citations(answer, final_docs)
+    log_event(
+        "qa",
+        "qa_citation_check",
+        state,
+        is_valid=not bool(check_res["critique"]),
+        iteration_count=iteration_count + 1,
+        evidence_count=len(final_docs),
+    )
 
     return {
         "critique": check_res["critique"],

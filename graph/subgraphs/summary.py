@@ -6,6 +6,7 @@ from agents.summary_generator import GlobalSummaryAgent, SectionSummaryAgent
 from agents.source_resolver import resolve_summary_source
 from graph.state import GraphState
 from graph.subgraphs.qa import RetrieverFactory
+from observability.logger import log_event
 from tools.document_loader import select_source_for_summary
 
 
@@ -40,24 +41,41 @@ def document_loader_node(state: GraphState) -> dict:
             "请在摘要问题中明确指定要总结的文件名（可直接说出文件名）。"
             f"当前可用文档：{source_list}"
         )
-        return {
+        result = {
             "summary_source": "",
             "summary_docs": [],
             "answer": message,
             "messages": [AIMessage(content=message)],
         }
+        log_event(
+            "summary",
+            "summary_document_loader",
+            state,
+            selected=False,
+            source_count=len(sources),
+        )
+        return result
 
     docs = engine.load_source_chunks(selected_source)
     if not docs:
         message = f"未能从当前索引加载文档：{selected_source}。请重建索引后再试。"
-        return {
+        result = {
             "summary_source": selected_source,
             "summary_docs": [],
             "answer": message,
             "messages": [AIMessage(content=message)],
         }
+        log_event(
+            "summary",
+            "summary_document_loader",
+            state,
+            selected=True,
+            loaded=False,
+            source=selected_source,
+        )
+        return result
 
-    return {
+    result = {
         "summary_source": selected_source,
         "summary_docs": docs,
         "steps_trace": resolution_trace
@@ -69,6 +87,16 @@ def document_loader_node(state: GraphState) -> dict:
             }
         ],
     }
+    log_event(
+        "summary",
+        "summary_document_loader",
+        state,
+        selected=True,
+        loaded=True,
+        source=selected_source,
+        chunk_count=len(docs),
+    )
+    return result
 
 
 def section_planner_node(state: GraphState) -> dict:

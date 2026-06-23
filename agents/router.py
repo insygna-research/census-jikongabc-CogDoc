@@ -4,6 +4,7 @@ from langchain_core.runnables import RunnableConfig
 from agents.conversation_memory import format_recent_chat_history
 from agents.qa_generator import Generator
 from agents.structured_output import invoke_structured
+from observability.logger import log_event
 from typing import Literal
 
 
@@ -52,6 +53,8 @@ class RouterAgent:
 
         query = configurable.get("query", "")
         doc_id = configurable.get("doc_id", "arch_blueprint_2026")
+        request_id = configurable.get("request_id", state.get("request_id", ""))
+        trace_id = configurable.get("trace_id", state.get("trace_id", ""))
         is_local = configurable.get("is_local", False)
         forced_task = configurable.get("forced_task")
 
@@ -62,13 +65,23 @@ class RouterAgent:
                     break
 
         if forced_task in FORCED_TASK_TYPE_SET:
-            return {
+            result = {
                 "query": query,
                 "doc_id": doc_id,
+                "request_id": request_id,
+                "trace_id": trace_id,
                 "is_local": is_local,
                 "task_type": forced_task,
                 "router_reason": "用户显式指定",
             }
+            log_event(
+                "router",
+                "router_decision",
+                result,
+                task_type=forced_task,
+                forced=True,
+            )
+            return result
 
         system_prompt = (
             "你是一位任务路由专家，负责将用户提问分配至对应的处理子图。\n"
@@ -109,19 +122,32 @@ class RouterAgent:
                 ],
             )
 
-            return {
+            result = {
                 "query": query,
                 "doc_id": doc_id,
+                "request_id": request_id,
+                "trace_id": trace_id,
                 "is_local": is_local,
                 "task_type": decision.task_type,
                 "router_reason": decision.reason,
             }
+            log_event(
+                "router",
+                "router_decision",
+                result,
+                task_type=decision.task_type,
+                forced=False,
+                query_length=len(query),
+            )
+            return result
 
         except Exception as e:
             fallback = classify_intent_by_rule(query)
-            return {
+            result = {
                 "query": query,
                 "doc_id": doc_id,
+                "request_id": request_id,
+                "trace_id": trace_id,
                 "is_local": is_local,
                 "task_type": fallback.task_type,
                 "router_reason": (
@@ -129,3 +155,12 @@ class RouterAgent:
                     f"规则原因：{fallback.reason}。错误详情: {str(e)}"
                 ),
             }
+            log_event(
+                "router",
+                "router_fallback",
+                result,
+                task_type=fallback.task_type,
+                error_class=type(e).__name__,
+                query_length=len(query),
+            )
+            return result

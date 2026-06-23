@@ -6,6 +6,7 @@ from agents.compare_profile import DocumentProfileAgent, default_compare_dimensi
 from agents.source_resolver import resolve_compare_sources
 from graph.state import GraphState
 from graph.subgraphs.qa import RetrieverFactory
+from observability.logger import log_event
 from tools.document_loader import select_sources_for_compare
 
 
@@ -43,12 +44,20 @@ def document_loader_node(state: GraphState) -> dict:
             "请在对比问题中点名至少 2 篇要对比的文件（可直接说出文件名）。"
             f"当前可用文档：{source_list}"
         )
-        return {
+        result = {
             "compare_sources": [],
             "compare_docs_by_source": {},
             "answer": message,
             "messages": [AIMessage(content=message)],
         }
+        log_event(
+            "compare",
+            "compare_document_loader",
+            state,
+            selected_count=len(selected_sources),
+            source_count=len(sources),
+        )
+        return result
 
     if is_local and len(selected_sources) > LOCAL_COMPARE_MAX_SOURCES:
         # 本地模式限制文档数，避免文档数乘维度数放大 LLM 调用。
@@ -58,12 +67,21 @@ def document_loader_node(state: GraphState) -> dict:
             f"当前点名了 {len(selected_sources)} 篇：{selected_list}。"
             "请只保留 2 篇文档后重试，或切换到云端 API 模式。"
         )
-        return {
+        result = {
             "compare_sources": [],
             "compare_docs_by_source": {},
             "answer": message,
             "messages": [AIMessage(content=message)],
         }
+        log_event(
+            "compare",
+            "compare_document_loader",
+            state,
+            selected_count=len(selected_sources),
+            local_limit=LOCAL_COMPARE_MAX_SOURCES,
+            limited=True,
+        )
+        return result
 
     docs_by_source = {}
     for source in selected_sources:
@@ -77,15 +95,23 @@ def document_loader_node(state: GraphState) -> dict:
             "未能从当前索引加载至少 2 篇对比文档。"
             f"已加载：{loaded_sources}。请重建索引后再试。"
         )
-        return {
+        result = {
             "compare_sources": list(docs_by_source.keys()),
             "compare_docs_by_source": docs_by_source,
             "answer": message,
             "messages": [AIMessage(content=message)],
         }
+        log_event(
+            "compare",
+            "compare_document_loader",
+            state,
+            selected_count=len(selected_sources),
+            loaded_count=len(docs_by_source),
+        )
+        return result
 
     compare_sources = list(docs_by_source.keys())
-    return {
+    result = {
         "compare_sources": compare_sources,
         "compare_docs_by_source": docs_by_source,
         "compare_dimensions": state.get("compare_dimensions")
@@ -102,6 +128,15 @@ def document_loader_node(state: GraphState) -> dict:
             }
         ],
     }
+    log_event(
+        "compare",
+        "compare_document_loader",
+        state,
+        selected_count=len(compare_sources),
+        loaded_count=len(docs_by_source),
+        chunk_count=sum(len(docs) for docs in docs_by_source.values()),
+    )
+    return result
 
 
 def document_profile_node(state: GraphState) -> dict:
@@ -116,7 +151,7 @@ def document_profile_node(state: GraphState) -> dict:
         message = (
             f"模型生成对比画像失败。错误：{type(exc).__name__}: {exc}\n{suggestion}"
         )
-        return {
+        result = {
             "document_profiles": [],
             "answer": message,
             "messages": [AIMessage(content=message)],
@@ -129,6 +164,13 @@ def document_profile_node(state: GraphState) -> dict:
                 }
             ],
         }
+        log_event(
+            "compare",
+            "compare_document_profile_error",
+            state,
+            error_class=type(exc).__name__,
+        )
+        return result
 
 
 def compare_table_node(state: GraphState) -> dict:

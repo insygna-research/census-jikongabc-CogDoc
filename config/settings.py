@@ -15,6 +15,13 @@ class Settings(BaseSettings):
     cogdoc_default_doc_id: str = Field(
         default="arch_blueprint_2026", validation_alias="COGDOC_DEFAULT_DOC_ID"
     )
+    cogdoc_log_level: str = Field(default="INFO", validation_alias="COGDOC_LOG_LEVEL")
+    cogdoc_log_file: str = Field(
+        default="logs/cogdoc.jsonl", validation_alias="COGDOC_LOG_FILE"
+    )
+    cogdoc_log_to_console: bool = Field(
+        default=False, validation_alias="COGDOC_LOG_TO_CONSOLE"
+    )
 
     # 云端 OpenAI 兼容后端。
     llm_model_name: str = Field(default="deepseek-chat", validation_alias="LLM_MODEL_NAME")
@@ -83,6 +90,10 @@ class Settings(BaseSettings):
     @property
     def manifest_dir(self) -> str:
         return str(self.data_dir / "manifests")
+
+    @property
+    def project_root(self) -> Path:
+        return PROJECT_ROOT
 
     def cuda_min_free_bytes(self, setting_name: str) -> int:
         mb_by_name = {
