@@ -27,6 +27,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          # CI 无 GPU：先装 CPU 版 torch，避免拉数 GB CUDA 包撑爆跑器磁盘。
+          pip install torch==2.12.0 --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Build rust_core
