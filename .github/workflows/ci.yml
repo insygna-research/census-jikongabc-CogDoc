@@ -31,8 +31,11 @@ jobs:
           pip install torch==2.12.0 --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt -r requirements-dev.txt
 
-      - name: Build rust_core
-        run: cd rust_core && maturin develop --release
+      - name: Build and install rust_core
+        run: |
+          # CI 无激活 venv，maturin develop 会报错；改为 build wheel 再装。
+          cd rust_core && maturin build --release --out dist
+          pip install dist/*.whl
 
       - name: Run tests
         run: pytest -q
