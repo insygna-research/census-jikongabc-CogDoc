@@ -64,6 +64,9 @@ class Settings(BaseSettings):
         default=2800, validation_alias="RERANKER_MIN_CUDA_FREE_MB"
     )
 
+    # 入库上传单文件大小上限，最小毒丸防护。
+    max_upload_mb: int = Field(default=50, validation_alias="COGDOC_MAX_UPLOAD_MB")
+
     # 评测默认路径。
     eval_set_path: str = Field(
         default="eval/retrieval_eval.jsonl", validation_alias="COGDOC_EVAL_SET"
@@ -103,6 +106,18 @@ class Settings(BaseSettings):
     @property
     def manifest_dir(self) -> str:
         return str(self.data_dir / "manifests")
+
+    @property
+    def kb_root(self) -> str:
+        return str(self.data_dir / "kb")
+
+    @property
+    def kb_registry_path(self) -> str:
+        return str(self.data_dir / "kb" / "registry.json")
+
+    def kb_source_dir(self, kb_id: str) -> str:
+        # 每个知识库一个源 PDF 目录；chroma/bm25/manifest 已按 collection_id=kb_id 隔离。
+        return str(self.data_dir / "kb" / kb_id / "sources")
 
     @property
     def project_root(self) -> Path:

@@ -35,6 +35,13 @@ class ErrorCode(str, Enum):
     UNKNOWN_INTENT = "UNKNOWN_INTENT"
     BAD_REQUEST = "BAD_REQUEST"
     INTERNAL_ERROR = "INTERNAL_ERROR"
+    KB_NOT_FOUND = "KB_NOT_FOUND"
+    KB_EXISTS = "KB_EXISTS"
+    DOCUMENT_NOT_FOUND = "DOCUMENT_NOT_FOUND"
+    INVALID_PDF = "INVALID_PDF"
+    FILE_TOO_LARGE = "FILE_TOO_LARGE"
+    JOB_NOT_FOUND = "JOB_NOT_FOUND"
+    INGEST_FAILED = "INGEST_FAILED"
 
 
 class ChatRequest(ApiModel):
@@ -99,6 +106,52 @@ class ErrorResponse(ApiModel):
     request_id: str | None = None
     trace_id: str | None = None
     details: dict[str, Any] | None = None
+
+
+class JobStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+class KnowledgeBaseCreate(ApiModel):
+    # 上限 56：VectorRetriever 把 collection 名截到 f"col-{kb_id}"[:60]，超长会撞库。
+    kb_id: str = Field(min_length=1, max_length=56)
+
+    @field_validator("kb_id")
+    @classmethod
+    def _slug(cls, value: str) -> str:
+        # kb_id 进路径，禁止分隔符与空白，避免目录穿越。
+        stripped = value.strip()
+        if not stripped or any(c in stripped for c in "/\\ \t") or stripped in {".", ".."}:
+            raise ValueError("kb_id 只能是不含路径分隔符与空白的标识符")
+        return stripped
+
+
+class KnowledgeBase(ApiModel):
+    kb_id: str
+    created_at: str
+    document_count: int = 0
+    tenant_id: str = "default"
+    owner_id: str = "default"
+
+
+class Document(ApiModel):
+    name: str
+    sha256: str = ""
+
+
+class IndexJob(ApiModel):
+    job_id: str
+    kb_id: str
+    status: JobStatus
+    created_at: str
+    finished_at: str | None = None
+    document_count: int | None = None
+    chunk_count: int | None = None
+    error_code: ErrorCode | None = None
+    message: str | None = None
 
 
 def _as_mapping(value: Any) -> Mapping[str, Any]:

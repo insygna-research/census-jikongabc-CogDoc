@@ -1,5 +1,6 @@
 import copy
-from functools import lru_cache
+from collections import OrderedDict
+from threading import RLock
 from langchain_core.messages import SystemMessage
 from langgraph.graph import StateGraph, START, END
 from config.settings import get_settings
@@ -16,13 +17,39 @@ from agents.citation_validator import CitationValidatorAgent
 
 
 class RetrieverFactory:
-    @staticmethod
-    @lru_cache(maxsize=32)
-    def get_engine(doc_id: str) -> HybridRetriever:
-        return HybridRetriever(
+    # 进程内按 kb_id 缓存引擎，支持单库失效；线程安全且有界。
+    _engines: "OrderedDict[str, HybridRetriever]" = OrderedDict()
+    _lock = RLock()
+    _max_engines = 32
+
+    @classmethod
+    def get_engine(cls, doc_id: str) -> HybridRetriever:
+        with cls._lock:
+            engine = cls._engines.get(doc_id)
+            if engine is not None:
+                cls._engines.move_to_end(doc_id)
+                return engine
+
+        # 在锁外构造，避免不同 kb 的冷启动相互阻塞。
+        built = HybridRetriever(
             vector_retriever=VectorRetriever(collection_id=doc_id),
             bm25_retriever=BM25Retriever(collection_id=doc_id),
         )
+        with cls._lock:
+            engine = cls._engines.get(doc_id)
+            if engine is None:
+                cls._engines[doc_id] = built
+                engine = built
+                while len(cls._engines) > cls._max_engines:
+                    cls._engines.popitem(last=False)
+            cls._engines.move_to_end(doc_id)
+            return engine
+
+    @classmethod
+    def invalidate(cls, doc_id: str) -> None:
+        # 只失效重建过的 kb，不波及其他知识库的已缓存引擎。
+        with cls._lock:
+            cls._engines.pop(doc_id, None)
 
 
 def rewrite_node(state: GraphState) -> dict:

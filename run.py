@@ -12,7 +12,6 @@ from tools.rust_core_loader import ensure_rust_core
 from tools.manifest import (
     load_index_manifest,
     manifests_match,
-    save_index_manifest,
     stamp_chunk_identity_contract,
 )
 from agents.router import FORCED_TASK_TYPES
@@ -20,12 +19,11 @@ from graph.workflow import UNKNOWN_RESPONSE
 from graph.subgraphs.qa import RetrieverFactory
 from observability.logger import configure_logging
 from service.chat_service import ChatEvent, ChatResult, run_chat
+from service.ingest_service import build_kb_index
 from agents.conversation_memory import (
     CHAT_HISTORY_MESSAGE_LIMIT,
     extract_final_answer,
 )
-from tools.parser import smart_parse
-from tools.chunker import chunk_paper
 from tools.embedder import Embedder
 from tools.reranker import BGEReranker
 
@@ -88,7 +86,7 @@ def warm_up_runtime(engine) -> None:
 def build_index(
     doc_id: str, doc_dir: str = DEFAULT_DOC_DIR, current_manifest: dict = None
 ):
-    # 重建索引时同步刷新 manifest 和 chunk 身份契约。
+    # CLI 入口：核心入库逻辑统一走 ingest_service，这里只做目录提示与汇总打印。
     if not os.path.exists(doc_dir):
         os.makedirs(doc_dir)
         RetrieverFactory.get_engine(doc_id).clear()
@@ -96,63 +94,15 @@ def build_index(
         print(f"📌 请将您的 PDF 论文或文档放入该目录下，然后重新拉起控制台。")
         return
 
-    pdf_files = sorted(f for f in os.listdir(doc_dir) if f.lower().endswith(".pdf"))
-    if not pdf_files:
-        RetrieverFactory.get_engine(doc_id).clear()
+    print("📚 检测到静态索引缺失或过期，开始构建知识库多轨索引...")
+    result = build_kb_index(doc_id, doc_dir)
+    if result.document_count == 0:
         print(f"⚠️ 提示: 目录 【{doc_dir}】 当前为空，未检测到任何 PDF 文件。")
         return
 
-    if current_manifest is None:
-        abs_dir = os.path.abspath(doc_dir)
-        current_manifest = get_rust_core().scan_pdf_manifest_native(doc_id, abs_dir)
-    # chunk_id 依赖 manifest 里的文件 sha。
-    current_manifest = stamp_chunk_identity_contract(current_manifest)
-    source_hash_by_name = {
-        doc["name"]: doc["sha256"] for doc in current_manifest.get("documents", [])
-    }
-
-    all_chunks = []
-    # chunk_index 只用于展示，chunk_id 才是身份键。
-    next_chunk_index = 0
-    print("📚 检测到静态索引缺失或过期，开始构建知识库多轨索引...")
-
-    for pdf in pdf_files:
-        pdf_path = os.path.join(doc_dir, pdf)
-        print(f" 正在深度解析文档: {pdf}")
-
-        pages = smart_parse(pdf_path)
-        chunks = chunk_paper(pages, source_sha256=source_hash_by_name[pdf])
-        for chunk in chunks:
-            chunk["meta"]["chunk_index"] = next_chunk_index
-            next_chunk_index += 1
-        print(f"  -> 成功抽取 {len(chunks)} 个语义 Chunk")
-
-        print("\n--- [✂️ 离线切块细节预览开始] ---")
-        for i, chunk in enumerate(chunks):
-            meta = chunk.get("meta", {})
-            source = meta.get("source", pdf)
-            page = meta.get("page", 1)
-            chunk_idx = meta.get("chunk_index", i)
-
-            print(f"📄 [Chunk #{chunk_idx}] 来源: {source} | 页码: P{page}")
-            print(f"📝 文本内容:\n{chunk['text'].strip()}")
-            print("-" * 30)
-        print("--- [✂️ 离线切块细节预览结束] ---\n")
-
-        all_chunks.extend(chunks)
-
-    if not all_chunks:
-        print("⚠️ 未从文档中提取到有效的文本片段，放弃索引构建。")
-        return
-
-    print(f"\n📊 全量清洗完成，共生成 {len(all_chunks)} 个标准知识片段。")
-    print("正在写入双轨融合索引（Vector + BM25）...")
-
-    engine = RetrieverFactory.get_engine(doc_id)
-    engine.index(all_chunks)
-
-    save_index_manifest(current_manifest)
-
+    for doc in result.documents:
+        print(f"  -> {doc.name}: 抽取 {doc.chunk_count} 个语义 Chunk")
+    print(f"\n📊 全量清洗完成，共生成 {result.chunk_count} 个标准知识片段。")
     print("✅ 物理多轨索引构建成功并落盘，数据管线安全关闭。\n")
 
 

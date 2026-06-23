@@ -3,7 +3,8 @@ from contextlib import asynccontextmanager
 from typing import Callable
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from api.routes import chat_router, health_router
+from api.ingest import IndexJobManager, KnowledgeBaseRegistry
+from api.routes import chat_router, documents_router, health_router
 from api.schemas import ErrorCode, build_error_response
 from api.session_store import SessionStore
 from observability.logger import configure_logging
@@ -30,6 +31,8 @@ def create_app(
     chat_runner: ChatRunner | None = None,
     chat_stream_runner: Callable | None = None,
     session_store: SessionStore | None = None,
+    kb_registry: KnowledgeBaseRegistry | None = None,
+    index_jobs: IndexJobManager | None = None,
     offload_workers: int = 8,
 ) -> FastAPI:
     @asynccontextmanager
@@ -38,6 +41,7 @@ def create_app(
         configure_logging()
         yield
         app.state.offload_executor.shutdown(wait=False)
+        app.state.index_jobs.shutdown()
 
     app = FastAPI(
         title="CogDoc API",
@@ -52,12 +56,17 @@ def create_app(
     app.state.offload_executor = ThreadPoolExecutor(
         max_workers=offload_workers, thread_name_prefix="cogdoc-offload"
     )
+    # 入库注册表/任务管理器可注入，便于测试用假入库函数。
+    app.state.kb_registry = kb_registry or KnowledgeBaseRegistry()
+    app.state.index_jobs = index_jobs or IndexJobManager()
+
     @app.exception_handler(Exception)
     async def handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
         return _unhandled_error_response(exc)
 
     app.include_router(chat_router)
     app.include_router(health_router)
+    app.include_router(documents_router)
     return app
 
 
