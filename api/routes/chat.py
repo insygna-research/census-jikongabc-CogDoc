@@ -7,6 +7,7 @@ from api.schemas import (
     ChatRequest,
     ChatResponse,
     ErrorCode,
+    ErrorResponse,
     build_error_response,
     chat_result_to_response,
 )
@@ -32,9 +33,15 @@ _STATUS_BY_CODE = {
     ErrorCode.STREAM_INTERRUPTED: 502,
     ErrorCode.MODEL_UNAVAILABLE: 503,
 }
+# OpenAPI 错误响应契约，让前端按稳定 schema 处理失败。
+_ERROR_RESPONSES = {
+    502: {"model": ErrorResponse},
+    503: {"model": ErrorResponse},
+    500: {"model": ErrorResponse},
+}
 
 
-@router.post("/chat", response_model=ChatResponse)
+@router.post("/chat", response_model=ChatResponse, responses=_ERROR_RESPONSES)
 async def chat(request_body: ChatRequest, request: Request, response: Response):
     runner: ChatRunner = getattr(request.app.state, "chat_runner", run_chat_sync)
     session_store = request.app.state.session_store
@@ -138,7 +145,7 @@ def _event_to_frame(
     return None
 
 
-@router.post("/chat/stream")
+@router.post("/chat/stream", responses=_ERROR_RESPONSES)
 async def chat_stream(request_body: ChatRequest, request: Request):
     stream_runner = getattr(request.app.state, "chat_stream_runner", run_chat)
     session_store = request.app.state.session_store

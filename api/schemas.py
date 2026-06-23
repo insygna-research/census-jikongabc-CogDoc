@@ -34,6 +34,7 @@ class ErrorCode(str, Enum):
     STREAM_INTERRUPTED = "STREAM_INTERRUPTED"
     UNKNOWN_INTENT = "UNKNOWN_INTENT"
     BAD_REQUEST = "BAD_REQUEST"
+    INTERNAL_ERROR = "INTERNAL_ERROR"
 
 
 class ChatRequest(ApiModel):

@@ -8,16 +8,9 @@ if ROOT not in sys.path:
     # 从任意目录调用时都优先导入仓库源码。
     sys.path.insert(0, ROOT)
 
-from tools.rust_core_loader import ensure_rust_core
+from tools.rust_core_loader import REQUIRED_NATIVE_SYMBOLS, ensure_rust_core
 
-# 与运行链路里各处 ensure_rust_core 调用的符号并集保持一致。
-REQUIRED_SYMBOLS = (
-    "scan_pdf_manifest_native",
-    "rrf_fusion_native",
-    "validate_citations_native",
-    "tokenize_mixed_text_native",
-    "Bm25Index",
-)
+REQUIRED_SYMBOLS = REQUIRED_NATIVE_SYMBOLS
 
 
 def main() -> int:

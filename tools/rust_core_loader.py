@@ -2,6 +2,16 @@ import importlib
 from types import ModuleType
 
 
+# 运行链路里各处 ensure_rust_core 调用的符号并集；check_native 与就绪探针共用。
+REQUIRED_NATIVE_SYMBOLS = (
+    "scan_pdf_manifest_native",
+    "rrf_fusion_native",
+    "validate_citations_native",
+    "tokenize_mixed_text_native",
+    "Bm25Index",
+)
+
+
 def ensure_rust_core(*required: str) -> ModuleType:
     # 统一校验 Rust 扩展是否已安装且包含必需符号。
     try:

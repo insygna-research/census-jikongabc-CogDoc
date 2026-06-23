@@ -1,14 +1,28 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Callable
-from fastapi import FastAPI
-from api.routes import chat_router
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from api.routes import chat_router, health_router
+from api.schemas import ErrorCode, build_error_response
 from api.session_store import SessionStore
 from observability.logger import configure_logging
 from service.chat_service import ChatResult, run_chat, run_chat_sync
 
 
 ChatRunner = Callable[..., ChatResult]
+
+
+def _unhandled_error_response(exc: Exception) -> JSONResponse:
+    # 线程池关闭竞争窗口的调度异常归为暂时不可用，其余未预期异常归为内部错误；都不漏栈。
+    if isinstance(exc, RuntimeError) and "shutdown" in str(exc):
+        code, status, message = ErrorCode.MODEL_UNAVAILABLE, 503, "服务正在关闭，请重试"
+    else:
+        code, status, message = ErrorCode.INTERNAL_ERROR, 500, "服务内部错误"
+    error = build_error_response(
+        code, message, details={"error_class": type(exc).__name__}
+    )
+    return JSONResponse(status_code=status, content=error.model_dump())
 
 
 def create_app(
@@ -38,7 +52,12 @@ def create_app(
     app.state.offload_executor = ThreadPoolExecutor(
         max_workers=offload_workers, thread_name_prefix="cogdoc-offload"
     )
+    @app.exception_handler(Exception)
+    async def handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
+        return _unhandled_error_response(exc)
+
     app.include_router(chat_router)
+    app.include_router(health_router)
     return app
 
 
