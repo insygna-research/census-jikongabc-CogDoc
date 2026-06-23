@@ -27,6 +27,9 @@ class Generator:
                 custom_model_name if custom_model_name else settings.ollama_model_name
             )
             client_key = f"local_{base_url}_{model_name}"
+            # 本地超时更长、重试更少。
+            timeout = settings.ollama_timeout_seconds
+            max_retries = settings.ollama_max_retries
         else:
             base_url = settings.llm_base_url
             api_key = settings.llm_api_key
@@ -34,6 +37,9 @@ class Generator:
                 custom_model_name if custom_model_name else settings.llm_model_name
             )
             client_key = f"cloud_{base_url}_{model_name}"
+            # 云端超时与重试按后端 SLA 可配。
+            timeout = settings.llm_timeout_seconds
+            max_retries = settings.llm_max_retries
             if not api_key:
                 raise RuntimeError(
                     "LLM_API_KEY is not configured. Set it in your shell environment "
@@ -46,8 +52,8 @@ class Generator:
                 openai_api_key=api_key,
                 openai_api_base=base_url,
                 temperature=0.2,
-                timeout=90.0,
-                max_retries=2,
+                timeout=timeout,
+                max_retries=max_retries,
             )
         return cls._clients[client_key]
 

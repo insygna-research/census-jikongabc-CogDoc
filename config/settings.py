@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     llm_structured_output_method: str = Field(
         default="auto", validation_alias="LLM_STRUCTURED_OUTPUT_METHOD"
     )
+    # 云端韧性：单次调用硬超时与传输层重试次数，运维可按后端 SLA 调。
+    llm_timeout_seconds: float = Field(
+        default=90.0, validation_alias="LLM_TIMEOUT_SECONDS"
+    )
+    llm_max_retries: int = Field(default=2, validation_alias="LLM_MAX_RETRIES")
 
     # 本地 Ollama OpenAI 兼容后端。
     ollama_model_name: str = Field(
@@ -48,6 +53,11 @@ class Settings(BaseSettings):
         default="http://localhost:11434/v1", validation_alias="OLLAMA_BASE_URL"
     )
     ollama_api_key: str = Field(default="ollama", validation_alias="OLLAMA_API_KEY")
+    # 本地 Ollama 比云端慢得多：超时更长、重试更少（本地失败重试意义不大）。
+    ollama_timeout_seconds: float = Field(
+        default=180.0, validation_alias="OLLAMA_TIMEOUT_SECONDS"
+    )
+    ollama_max_retries: int = Field(default=1, validation_alias="OLLAMA_MAX_RETRIES")
 
     # 检索与生成控制。
     qa_retrieval_top_k: int = Field(default=9, validation_alias="QA_RETRIEVAL_TOP_K")

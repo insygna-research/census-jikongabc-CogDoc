@@ -3,10 +3,10 @@ import json
 from typing import Callable
 from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+from api.error_mapping import classify_error_code, status_for_code
 from api.schemas import (
     ChatRequest,
     ChatResponse,
-    ErrorCode,
     ErrorResponse,
     SessionHistoryResponse,
     SessionListResponse,
@@ -27,19 +27,12 @@ ChatRunner = Callable[..., ChatResult]
 
 router = APIRouter(prefix="/v1", tags=["chat"])
 
-# 服务层失败阶段 -> 稳定 error_code / HTTP 状态码。
-_ERROR_CODE_BY_STAGE = {
-    "stream": ErrorCode.STREAM_INTERRUPTED,
-    "runtime": ErrorCode.MODEL_UNAVAILABLE,
-}
-_STATUS_BY_CODE = {
-    ErrorCode.STREAM_INTERRUPTED: 502,
-    ErrorCode.MODEL_UNAVAILABLE: 503,
-}
 # OpenAPI 错误响应契约，让前端按稳定 schema 处理失败。
 _ERROR_RESPONSES = {
+    429: {"model": ErrorResponse},
     502: {"model": ErrorResponse},
     503: {"model": ErrorResponse},
+    504: {"model": ErrorResponse},
     500: {"model": ErrorResponse},
 }
 
@@ -67,7 +60,7 @@ async def chat(request_body: ChatRequest, request: Request, response: Response):
             request_body.forced_task,
         )
     except ChatServiceError as exc:
-        error_code = _ERROR_CODE_BY_STAGE.get(exc.stage, ErrorCode.MODEL_UNAVAILABLE)
+        error_code = classify_error_code(exc.stage, exc.error_class, exc.message)
         error = build_error_response(
             error_code,
             exc.message,
@@ -76,7 +69,7 @@ async def chat(request_body: ChatRequest, request: Request, response: Response):
             details={"error_class": exc.error_class, "stage": exc.stage},
         )
         return JSONResponse(
-            status_code=_STATUS_BY_CODE.get(error_code, 503),
+            status_code=status_for_code(error_code),
             content=error.model_dump(),
             headers={"X-Trace-Id": exc.trace_id or ""},
         )
@@ -166,8 +159,10 @@ def _event_to_frame(
         )
         return _sse_frame("final", chat_response.model_dump())
     if event.type == "error":
-        error_code = _ERROR_CODE_BY_STAGE.get(
-            event.payload.get("stage"), ErrorCode.MODEL_UNAVAILABLE
+        error_code = classify_error_code(
+            event.payload.get("stage", ""),
+            event.payload.get("error_class", ""),
+            event.payload.get("message", ""),
         )
         error = build_error_response(
             error_code,
