@@ -20,6 +20,7 @@ from agents.router import FORCED_TASK_TYPES
 from graph.workflow import UNKNOWN_RESPONSE, app
 from graph.subgraphs.qa import RetrieverFactory
 from observability.logger import configure_logging, log_event, new_trace_id
+from observability.trace import build_trace_step, export_trace, monotonic_ms
 from agents.conversation_memory import (
     CHAT_HISTORY_MESSAGE_LIMIT,
     extract_chat_turn,
@@ -166,7 +167,11 @@ def ask(
 ):
     # 控制台运行时只输出通过引用校验的最终答案。
     configure_logging()
+    settings = get_settings()
     trace_id = new_trace_id()
+    trace_steps = []
+    request_start_ms = monotonic_ms()
+    last_trace_ms = None
     initial_state = {
         "messages": [],
         "chat_history": list(chat_history or []),
@@ -299,6 +304,53 @@ def ask(
         try:
             for ns, mode, data in token_stream:
                 in_subgraph = len(ns) > 0
+                if mode == "updates":
+                    now_ms = monotonic_ms()
+                    if last_trace_ms is None:
+                        trace_steps.append(
+                            {
+                                "node_name": "runtime.setup",
+                                "duration_ms": round(
+                                    max(now_ms - request_start_ms, 0.0), 3
+                                ),
+                                "model": None,
+                                "token": None,
+                                "retrieval_top_k": None,
+                                "critique": None,
+                                "error_class": None,
+                                "counts": {},
+                                "evidence": [],
+                            }
+                        )
+                        duration_ms = 0.0
+                    else:
+                        duration_ms = now_ms - last_trace_ms
+                    last_trace_ms = now_ms
+                    namespace = ".".join(str(item) for item in ns)
+                    model_name = (
+                        settings.ollama_model_name
+                        if is_local
+                        else settings.llm_model_name
+                    )
+                    for node_name, node_output in data.items():
+                        if isinstance(node_output, dict):
+                            full_node_name = (
+                                f"{namespace}.{node_name}" if namespace else node_name
+                            )
+                            retrieval_top_k = (
+                                settings.qa_retrieval_top_k
+                                if node_name == "retrieve_node"
+                                else None
+                            )
+                            trace_steps.append(
+                                build_trace_step(
+                                    full_node_name,
+                                    node_output,
+                                    duration_ms,
+                                    model_name=model_name,
+                                    retrieval_top_k=retrieval_top_k,
+                                )
+                            )
 
                 if mode == "updates" and not in_subgraph and "intent_router" in data:
                     router_output = data["intent_router"]
@@ -404,6 +456,19 @@ def ask(
                     final_outputs[current_task] = task_output
 
         except Exception as stream_err:
+            trace_steps.append(
+                {
+                    "node_name": "runtime.stream",
+                    "duration_ms": 0.0,
+                    "model": None,
+                    "token": None,
+                    "retrieval_top_k": None,
+                    "critique": None,
+                    "error_class": type(stream_err).__name__,
+                    "counts": {},
+                    "evidence": [],
+                }
+            )
             log_event(
                 "runtime",
                 "request_stream_error",
@@ -415,16 +480,44 @@ def ask(
 
         print("\n" + "-" * 50)
         task_output = final_outputs.get(current_task, {})
+        trace_path = export_trace(
+            trace_id=trace_id,
+            request_id=trace_id,
+            task_type=current_task,
+            steps=trace_steps,
+            settings=settings,
+        )
         log_event(
             "runtime",
             "request_end",
             initial_state,
             task_type=current_task,
             has_output=bool(task_output),
+            trace_path=str(trace_path) if trace_path else None,
         )
         return extract_chat_turn(current_task, task_output, query)
 
     except Exception as e:
+        trace_steps.append(
+            {
+                "node_name": "runtime.failed",
+                "duration_ms": 0.0,
+                "model": None,
+                "token": None,
+                "retrieval_top_k": None,
+                "critique": None,
+                "error_class": type(e).__name__,
+                "counts": {},
+                "evidence": [],
+            }
+        )
+        export_trace(
+            trace_id=trace_id,
+            request_id=trace_id,
+            task_type="unknown",
+            steps=trace_steps,
+            settings=settings,
+        )
         log_event(
             "runtime",
             "request_failed",

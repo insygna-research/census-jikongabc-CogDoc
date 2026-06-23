@@ -23,6 +23,8 @@ def test_settings_defaults_match_current_runtime_contract():
     assert settings.cogdoc_log_level == "INFO"
     assert settings.cogdoc_log_file == "logs/cogdoc.jsonl"
     assert settings.cogdoc_log_to_console is False
+    assert settings.cogdoc_trace_enabled is True
+    assert settings.cogdoc_trace_dir == "logs/traces"
 
 
 def test_settings_reads_environment_overrides(monkeypatch):

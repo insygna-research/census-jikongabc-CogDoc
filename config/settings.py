@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     cogdoc_log_to_console: bool = Field(
         default=False, validation_alias="COGDOC_LOG_TO_CONSOLE"
     )
+    cogdoc_trace_enabled: bool = Field(
+        default=True, validation_alias="COGDOC_TRACE_ENABLED"
+    )
+    cogdoc_trace_dir: str = Field(
+        default="logs/traces", validation_alias="COGDOC_TRACE_DIR"
+    )
 
     # 云端 OpenAI 兼容后端。
     llm_model_name: str = Field(default="deepseek-chat", validation_alias="LLM_MODEL_NAME")
