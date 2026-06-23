@@ -18,7 +18,9 @@ def test_get_model_uses_gpu_when_enough_free_memory(monkeypatch):
     monkeypatch.setattr(device, "cuda_free_bytes", lambda: 6 * 1024 * 1024 * 1024)
     captured = {}
     monkeypatch.setattr(
-        embedder, "SentenceTransformer", lambda name, device: captured.update(device=device)
+        embedder,
+        "SentenceTransformer",
+        lambda name, device: captured.update(device=device),
     )
     Embedder._model = None
 
@@ -33,7 +35,9 @@ def test_get_model_falls_back_to_cpu_when_gpu_low(monkeypatch):
     monkeypatch.setattr(device, "mps_available", lambda: False)
     captured = {}
     monkeypatch.setattr(
-        embedder, "SentenceTransformer", lambda name, device: captured.update(device=device)
+        embedder,
+        "SentenceTransformer",
+        lambda name, device: captured.update(device=device),
     )
     Embedder._model = None
 

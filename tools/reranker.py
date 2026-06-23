@@ -36,7 +36,9 @@ class BGEReranker:
             cls._tokenizer = AutoTokenizer.from_pretrained(cls.MODEL_NAME)
         if cls._model is None:
             if cls.device is None:
-                cls.device = cls.default_device()  # 直连调用也按显存选设备，不退化成 CPU
+                cls.device = (
+                    cls.default_device()
+                )  # 直连调用也按显存选设备，不退化成 CPU
             cls._model = AutoModelForSequenceClassification.from_pretrained(
                 cls.MODEL_NAME
             )

@@ -77,9 +77,7 @@ async def list_documents(kb_id: str, request: Request):
 @router.post(
     "/knowledge-bases/{kb_id}/documents", status_code=202, responses=_ERROR_RESPONSES
 )
-async def upload_document(
-    kb_id: str, request: Request, file: UploadFile = File(...)
-):
+async def upload_document(kb_id: str, request: Request, file: UploadFile = File(...)):
     registry = request.app.state.kb_registry
     if not registry.exists(kb_id):
         return _error(ErrorCode.KB_NOT_FOUND, f"知识库不存在: {kb_id}", 404)
@@ -99,7 +97,9 @@ async def upload_document(
         content.extend(block)
         if len(content) > max_bytes:
             return _error(
-                ErrorCode.FILE_TOO_LARGE, f"文件超过上限 {settings.max_upload_mb}MB", 413
+                ErrorCode.FILE_TOO_LARGE,
+                f"文件超过上限 {settings.max_upload_mb}MB",
+                413,
             )
     if not content.startswith(_PDF_MAGIC):
         return _error(ErrorCode.INVALID_PDF, "文件不是合法 PDF", 400)

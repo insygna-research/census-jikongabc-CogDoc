@@ -1,6 +1,5 @@
 import pytest
 from pydantic import ValidationError
-
 from api.schemas import (
     API_SCHEMA_VERSION,
     ChatRequest,

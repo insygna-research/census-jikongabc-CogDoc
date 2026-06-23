@@ -2,7 +2,6 @@ import sys
 import os
 import re
 import signal
-
 try:
     import readline
 except ImportError:
@@ -241,7 +240,9 @@ def render_chat_event(event: ChatEvent) -> ChatResult | None:
                 f"\n⚠️ [大模型流式通信管道在运行时遭遇意外中断]: {event.payload.get('message', '')}"
             )
         else:
-            print(f"\n❌ [Pipeline 核心图调度执行失败]: {event.payload.get('message', '')}")
+            print(
+                f"\n❌ [Pipeline 核心图调度执行失败]: {event.payload.get('message', '')}"
+            )
     elif event.type == "final":
         result = event.payload["result"]
         output = event.payload.get("output", result.raw_output)

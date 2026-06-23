@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
-
 from config.settings import Settings, get_settings
 
 
@@ -37,7 +36,9 @@ class JsonLogFormatter(logging.Formatter):
             "event": record.getMessage(),
         }
         if record.exc_info:
-            payload["error_trace"] = "".join(traceback.format_exception(*record.exc_info))
+            payload["error_trace"] = "".join(
+                traceback.format_exception(*record.exc_info)
+            )
         for key, value in record.__dict__.items():
             if key in _BASE_RECORD_KEYS or key.startswith("_"):
                 continue

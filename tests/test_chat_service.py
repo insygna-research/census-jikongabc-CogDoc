@@ -1,5 +1,4 @@
 import pytest
-
 from service import chat_service
 from service.chat_service import ChatServiceError, run_chat_sync
 
@@ -142,7 +141,13 @@ class StreamInterruptWithPartialApp:
         yield (
             (),
             "updates",
-            {"qa_subgraph": {"answer": "部分答案", "critique": "", "reranked_docs": []}},
+            {
+                "qa_subgraph": {
+                    "answer": "部分答案",
+                    "critique": "",
+                    "reranked_docs": [],
+                }
+            },
         )
         raise TimeoutError("流中断")
 

@@ -1,5 +1,4 @@
 import pytest
-
 from tools.chunk_identity import build_chunk_id
 from tools.chunk_identity import (
     CHUNK_IDENTITY_VERSION,

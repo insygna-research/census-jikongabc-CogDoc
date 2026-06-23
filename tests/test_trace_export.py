@@ -1,5 +1,4 @@
 import json
-
 from config.settings import Settings
 from observability.trace import build_trace_step, export_trace
 

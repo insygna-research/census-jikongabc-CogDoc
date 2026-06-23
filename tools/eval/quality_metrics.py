@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 from statistics import mean
 from typing import Dict, List
-
 from agents.citation_validator import CitationValidatorAgent
 from agents.router import classify_intent_by_rule
 

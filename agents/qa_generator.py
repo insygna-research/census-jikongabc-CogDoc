@@ -23,12 +23,16 @@ class Generator:
         if is_local:
             base_url = settings.ollama_base_url
             api_key = settings.ollama_api_key
-            model_name = custom_model_name if custom_model_name else settings.ollama_model_name
+            model_name = (
+                custom_model_name if custom_model_name else settings.ollama_model_name
+            )
             client_key = f"local_{base_url}_{model_name}"
         else:
             base_url = settings.llm_base_url
             api_key = settings.llm_api_key
-            model_name = custom_model_name if custom_model_name else settings.llm_model_name
+            model_name = (
+                custom_model_name if custom_model_name else settings.llm_model_name
+            )
             client_key = f"cloud_{base_url}_{model_name}"
             if not api_key:
                 raise RuntimeError(

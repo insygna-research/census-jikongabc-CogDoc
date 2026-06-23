@@ -1,8 +1,6 @@
 import json
-
 import pytest
 from httpx import ASGITransport, AsyncClient
-
 from api.app import _unhandled_error_response, create_app
 from api.session_store import SessionStore
 

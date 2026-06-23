@@ -1,6 +1,5 @@
 import re
 from typing import List
-
 from tools.rust_core_loader import ensure_rust_core
 
 

@@ -24,10 +24,14 @@ class _FakeModel:
 
 
 def _stub_model_loading(monkeypatch):
-    monkeypatch.setattr(reranker.AutoTokenizer, "from_pretrained", lambda name: object())
+    monkeypatch.setattr(
+        reranker.AutoTokenizer, "from_pretrained", lambda name: object()
+    )
     fake = _FakeModel()
     monkeypatch.setattr(
-        reranker.AutoModelForSequenceClassification, "from_pretrained", lambda name: fake
+        reranker.AutoModelForSequenceClassification,
+        "from_pretrained",
+        lambda name: fake,
     )
     return fake
 

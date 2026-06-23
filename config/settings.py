@@ -1,6 +1,5 @@
 from functools import lru_cache
 from pathlib import Path
-
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -30,7 +29,9 @@ class Settings(BaseSettings):
     )
 
     # 云端 OpenAI 兼容后端。
-    llm_model_name: str = Field(default="deepseek-chat", validation_alias="LLM_MODEL_NAME")
+    llm_model_name: str = Field(
+        default="deepseek-chat", validation_alias="LLM_MODEL_NAME"
+    )
     llm_base_url: str = Field(
         default="https://api.deepseek.com/v1", validation_alias="LLM_BASE_URL"
     )

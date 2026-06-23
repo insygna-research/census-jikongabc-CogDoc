@@ -1,8 +1,6 @@
 import json
-
 import pytest
 from httpx import ASGITransport, AsyncClient
-
 from api.app import create_app
 from api.feedback_store import FeedbackStore
 
@@ -26,7 +24,9 @@ def _make_app(tmp_path, monkeypatch):
 async def _post(app, payload):
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        async with AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
             return await client.post("/v1/feedback", json=payload)
 
 

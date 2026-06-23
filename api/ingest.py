@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from threading import RLock
 from typing import Callable
 from uuid import uuid4
-
 from config.settings import get_settings
 from observability.logger import log_event
 from service.ingest_service import build_kb_index

@@ -66,7 +66,9 @@ def print_report(report: dict) -> None:
             f"citation={_fmt(value['citation_accuracy'])} "
             f"manual_support={_fmt(value['faithfulness_manual_support_rate'])}"
         )
-    print("\n说明：faithfulness_manual_support_rate 是人工抽检台账，不作为自动回归门禁。")
+    print(
+        "\n说明：faithfulness_manual_support_rate 是人工抽检台账，不作为自动回归门禁。"
+    )
     print()
 
 

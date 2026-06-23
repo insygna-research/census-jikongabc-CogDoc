@@ -22,7 +22,13 @@ def test_iter_sse_events_parses_token_and_final_frames():
 
 
 def test_iter_sse_events_skips_non_json_data():
-    lines = ["event: token", "data: not-json", "", "event: token", 'data: {"content": "ok"}']
+    lines = [
+        "event: token",
+        "data: not-json",
+        "",
+        "event: token",
+        'data: {"content": "ok"}',
+    ]
 
     events = list(iter_sse_events(lines))
 

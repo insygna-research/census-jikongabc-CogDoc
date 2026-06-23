@@ -14,7 +14,9 @@ def anyio_backend():
 async def _post_chat(app, payload: dict):
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        async with AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
             return await client.post("/v1/chat", json=payload)
 
 
@@ -112,7 +114,9 @@ async def test_chat_endpoint_reuses_session_history(monkeypatch):
 
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        async with AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
             first = await client.post(
                 "/v1/chat",
                 json={"query": "第一问", "doc_id": "kb", "session_id": "s1"},
@@ -166,7 +170,9 @@ async def test_chat_stream_emits_sse_frames_and_writes_session(monkeypatch):
 
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        async with AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
             resp = await client.post(
                 "/v1/chat/stream",
                 json={"query": "问题", "doc_id": "kb", "session_id": "s1"},
@@ -207,7 +213,9 @@ async def test_chat_stream_maps_error_event_and_skips_session(monkeypatch):
 
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        async with AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
             resp = await client.post(
                 "/v1/chat/stream",
                 json={"query": "问题", "doc_id": "kb", "session_id": "s1"},
@@ -253,7 +261,9 @@ async def test_chat_endpoint_maps_runtime_error_to_stable_error_code(monkeypatch
     store = SessionStore()
     app = create_app(chat_runner=failing_runner, session_store=store)
 
-    response = await _post_chat(app, {"query": "问题", "doc_id": "kb", "session_id": "s1"})
+    response = await _post_chat(
+        app, {"query": "问题", "doc_id": "kb", "session_id": "s1"}
+    )
 
     assert response.status_code == 503
     assert response.headers["X-Trace-Id"] == "trace-fail"

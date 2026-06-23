@@ -1,9 +1,7 @@
 import os
 import time
 import uuid
-
 import streamlit as st
-
 from frontend.api_client import CogDocClient
 
 DEFAULT_API_URL = os.getenv("COGDOC_API_URL", "http://localhost:8000")
@@ -40,7 +38,9 @@ def _send_feedback(final: dict, query: str, feedback: str) -> None:
         query=query,
         answer=final.get("answer", ""),
     )
-    st.toast("反馈已记录" if resp.status_code == 201 else f"反馈失败: {resp.status_code}")
+    st.toast(
+        "反馈已记录" if resp.status_code == 201 else f"反馈失败: {resp.status_code}"
+    )
 
 
 def _render_evidence(final: dict, key: str, query: str = "") -> None:
@@ -136,7 +136,9 @@ def _poll_job(client: CogDocClient, job_id: str) -> None:
             resp = client.get_job(job_id)
             if resp.status_code != 200:
                 # job 端点出错（如任务过期）时响应没有 status 字段，直接报错退出。
-                status.update(label=f"查询入库任务失败：{resp.text[:200]}", state="error")
+                status.update(
+                    label=f"查询入库任务失败：{resp.text[:200]}", state="error"
+                )
                 return
             job = resp.json()
             if job.get("status") in ("succeeded", "failed"):
@@ -148,27 +150,32 @@ def _poll_job(client: CogDocClient, job_id: str) -> None:
                 state="complete",
             )
         else:
-            status.update(label=f"入库失败：{job.get('message', '') or '超时未完成'}", state="error")
+            status.update(
+                label=f"入库失败：{job.get('message', '') or '超时未完成'}",
+                state="error",
+            )
 
 
 def _chat_area() -> None:
     kb_id = st.session_state.kb_id
     st.subheader(f"对话 · {kb_id or '未选择知识库'}")
-    mode = st.radio(
-        "模式", ["auto", "qa", "summary", "compare"], horizontal=True
-    )
+    mode = st.radio("模式", ["auto", "qa", "summary", "compare"], horizontal=True)
 
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"] or "（无答案）")
             if msg.get("final"):
-                _render_evidence(msg["final"], key=msg["id"], query=msg.get("query", ""))
+                _render_evidence(
+                    msg["final"], key=msg["id"], query=msg.get("query", "")
+                )
 
     prompt = st.chat_input("问点什么…", disabled=not kb_id)
     if not prompt:
         return
 
-    st.session_state.messages.append({"role": "user", "content": prompt, "id": _next_id()})
+    st.session_state.messages.append(
+        {"role": "user", "content": prompt, "id": _next_id()}
+    )
     with st.chat_message("user"):
         st.markdown(prompt)
 
@@ -194,7 +201,9 @@ def _chat_area() -> None:
             error = {"message": str(exc)}
 
         if error:
-            box.error(f"[{error.get('error_code', 'ERROR')}] {error.get('message', '')}")
+            box.error(
+                f"[{error.get('error_code', 'ERROR')}] {error.get('message', '')}"
+            )
             answer = ""
         else:
             answer = (final or {}).get("answer", answer)

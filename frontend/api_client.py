@@ -1,6 +1,5 @@
 import json
 from typing import Iterable, Iterator
-
 import httpx
 
 DEFAULT_TIMEOUT = 180.0
@@ -47,7 +46,9 @@ class CogDocClient:
             self._url(f"/v1/knowledge-bases/{kb_id}/documents"), timeout=self.timeout
         )
 
-    def upload_document(self, kb_id: str, filename: str, content: bytes) -> httpx.Response:
+    def upload_document(
+        self, kb_id: str, filename: str, content: bytes
+    ) -> httpx.Response:
         files = {"file": (filename, content, "application/pdf")}
         return httpx.post(
             self._url(f"/v1/knowledge-bases/{kb_id}/documents"),

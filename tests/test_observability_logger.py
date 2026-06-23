@@ -1,8 +1,6 @@
 import json
 import logging
-
 import pytest
-
 from config.settings import Settings
 import observability.logger as logger_module
 from observability.logger import configure_logging, log_event, new_trace_id

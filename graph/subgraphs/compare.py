@@ -1,6 +1,5 @@
 from langchain_core.messages import AIMessage
 from langgraph.graph import StateGraph, START, END
-
 from agents.compare_generator import CompareGeneratorAgent
 from agents.compare_profile import DocumentProfileAgent, default_compare_dimensions
 from agents.source_resolver import resolve_compare_sources

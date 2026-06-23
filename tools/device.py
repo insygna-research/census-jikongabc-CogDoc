@@ -22,7 +22,9 @@ def required_cuda_free_bytes(env_var: str) -> int:
     return get_settings().cuda_min_free_bytes(env_var)
 
 
-def resolve_device(min_cuda_free_bytes: int, current_device: str = None, model_loaded: bool = False) -> str:
+def resolve_device(
+    min_cuda_free_bytes: int, current_device: str = None, model_loaded: bool = False
+) -> str:
     # 按当前空闲显存动态判定：够则 GPU 加速、不够回落 CPU，避免小显存/共享卡 OOM。
     if current_device == "cuda" and model_loaded:
         return "cuda"

@@ -1,6 +1,5 @@
 import types
 from collections import OrderedDict
-
 from service import ingest_service
 
 
@@ -17,7 +16,9 @@ class FakeEngine:
 
 
 def _patch_common(monkeypatch, engine, pages, chunks):
-    monkeypatch.setattr(ingest_service.RetrieverFactory, "get_engine", lambda kb: engine)
+    monkeypatch.setattr(
+        ingest_service.RetrieverFactory, "get_engine", lambda kb: engine
+    )
     monkeypatch.setattr(ingest_service, "_invalidate_engine_cache", lambda kb: None)
     monkeypatch.setattr(
         ingest_service,

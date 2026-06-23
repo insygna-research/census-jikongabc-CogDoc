@@ -2,7 +2,6 @@ import json
 import time
 from pathlib import Path
 from typing import Any, Mapping
-
 from config.settings import Settings, get_settings
 
 

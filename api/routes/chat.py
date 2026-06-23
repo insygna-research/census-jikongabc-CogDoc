@@ -197,6 +197,8 @@ async def chat_stream(request_body: ChatRequest, request: Request):
                 yield frame
         # 只有真正产出 final 才写会话；断连或失败不污染历史。
         if final_result is not None:
-            session_store.append_messages(doc_id, session_id, final_result.chat_messages)
+            session_store.append_messages(
+                doc_id, session_id, final_result.chat_messages
+            )
 
     return StreamingResponse(event_source(), media_type="text/event-stream")

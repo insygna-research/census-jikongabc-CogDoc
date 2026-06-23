@@ -1,6 +1,5 @@
 import threading
 import time
-
 from agents.summary_generator import resolve_section_workers, run_section_cells
 
 

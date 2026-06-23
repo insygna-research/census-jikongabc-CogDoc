@@ -1,6 +1,5 @@
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
-
 from tools.rust_core_loader import REQUIRED_NATIVE_SYMBOLS, ensure_rust_core
 
 router = APIRouter(tags=["health"])

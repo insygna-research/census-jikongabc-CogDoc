@@ -1,10 +1,8 @@
 import asyncio
 import time
 from types import SimpleNamespace
-
 import pytest
 from httpx import ASGITransport, AsyncClient
-
 from api.app import create_app
 from api.ingest import IndexJobManager, KnowledgeBaseRegistry
 
@@ -145,8 +143,13 @@ async def test_upload_rejects_bad_inputs(tmp_path, monkeypatch):
             )
 
     assert to_missing.status_code == 404
-    assert not_pdf_ext.status_code == 400 and not_pdf_ext.json()["error_code"] == "INVALID_PDF"
-    assert bad_magic.status_code == 400 and bad_magic.json()["error_code"] == "INVALID_PDF"
+    assert (
+        not_pdf_ext.status_code == 400
+        and not_pdf_ext.json()["error_code"] == "INVALID_PDF"
+    )
+    assert (
+        bad_magic.status_code == 400 and bad_magic.json()["error_code"] == "INVALID_PDF"
+    )
 
 
 @pytest.mark.anyio

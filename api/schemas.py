@@ -1,8 +1,6 @@
 from enum import Enum
 from typing import Any, Literal, Mapping
-
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-
 from config.settings import get_settings
 
 
@@ -124,7 +122,11 @@ class KnowledgeBaseCreate(ApiModel):
     def _slug(cls, value: str) -> str:
         # kb_id 进路径，禁止分隔符与空白，避免目录穿越。
         stripped = value.strip()
-        if not stripped or any(c in stripped for c in "/\\ \t") or stripped in {".", ".."}:
+        if (
+            not stripped
+            or any(c in stripped for c in "/\\ \t")
+            or stripped in {".", ".."}
+        ):
             raise ValueError("kb_id 只能是不含路径分隔符与空白的标识符")
         return stripped
 

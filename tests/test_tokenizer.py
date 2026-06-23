@@ -1,5 +1,4 @@
 import pytest
-
 from tools.tokenizer import _tokenize_mixed_text_python, tokenize_mixed_text
 
 

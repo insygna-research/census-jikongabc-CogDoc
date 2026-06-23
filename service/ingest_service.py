@@ -1,6 +1,5 @@
 import os
 from dataclasses import dataclass, field
-
 from graph.subgraphs.qa import RetrieverFactory
 from tools.chunker import chunk_paper
 from tools.manifest import save_index_manifest, stamp_chunk_identity_contract
