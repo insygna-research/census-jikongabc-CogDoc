@@ -1,4 +1,4 @@
-import fitz
+import pymupdf as fitz  # 直接导入 pymupdf，避免被 PyPI 同名 stub 包 fitz 顶替
 import re
 import os
 from typing import List
