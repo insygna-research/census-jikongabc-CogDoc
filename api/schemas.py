@@ -154,6 +154,30 @@ class IndexJob(ApiModel):
     message: str | None = None
 
 
+class FeedbackType(str, Enum):
+    THUMBS_UP = "thumbs_up"
+    THUMBS_DOWN = "thumbs_down"
+    CORRECTION = "correction"
+
+
+class FeedbackRequest(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    trace_id: str = Field(min_length=1)
+    feedback: FeedbackType
+    kb_id: str | None = None
+    query: str | None = None
+    answer: str | None = None
+    comment: str | None = None
+    correction: str | None = None
+
+
+class FeedbackResponse(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    feedback_id: str
+    status: str = "recorded"
+    is_bad_case: bool
+
+
 def _as_mapping(value: Any) -> Mapping[str, Any]:
     if isinstance(value, Mapping):
         return value

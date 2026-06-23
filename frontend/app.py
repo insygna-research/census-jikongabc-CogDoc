@@ -28,7 +28,22 @@ def _page_label(page) -> str:
     return f" · P{page}" if page is not None else ""
 
 
-def _render_evidence(final: dict, key: str) -> None:
+def _send_feedback(final: dict, query: str, feedback: str) -> None:
+    trace_id = final.get("trace_id")
+    if not trace_id:
+        st.toast("缺少 trace_id，无法提交反馈")
+        return
+    resp = _client().submit_feedback(
+        trace_id=trace_id,
+        feedback=feedback,
+        kb_id=st.session_state.kb_id,
+        query=query,
+        answer=final.get("answer", ""),
+    )
+    st.toast("反馈已记录" if resp.status_code == 201 else f"反馈失败: {resp.status_code}")
+
+
+def _render_evidence(final: dict, key: str, query: str = "") -> None:
     meta = st.columns(3)
     meta[0].caption(f"任务: {final.get('task_type', '-')}")
     meta[1].caption(f"引用校验: {'通过' if final.get('is_valid') else '未通过'}")
@@ -50,9 +65,9 @@ def _render_evidence(final: dict, key: str) -> None:
 
     fb = st.columns([1, 1, 6])
     if fb[0].button("👍", key=f"up-{key}"):
-        st.toast("已记录正反馈（待接 /v1/feedback）")
+        _send_feedback(final, query, "thumbs_up")
     if fb[1].button("👎", key=f"down-{key}"):
-        st.toast("已记录负反馈（待接 /v1/feedback）")
+        _send_feedback(final, query, "thumbs_down")
 
 
 def _sidebar() -> None:
@@ -147,7 +162,7 @@ def _chat_area() -> None:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"] or "（无答案）")
             if msg.get("final"):
-                _render_evidence(msg["final"], key=msg["id"])
+                _render_evidence(msg["final"], key=msg["id"], query=msg.get("query", ""))
 
     prompt = st.chat_input("问点什么…", disabled=not kb_id)
     if not prompt:
@@ -185,10 +200,16 @@ def _chat_area() -> None:
             answer = (final or {}).get("answer", answer)
             box.markdown(answer or "（无答案）")
             if final:
-                _render_evidence(final, key=str(_next_id()))
+                _render_evidence(final, key=str(_next_id()), query=prompt)
 
     st.session_state.messages.append(
-        {"role": "assistant", "content": answer, "final": final, "id": _next_id()}
+        {
+            "role": "assistant",
+            "content": answer,
+            "final": final,
+            "query": prompt,
+            "id": _next_id(),
+        }
     )
 
 

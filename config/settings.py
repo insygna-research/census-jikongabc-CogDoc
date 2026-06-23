@@ -120,6 +120,15 @@ class Settings(BaseSettings):
         return str(self.data_dir / "kb" / kb_id / "sources")
 
     @property
+    def feedback_log_path(self) -> str:
+        return str(self.data_dir / "feedback" / "feedback.jsonl")
+
+    @property
+    def bad_cases_path(self) -> str:
+        # 点踩/纠错自动归集到此，喂离线质量评测 harness。
+        return str(self.data_dir / "feedback" / "bad_cases.jsonl")
+
+    @property
     def project_root(self) -> Path:
         return PROJECT_ROOT
 

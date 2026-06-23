@@ -64,6 +64,27 @@ class CogDocClient:
     def get_job(self, job_id: str) -> httpx.Response:
         return httpx.get(self._url(f"/v1/index-jobs/{job_id}"), timeout=self.timeout)
 
+    def submit_feedback(
+        self,
+        trace_id: str,
+        feedback: str,
+        kb_id: str | None = None,
+        query: str | None = None,
+        answer: str | None = None,
+    ) -> httpx.Response:
+        payload = {
+            "trace_id": trace_id,
+            "feedback": feedback,
+            "kb_id": kb_id,
+            "query": query,
+            "answer": answer,
+        }
+        return httpx.post(
+            self._url("/v1/feedback"),
+            json={k: v for k, v in payload.items() if v is not None},
+            timeout=self.timeout,
+        )
+
     def _chat_payload(
         self, kb_id: str, query: str, mode: str, session_id: str | None, is_local: bool
     ) -> dict:

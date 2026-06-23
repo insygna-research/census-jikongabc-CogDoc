@@ -3,8 +3,14 @@ from contextlib import asynccontextmanager
 from typing import Callable
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from api.feedback_store import FeedbackStore
 from api.ingest import IndexJobManager, KnowledgeBaseRegistry
-from api.routes import chat_router, documents_router, health_router
+from api.routes import (
+    chat_router,
+    documents_router,
+    feedback_router,
+    health_router,
+)
 from api.schemas import ErrorCode, build_error_response
 from api.session_store import SessionStore
 from observability.logger import configure_logging
@@ -33,6 +39,7 @@ def create_app(
     session_store: SessionStore | None = None,
     kb_registry: KnowledgeBaseRegistry | None = None,
     index_jobs: IndexJobManager | None = None,
+    feedback_store: FeedbackStore | None = None,
     offload_workers: int = 8,
 ) -> FastAPI:
     @asynccontextmanager
@@ -59,6 +66,7 @@ def create_app(
     # 入库注册表/任务管理器可注入，便于测试用假入库函数。
     app.state.kb_registry = kb_registry or KnowledgeBaseRegistry()
     app.state.index_jobs = index_jobs or IndexJobManager()
+    app.state.feedback_store = feedback_store or FeedbackStore()
 
     @app.exception_handler(Exception)
     async def handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
@@ -67,6 +75,7 @@ def create_app(
     app.include_router(chat_router)
     app.include_router(health_router)
     app.include_router(documents_router)
+    app.include_router(feedback_router)
     return app
 
 
