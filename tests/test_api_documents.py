@@ -49,6 +49,23 @@ async def _wait_job(client, job_id, timeout=2.0):
     return resp
 
 
+def test_registry_recovers_from_corrupt_file(tmp_path):
+    reg_path = tmp_path / "registry.json"
+    reg_path.write_text("{ 半截损坏的 json", encoding="utf-8")
+
+    # 损坏的 registry 不应让构造（即 create_app 启动）抛异常。
+    registry = KnowledgeBaseRegistry(
+        registry_path=str(reg_path), source_dir_for=lambda kb: str(tmp_path / kb)
+    )
+    assert registry.list() == []
+
+    registry.create("kb1")
+    reloaded = KnowledgeBaseRegistry(
+        registry_path=str(reg_path), source_dir_for=lambda kb: str(tmp_path / kb)
+    )
+    assert [r["kb_id"] for r in reloaded.list()] == ["kb1"]
+
+
 @pytest.mark.anyio
 async def test_create_list_get_knowledge_base(tmp_path, monkeypatch):
     app, _ = _make_app(tmp_path, monkeypatch=monkeypatch)

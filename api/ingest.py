@@ -35,14 +35,19 @@ class KnowledgeBaseRegistry:
         self._entries = self._load()
 
     def _load(self) -> dict:
-        if os.path.exists(self._path):
+        # registry 损坏（写入中崩溃留半截 JSON）时退回空表，保证服务仍能启动。
+        try:
             with open(self._path, encoding="utf-8") as f:
                 return json.load(f)
-        return {}
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
 
     def _save(self) -> None:
-        with open(self._path, "w", encoding="utf-8") as f:
+        # 原子写：先写临时文件再 rename，避免中途崩溃留下半截 JSON。
+        tmp_path = f"{self._path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(self._entries, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, self._path)
 
     def source_dir(self, kb_id: str) -> str:
         return self._source_dir_for(kb_id)
