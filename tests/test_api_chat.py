@@ -3,7 +3,7 @@ import threading
 from httpx import ASGITransport, AsyncClient
 from api.app import create_app
 from api.session_store import SessionStore
-from service.chat_service import ChatResult, ChatServiceError
+from service.chat_service import ChatEvent, ChatResult, ChatServiceError
 
 
 @pytest.fixture
@@ -147,6 +147,76 @@ async def test_chat_endpoint_offloads_runner(monkeypatch):
     assert response.status_code == 200
     assert runner_thread_ids
     assert runner_thread_ids[0] != caller_thread_id
+
+
+@pytest.mark.anyio
+async def test_chat_stream_emits_sse_frames_and_writes_session(monkeypatch):
+    import api.app as app_module
+
+    monkeypatch.setattr(app_module, "configure_logging", lambda: None)
+    result = _result("最终答案", "trace-sse")
+
+    def fake_stream(doc_id, query, is_local, chat_history, forced_task):
+        yield ChatEvent("request_started", {"trace_id": "trace-sse", "doc_id": doc_id})
+        yield ChatEvent("token", {"content": "最终"})
+        yield ChatEvent("final", {"result": result, "output": result.raw_output})
+
+    store = SessionStore()
+    app = create_app(chat_stream_runner=fake_stream, session_store=store)
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            resp = await client.post(
+                "/v1/chat/stream",
+                json={"query": "问题", "doc_id": "kb", "session_id": "s1"},
+            )
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    body = resp.text
+    assert "event: start" in body and "trace-sse" in body
+    assert "event: token" in body
+    assert "event: final" in body
+    assert '"citations"' in body
+    # 结构化 final，不泄漏 raw_output。
+    assert "raw_output" not in body
+    assert store.get_history("kb", "s1") == result.chat_messages
+
+
+@pytest.mark.anyio
+async def test_chat_stream_maps_error_event_and_skips_session(monkeypatch):
+    import api.app as app_module
+
+    monkeypatch.setattr(app_module, "configure_logging", lambda: None)
+
+    def fake_stream(doc_id, query, is_local, chat_history, forced_task):
+        yield ChatEvent("request_started", {"trace_id": "trace-err", "doc_id": doc_id})
+        yield ChatEvent(
+            "error",
+            {
+                "error_class": "TimeoutError",
+                "message": "流中断",
+                "stage": "stream",
+                "trace_id": "trace-err",
+            },
+        )
+
+    store = SessionStore()
+    app = create_app(chat_stream_runner=fake_stream, session_store=store)
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            resp = await client.post(
+                "/v1/chat/stream",
+                json={"query": "问题", "doc_id": "kb", "session_id": "s1"},
+            )
+
+    body = resp.text
+    assert "event: error" in body
+    assert "STREAM_INTERRUPTED" in body
+    assert store.get_history("kb", "s1") == []
 
 
 def test_session_store_uses_doc_id_in_key_and_evicts_oldest():

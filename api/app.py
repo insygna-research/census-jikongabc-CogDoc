@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from api.routes import chat_router
 from api.session_store import SessionStore
 from observability.logger import configure_logging
-from service.chat_service import ChatResult, run_chat_sync
+from service.chat_service import ChatResult, run_chat, run_chat_sync
 
 
 ChatRunner = Callable[..., ChatResult]
@@ -14,6 +14,7 @@ ChatRunner = Callable[..., ChatResult]
 def create_app(
     *,
     chat_runner: ChatRunner | None = None,
+    chat_stream_runner: Callable | None = None,
     session_store: SessionStore | None = None,
     offload_workers: int = 8,
 ) -> FastAPI:
@@ -31,6 +32,7 @@ def create_app(
     )
     # runner/store 可注入，便于脱离真实图与持久态测试交付层。
     app.state.chat_runner = chat_runner or run_chat_sync
+    app.state.chat_stream_runner = chat_stream_runner or run_chat
     app.state.session_store = session_store or SessionStore()
     # 有界线程池限制本地算力并发，缓解高并发下精排/嵌入的坏邻居效应。
     app.state.offload_executor = ThreadPoolExecutor(
