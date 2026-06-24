@@ -4,7 +4,8 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# 仓库根（.env / 默认 data 根的锚点）。本文件位于 src/cogdoc/config/，上溯 3 层到仓库根。
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 # 封装 Settings 的状态与行为。
