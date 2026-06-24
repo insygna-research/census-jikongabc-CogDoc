@@ -33,7 +33,7 @@ make run        # 构建/复用索引、预热模型、启动控制台
 
 依赖统一在 [pyproject.toml](../pyproject.toml):运行时依赖在 `[project.dependencies]`,`dev`(构建/测试)与 `frontend`(Streamlit 客户端)为可选 extras,用 `.[dev]` / `.[frontend]` 安装。包采用 `src/` 布局(`src/cogdoc/`);`make` 目标会把 `src/` 加入 `PYTHONPATH`,因此跑测试无需先安装。
 
-把 PDF 放进 `测试论文/`(或设置 `COGDOC_DOC_DIR`)。控制台内:`/local` 用 Ollama,`/cloud` 用云端后端,`exit` 退出。每次修改 `rust_core/src/` 下的代码后都必须重跑 `make native`——`.so` 不会自动重建,也不纳入版本控制。
+把 PDF 放进收件箱 `your_documents/`(或设置 `COGDOC_DOC_DIR`)。控制台对齐云端 API，采用仿 Claude Code 的斜杠命令:`/kb new <名称>` 建知识库,`/add <文件.pdf>` 把收件箱里的 PDF 加入当前库(同步重建索引),`/new` 开新对话,`/chats` / `/open` 浏览持久化历史,`/rmchat` 与 `/kb rm` 删除(需确认)。`/local` 用 Ollama,`/cloud` 用云端后端,`/help` 列出全部命令,`exit` 退出。`make debug`(`python -m cogdoc.debug`)打开检索可视化控制台,针对单个库打印路由判别、多路改写、召回+精排切块(含 RRF 分)与引证审计。每次修改 `rust_core/src/` 下的代码后都必须重跑 `make native`——`.so` 不会自动重建,也不纳入版本控制。
 
 ## 你会得到什么
 
@@ -80,7 +80,7 @@ Python 层负责图编排、Prompt、模型客户端、索引和控制台。Rust
 
 ## 索引链路
 
-由 `cogdoc.cli`(`build_index`)在控制台启动前驱动:
+由 `build_kb_index_transactional` 在某个库的文件变更时驱动(`/add`、`/rm` 或云端上传/删除接口):
 
 1. **扫描** — `scan_pdf_manifest_native`(Rust)用 rayon 并行、1 MiB 缓冲的 SHA-256 计算每个 PDF,返回 `{doc_id, documents: [{name, size, sha256}]}`,按文件名排序。
 2. **比对** — `manifests_match` 仅当 `doc_id`、`chunk_identity_version` 及每个 `{name, sha256}` 都与已存 manifest 一致时才复用索引;任一不匹配都强制重建。
@@ -166,7 +166,8 @@ Summary 在多 PDF 语料库中需要点名目标文件。Compare 需要点名�
 ```text
 CogDoc/
 ├── src/cogdoc/              # 可导入的发行包(src-layout)
-│   ├── cli.py               # 交互式控制台入口(python -m cogdoc.cli / `cogdoc`)
+│   ├── cli.py               # 多库/多对话控制台(python -m cogdoc.cli / `cogdoc`)
+│   ├── debug.py             # 检索可视化控制台(python -m cogdoc.debug / `cogdoc-debug`)
 │   ├── agents/              # router、query_rewriter、rewrite_verifier、qa_generator、
 │   │                        # citation_validator、structured_output、summary_*、compare_*
 │   ├── api/                 # FastAPI app、routes、持久化、访问控制、metrics
@@ -189,7 +190,7 @@ CogDoc/
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `COGDOC_DOC_DIR` | `测试论文` | `cogdoc.cli` 扫描的 PDF 语料目录 |
+| `COGDOC_DOC_DIR` | `your_documents` | 收件箱目录，`/add` 从这里把 PDF 选入知识库 |
 | `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | 本地 OpenAI 兼容 Ollama endpoint |
 | `OLLAMA_MODEL_NAME` | `qwen2.5:7b` | 本地模型名 |
 | `LLM_BASE_URL` | `https://api.deepseek.com/v1` | 云端 OpenAI 兼容 endpoint |

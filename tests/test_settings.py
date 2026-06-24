@@ -12,7 +12,7 @@ def clear_settings_cache():
 def test_settings_defaults_match_current_runtime_contract():
     settings = Settings()
 
-    assert settings.cogdoc_doc_dir == "测试论文"
+    assert settings.cogdoc_doc_dir == "your_documents"
     assert settings.cogdoc_default_doc_id == "arch_blueprint_2026"
     assert settings.llm_model_name == "deepseek-chat"
     assert settings.ollama_model_name == "qwen2.5:7b"

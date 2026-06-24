@@ -33,7 +33,7 @@ make run        # build/reuse the index, warm up models, start the console
 
 Dependencies live in [pyproject.toml](pyproject.toml): runtime in `[project.dependencies]`, with `dev` (build/test) and `frontend` (Streamlit client) as optional extras — install via `.[dev]` / `.[frontend]`. The package uses a `src/` layout (`src/cogdoc/`); the `make` targets put `src/` on `PYTHONPATH`, so no install is strictly required to run the suite.
 
-Put PDFs in `测试论文/` (or set `COGDOC_DOC_DIR`). In the console, `/local` uses Ollama, `/cloud` uses the cloud backend, `exit` quits. `make native` must be re-run after any change under `rust_core/src/` — the `.so` is not auto-rebuilt and not committed.
+Put PDFs in the inbox `your_documents/` (or set `COGDOC_DOC_DIR`). The console mirrors the cloud API with Claude-Code-style slash commands: `/kb new <name>` creates a knowledge base, `/add <file.pdf>` ingests an inbox PDF into the active KB (synchronous rebuild), `/new` starts a conversation, `/chats` / `/open` browse persisted history, `/rmchat` and `/kb rm` delete (with confirmation). `/local` uses Ollama, `/cloud` uses the cloud backend, `/help` lists everything, `exit` quits. `make debug` (`python -m cogdoc.debug`) opens a retrieval-visualization console that prints routing, query rewrites, recalled+reranked chunks with RRF scores, and citation audits for one KB. `make native` must be re-run after any change under `rust_core/src/` — the `.so` is not auto-rebuilt and not committed.
 
 ## What You Get
 
@@ -80,7 +80,7 @@ The Python layer owns orchestration, prompts, model clients, indexing, and the c
 
 ## Indexing Pipeline
 
-Driven by `cogdoc.cli` (`build_index`) before the console starts:
+Driven by `build_kb_index_transactional` whenever a KB's files change (`/add`, `/rm`, or the cloud upload/delete endpoints):
 
 1. **Scan** — `scan_pdf_manifest_native` (Rust) hashes every PDF with rayon-parallel, 1 MiB-buffered SHA-256 and returns `{doc_id, documents: [{name, size, sha256}]}`, sorted by filename.
 2. **Compare** — `manifests_match` reuses the index only if `doc_id`, `chunk_identity_version`, and every `{name, sha256}` match the saved manifest; any mismatch forces a rebuild.
@@ -166,7 +166,8 @@ For Summary, name the target file when the corpus has multiple PDFs. For Compare
 ```text
 CogDoc/
 ├── src/cogdoc/              # the importable package (src-layout)
-│   ├── cli.py               # interactive console entry point (python -m cogdoc.cli / `cogdoc`)
+│   ├── cli.py               # multi-KB / multi-conversation console (python -m cogdoc.cli / `cogdoc`)
+│   ├── debug.py             # retrieval-visualization console (python -m cogdoc.debug / `cogdoc-debug`)
 │   ├── agents/              # router, query_rewriter, rewrite_verifier, qa_generator,
 │   │                        # citation_validator, structured_output, summary_*, compare_*
 │   ├── api/                 # FastAPI app, routes, persistence, access control, metrics
@@ -189,7 +190,7 @@ CogDoc/
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `COGDOC_DOC_DIR` | `测试论文` | PDF corpus directory scanned by `cogdoc.cli` |
+| `COGDOC_DOC_DIR` | `your_documents` | Inbox directory of PDFs that `/add` ingests into a KB |
 | `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Local OpenAI-compatible Ollama endpoint |
 | `OLLAMA_MODEL_NAME` | `qwen2.5:7b` | Local model name |
 | `LLM_BASE_URL` | `https://api.deepseek.com/v1` | Cloud OpenAI-compatible endpoint |

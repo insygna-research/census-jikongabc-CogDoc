@@ -11,7 +11,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 # 封装 Settings 的状态与行为。
 class Settings(BaseSettings):
     # 项目路径。
-    cogdoc_doc_dir: str = Field(default="测试论文", validation_alias="COGDOC_DOC_DIR")
+    cogdoc_doc_dir: str = Field(
+        default="your_documents", validation_alias="COGDOC_DOC_DIR"
+    )
     cogdoc_data_dir: str = Field(default="./data", validation_alias="COGDOC_DATA_DIR")
     cogdoc_default_doc_id: str = Field(
         default="arch_blueprint_2026", validation_alias="COGDOC_DEFAULT_DOC_ID"

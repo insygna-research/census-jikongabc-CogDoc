@@ -32,8 +32,10 @@ dependencies = [
 ]
 
 [project.scripts]
-# 安装后可直接 `cogdoc` 启动问答控制台（等价 python -m cogdoc.cli）。
+# 安装后可直接 `cogdoc` 启动多库多对话控制台（等价 python -m cogdoc.cli）。
 cogdoc = "cogdoc.cli:main"
+# `cogdoc-debug` 启动检索可视化/可观测控制台（等价 python -m cogdoc.debug）。
+cogdoc-debug = "cogdoc.debug:main"
 
 [project.optional-dependencies]
 # 开发：原生扩展构建 + 测试 + BM25 对齐参照（原 requirements-dev.txt）。
