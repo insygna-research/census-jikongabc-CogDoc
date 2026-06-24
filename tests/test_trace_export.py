@@ -1,6 +1,6 @@
 import json
-from config.settings import Settings
-from observability.trace import build_trace_step, export_trace
+from cogdoc.config.settings import Settings
+from cogdoc.observability.trace import build_trace_step, export_trace
 
 
 def test_build_trace_step_keeps_only_safe_document_preview():

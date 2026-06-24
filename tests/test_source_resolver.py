@@ -1,9 +1,9 @@
-from agents.source_resolver import (
+from cogdoc.agents.source_resolver import (
     SourceResolution,
     resolve_compare_sources,
     resolve_summary_source,
 )
-from agents.qa_generator import Generator
+from cogdoc.agents.qa_generator import Generator
 
 
 class FakeResolverLLM:

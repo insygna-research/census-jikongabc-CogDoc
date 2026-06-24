@@ -2,15 +2,15 @@ import os
 import pytest
 import threading
 from unittest.mock import MagicMock, patch, call
-from service.kb_epoch import EpochStore
-from service.kb_state import (
+from cogdoc.service.kb_epoch import EpochStore
+from cogdoc.service.kb_state import (
     KBState,
     StaleGenerationError,
     GENERATION_FAILED,
     GENERATION_READY,
 )
-from service import ingest_service
-from service.ingest_service import (
+from cogdoc.service import ingest_service
+from cogdoc.service.ingest_service import (
     build_kb_index_transactional,
     _hardlink_snapshot,
     _cleanup_generation_storage,
@@ -19,8 +19,8 @@ from service.ingest_service import (
     _verify_staging,
     IndexInconsistencyError,
 )
-from tools.retriever.hybrid import HybridRetriever
-from tools.retriever.base_retriever import NullRetriever
+from cogdoc.tools.retriever.hybrid import HybridRetriever
+from cogdoc.tools.retriever.base_retriever import NullRetriever
 
 
 # 构造 make state 相关逻辑。
@@ -85,8 +85,8 @@ def test_cleanup_removes_gen_dir(tmp_path):
     (gen_dir / "a.pdf").write_bytes(b"dummy")
 
     with (
-        patch("service.ingest_service.get_settings") as mock_settings,
-        patch("service.ingest_service.KBState"),
+        patch("cogdoc.service.ingest_service.get_settings") as mock_settings,
+        patch("cogdoc.service.ingest_service.KBState"),
     ):
         s = MagicMock()
         s.kb_collection_id.return_value = "abc12345-g001"
@@ -105,8 +105,8 @@ def test_cleanup_removes_gen_dir(tmp_path):
 def test_cleanup_tolerates_missing_resources(tmp_path):
     # 对不存在的 Chroma 集合、BM25 pkl、gen 目录均不抛错。
     with (
-        patch("service.ingest_service.get_settings") as mock_settings,
-        patch("service.ingest_service.KBState"),
+        patch("cogdoc.service.ingest_service.get_settings") as mock_settings,
+        patch("cogdoc.service.ingest_service.KBState"),
         patch("chromadb.PersistentClient") as mock_chroma,
     ):
         mock_chroma.return_value.delete_collection.side_effect = ValueError("not found")
@@ -397,7 +397,7 @@ def test_verify_staging_chunk_id_mismatch_raises():
 # 验证 schedule cleanup uses tracked daemon timer。
 def test_schedule_cleanup_uses_tracked_daemon_timer():
     # 必须用 threading.Timer（grace period 后才删 Chroma），且纳入统一注册表可在关闭时取消。
-    with patch("service.ingest_service.threading.Timer") as mock_timer:
+    with patch("cogdoc.service.ingest_service.threading.Timer") as mock_timer:
         timer_instance = MagicMock()
         mock_timer.return_value = timer_instance
         _schedule_generation_cleanup("kb", "g001")
@@ -413,7 +413,7 @@ def test_schedule_cleanup_uses_tracked_daemon_timer():
 # 验证 cancel all timers cancels pending。
 def test_cancel_all_timers_cancels_pending():
     # 关闭期取消所有未触发的后台 Timer。
-    with patch("service.ingest_service.threading.Timer") as mock_timer:
+    with patch("cogdoc.service.ingest_service.threading.Timer") as mock_timer:
         timer_instance = MagicMock()
         mock_timer.return_value = timer_instance
         _schedule_generation_cleanup("kb", "g001")
@@ -423,7 +423,7 @@ def test_cancel_all_timers_cancels_pending():
 
 # 验证 external purge waits for reader lease。
 def test_external_purge_waits_for_reader_lease(monkeypatch):
-    from service.kb_readers import kb_read_lease
+    from cogdoc.service.kb_readers import kb_read_lease
 
     with kb_read_lease("kb"):
         with pytest.raises(ingest_service.KBCleanupError, match="在途读者"):
@@ -464,9 +464,9 @@ def test_cleanup_keeps_state_record_on_partial_failure(tmp_path):
     state.mark_ready(gen_id, 0, [])
 
     with (
-        patch("service.ingest_service.get_settings") as mock_settings,
+        patch("cogdoc.service.ingest_service.get_settings") as mock_settings,
         patch("chromadb.PersistentClient") as mock_client,
-        patch("service.ingest_service.KBState", return_value=state),
+        patch("cogdoc.service.ingest_service.KBState", return_value=state),
     ):
         s = MagicMock()
         s.kb_collection_id.return_value = "deadbeef-g001"
@@ -493,9 +493,9 @@ def test_cleanup_removes_state_record_when_all_ok(tmp_path):
     state.mark_ready(gen_id, 0, [])
 
     with (
-        patch("service.ingest_service.get_settings") as mock_settings,
+        patch("cogdoc.service.ingest_service.get_settings") as mock_settings,
         patch("chromadb.PersistentClient") as mock_client,
-        patch("service.ingest_service.KBState", return_value=state),
+        patch("cogdoc.service.ingest_service.KBState", return_value=state),
     ):
         s = MagicMock()
         s.kb_collection_id.return_value = "deadbeef-g002"

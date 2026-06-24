@@ -1,4 +1,4 @@
-from agents.summary_generator import (
+from cogdoc.agents.summary_generator import (
     attach_section_citations,
     build_section_citations,
     is_no_evidence_summary,

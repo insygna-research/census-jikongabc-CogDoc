@@ -1,9 +1,9 @@
 import types
 import pytest
-from service import ingest_service
-from service.ingest_service import plan_incremental
-from tools.chunk_identity import build_chunk_id
-from tools.retriever.bm25_retriever import BM25Retriever
+from cogdoc.service import ingest_service
+from cogdoc.service.ingest_service import plan_incremental
+from cogdoc.tools.chunk_identity import build_chunk_id
+from cogdoc.tools.retriever.bm25_retriever import BM25Retriever
 
 
 # 处理 manifest 相关逻辑。
@@ -33,9 +33,9 @@ def test_plan_none_on_version_change():
 # 验证 index build version covers parser and tokenizer。
 def test_index_build_version_covers_parser_and_tokenizer():
     # 解析器/分词器版本变化也必须使旧索引不可增量复用。
-    from service.ingest_service import INDEX_BUILD_VERSION
-    from tools.parser import PARSER_VERSION
-    from tools.tokenizer import TOKENIZER_VERSION
+    from cogdoc.service.ingest_service import INDEX_BUILD_VERSION
+    from cogdoc.tools.parser import PARSER_VERSION
+    from cogdoc.tools.tokenizer import TOKENIZER_VERSION
 
     assert PARSER_VERSION in INDEX_BUILD_VERSION
     assert TOKENIZER_VERSION in INDEX_BUILD_VERSION
@@ -379,8 +379,8 @@ def test_bm25_upsert_to_empty_clears_index(tmp_path):
 
 # 验证 vector incremental equals full rebuild。
 def test_vector_incremental_equals_full_rebuild(tmp_path, monkeypatch):
-    from tools.embedder import Embedder
-    from tools.retriever.vector_retriever import VectorRetriever
+    from cogdoc.tools.embedder import Embedder
+    from cogdoc.tools.retriever.vector_retriever import VectorRetriever
 
     monkeypatch.setattr(
         Embedder, "embed_documents", lambda texts: [[0.1, 0.2, 0.3] for _ in texts]
@@ -414,7 +414,7 @@ def test_vector_incremental_equals_full_rebuild(tmp_path, monkeypatch):
 
 # 验证 hybrid upsert delegates delete then add。
 def test_hybrid_upsert_delegates_delete_then_add():
-    from tools.retriever.hybrid import HybridRetriever
+    from cogdoc.tools.retriever.hybrid import HybridRetriever
 
     calls = []
 
@@ -446,7 +446,7 @@ def test_hybrid_upsert_delegates_delete_then_add():
 
 # 验证 retrieval rejects corrupt index。
 def test_retrieval_rejects_corrupt_index():
-    from tools.retriever.hybrid import HybridRetriever, IndexCorruptError
+    from cogdoc.tools.retriever.hybrid import HybridRetriever, IndexCorruptError
 
     # 封装 _V 的状态与行为。
     class _V:
@@ -501,7 +501,7 @@ def test_retrieval_rejects_corrupt_index():
 
 # 验证 bm25 clear failure raises。
 def test_bm25_clear_failure_raises(tmp_path, monkeypatch):
-    import tools.retriever.bm25_retriever as m
+    import cogdoc.tools.retriever.bm25_retriever as m
 
     r = BM25Retriever("kb", persist_directory=str(tmp_path / "bm25"))
     r.index([_chunk("a.pdf", "aaa", 0, "alpha text")])
@@ -515,8 +515,8 @@ def test_bm25_clear_failure_raises(tmp_path, monkeypatch):
 
 # 验证 vector clear failure raises。
 def test_vector_clear_failure_raises(tmp_path, monkeypatch):
-    from tools.embedder import Embedder
-    from tools.retriever.vector_retriever import VectorRetriever
+    from cogdoc.tools.embedder import Embedder
+    from cogdoc.tools.retriever.vector_retriever import VectorRetriever
 
     monkeypatch.setattr(
         Embedder, "embed_documents", lambda texts: [[0.1, 0.2, 0.3] for _ in texts]
@@ -531,7 +531,7 @@ def test_vector_clear_failure_raises(tmp_path, monkeypatch):
 
 # 验证 hybrid is consistent compares chunk id sets。
 def test_hybrid_is_consistent_compares_chunk_id_sets():
-    from tools.retriever.hybrid import HybridRetriever
+    from cogdoc.tools.retriever.hybrid import HybridRetriever
 
     # 封装 _C 的状态与行为。
     class _C:

@@ -1,4 +1,4 @@
-from agents.summary_planner import SectionPlannerAgent
+from cogdoc.agents.summary_planner import SectionPlannerAgent
 
 
 def test_default_summary_sections_are_stable():

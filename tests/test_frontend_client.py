@@ -1,4 +1,4 @@
-from frontend.api_client import iter_sse_events
+from cogdoc.frontend.api_client import iter_sse_events
 
 
 def test_iter_sse_events_parses_token_and_final_frames():

@@ -1,10 +1,10 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
-from api.app import create_app
-from api.error_mapping import classify_error_code, status_for_code
-from api.schemas import ErrorCode
-from api.session_store import SessionStore
-from service.chat_service import ChatServiceError
+from cogdoc.api.app import create_app
+from cogdoc.api.error_mapping import classify_error_code, status_for_code
+from cogdoc.api.schemas import ErrorCode
+from cogdoc.api.session_store import SessionStore
+from cogdoc.service.chat_service import ChatServiceError
 
 
 @pytest.fixture
@@ -42,7 +42,7 @@ def test_status_codes_per_error_code():
 
 
 def test_get_client_reads_timeout_and_retries_from_settings(monkeypatch):
-    import agents.qa_generator as gen_module
+    import cogdoc.agents.qa_generator as gen_module
     from types import SimpleNamespace
 
     gen_module.Generator._clients.clear()
@@ -78,7 +78,7 @@ async def _post_chat(app, payload):
 
 @pytest.mark.anyio
 async def test_chat_endpoint_maps_timeout_to_504(monkeypatch):
-    import api.app as app_module
+    import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
 
@@ -102,7 +102,7 @@ async def test_chat_endpoint_maps_timeout_to_504(monkeypatch):
 
 @pytest.mark.anyio
 async def test_chat_endpoint_maps_rate_limit_to_429(monkeypatch):
-    import api.app as app_module
+    import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
 

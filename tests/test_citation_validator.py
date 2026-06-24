@@ -1,4 +1,4 @@
-from agents.citation_validator import CitationValidatorAgent
+from cogdoc.agents.citation_validator import CitationValidatorAgent
 
 
 def _doc(source: str, page: int) -> dict:

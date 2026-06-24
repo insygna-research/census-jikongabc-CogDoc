@@ -1,5 +1,5 @@
-from agents.query_rewriter import QueryRewriteAgent, QueryRewriteOutput
-from agents.qa_generator import Generator
+from cogdoc.agents.query_rewriter import QueryRewriteAgent, QueryRewriteOutput
+from cogdoc.agents.qa_generator import Generator
 
 
 class _RaisingLLM:

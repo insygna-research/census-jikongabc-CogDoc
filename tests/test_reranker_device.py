@@ -1,6 +1,6 @@
 import pytest
-from tools import device, reranker
-from tools.reranker import BGEReranker
+from cogdoc.tools import device, reranker
+from cogdoc.tools.reranker import BGEReranker
 
 
 @pytest.fixture(autouse=True)

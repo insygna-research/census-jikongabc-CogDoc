@@ -8,37 +8,43 @@ try:
     import readline
 except ImportError:
     readline = None
-from config.settings import get_settings
-from tools.rust_core_loader import ensure_rust_core
-from tools.manifest import (
+
+# src-layout：未安装包时也能 `python run.py`，把 src/ 注入路径。
+_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
+
+from cogdoc.config.settings import get_settings
+from cogdoc.tools.rust_core_loader import ensure_rust_core
+from cogdoc.tools.manifest import (
     load_index_manifest,
     manifests_match,
     stamp_chunk_identity_contract,
 )
-from agents.router import FORCED_TASK_TYPES
-from graph.workflow import UNKNOWN_RESPONSE
-from graph.subgraphs.qa import RetrieverFactory
-from observability.logger import configure_logging
-from service.chat_service import ChatEvent, ChatResult, run_chat
-from service.ingest_service import (
+from cogdoc.agents.router import FORCED_TASK_TYPES
+from cogdoc.graph.workflow import UNKNOWN_RESPONSE
+from cogdoc.graph.subgraphs.qa import RetrieverFactory
+from cogdoc.observability.logger import configure_logging
+from cogdoc.service.chat_service import ChatEvent, ChatResult, run_chat
+from cogdoc.service.ingest_service import (
     build_kb_index_transactional,
     cancel_all_timers,
     drain_purge_queue,
     stamp_index_build_version,
 )
-from service.mutation_journal import shared_mutation_journal
-from service.process_lock import (
+from cogdoc.service.mutation_journal import shared_mutation_journal
+from cogdoc.service.process_lock import (
     acquire_single_instance_lock,
     locking_supported,
     release_single_instance_lock,
     strict_single_process,
 )
-from agents.conversation_memory import (
+from cogdoc.agents.conversation_memory import (
     CHAT_HISTORY_MESSAGE_LIMIT,
     extract_final_answer,
 )
-from tools.embedder import Embedder
-from tools.reranker import BGEReranker
+from cogdoc.tools.embedder import Embedder
+from cogdoc.tools.reranker import BGEReranker
 
 DEFAULT_DOC_DIR = get_settings().cogdoc_doc_dir
 FORCED_MODE_PATTERN = re.compile(

@@ -1,11 +1,11 @@
 import threading
 import pytest
 from unittest.mock import MagicMock, patch
-from api.ingest import IndexJobManager
-from service import ingest_service
-from service.ingest_service import delete_kb_index_transactional
-from service.kb_epoch import EpochStore
-from service.kb_state import KBState, StaleGenerationError
+from cogdoc.api.ingest import IndexJobManager
+from cogdoc.service import ingest_service
+from cogdoc.service.ingest_service import delete_kb_index_transactional
+from cogdoc.service.kb_epoch import EpochStore
+from cogdoc.service.kb_state import KBState, StaleGenerationError
 
 
 # 构造 make state 相关逻辑。
@@ -114,11 +114,11 @@ def test_delete_transactional_bumps_epoch(tmp_path):
     mock_state.generation_ids.return_value = []
 
     with (
-        patch("service.ingest_service.shared_epoch_store", return_value=epochs),
-        patch("service.ingest_service.KBState", return_value=mock_state),
-        patch("service.ingest_service._schedule_kb_purge"),
-        patch("service.ingest_service._remove_manifest"),
-        patch("service.ingest_service.RetrieverFactory"),
+        patch("cogdoc.service.ingest_service.shared_epoch_store", return_value=epochs),
+        patch("cogdoc.service.ingest_service.KBState", return_value=mock_state),
+        patch("cogdoc.service.ingest_service._schedule_kb_purge"),
+        patch("cogdoc.service.ingest_service._remove_manifest"),
+        patch("cogdoc.service.ingest_service.RetrieverFactory"),
     ):
         delete_kb_index_transactional("kb-del")
 
@@ -134,14 +134,14 @@ def test_delete_schedules_purge_for_all_generations(tmp_path):
     scheduled = []
 
     with (
-        patch("service.ingest_service.shared_epoch_store", return_value=epochs),
-        patch("service.ingest_service.KBState", return_value=mock_state),
+        patch("cogdoc.service.ingest_service.shared_epoch_store", return_value=epochs),
+        patch("cogdoc.service.ingest_service.KBState", return_value=mock_state),
         patch(
-            "service.ingest_service._schedule_kb_purge",
+            "cogdoc.service.ingest_service._schedule_kb_purge",
             side_effect=lambda kb, gids: scheduled.extend(gids),
         ),
-        patch("service.ingest_service._remove_manifest"),
-        patch("service.ingest_service.RetrieverFactory"),
+        patch("cogdoc.service.ingest_service._remove_manifest"),
+        patch("cogdoc.service.ingest_service.RetrieverFactory"),
     ):
         delete_kb_index_transactional("kb-del")
 
@@ -156,11 +156,11 @@ def test_delete_transactional_invalidates_engine_cache(tmp_path):
     mock_factory = MagicMock()
 
     with (
-        patch("service.ingest_service.shared_epoch_store", return_value=epochs),
-        patch("service.ingest_service.KBState", return_value=mock_state),
-        patch("service.ingest_service._schedule_kb_purge"),
-        patch("service.ingest_service._remove_manifest"),
-        patch("service.ingest_service.RetrieverFactory", mock_factory),
+        patch("cogdoc.service.ingest_service.shared_epoch_store", return_value=epochs),
+        patch("cogdoc.service.ingest_service.KBState", return_value=mock_state),
+        patch("cogdoc.service.ingest_service._schedule_kb_purge"),
+        patch("cogdoc.service.ingest_service._remove_manifest"),
+        patch("cogdoc.service.ingest_service.RetrieverFactory", mock_factory),
     ):
         delete_kb_index_transactional("kb-del")
 
@@ -175,11 +175,11 @@ def test_delete_does_not_raise_when_purge_deferred(tmp_path):
     mock_state.generation_ids.return_value = ["g1"]
 
     with (
-        patch("service.ingest_service.shared_epoch_store", return_value=epochs),
-        patch("service.ingest_service.KBState", return_value=mock_state),
-        patch("service.ingest_service._schedule_kb_purge"),
-        patch("service.ingest_service._remove_manifest"),
-        patch("service.ingest_service.RetrieverFactory"),
+        patch("cogdoc.service.ingest_service.shared_epoch_store", return_value=epochs),
+        patch("cogdoc.service.ingest_service.KBState", return_value=mock_state),
+        patch("cogdoc.service.ingest_service._schedule_kb_purge"),
+        patch("cogdoc.service.ingest_service._remove_manifest"),
+        patch("cogdoc.service.ingest_service.RetrieverFactory"),
     ):
         delete_kb_index_transactional("kb-del")  # 不抛错
 
@@ -187,10 +187,10 @@ def test_delete_does_not_raise_when_purge_deferred(tmp_path):
 # 验证 drain purge queue retries and dequeues on success。
 def test_drain_purge_queue_retries_and_dequeues_on_success(tmp_path, monkeypatch):
     # 持久 purge 队列：到期条目清理成功才出队，失败保留待下一轮重试。
-    from service.purge_queue import PurgeQueue
+    from cogdoc.service.purge_queue import PurgeQueue
 
     q = PurgeQueue(path=str(tmp_path / "pq.json"))
-    monkeypatch.setattr("service.ingest_service.shared_purge_queue", lambda: q)
+    monkeypatch.setattr("cogdoc.service.ingest_service.shared_purge_queue", lambda: q)
     q.add("kb", "g1", not_before=0)
     q.add("kb", "g2", not_before=0)
 
@@ -202,7 +202,7 @@ def test_drain_purge_queue_retries_and_dequeues_on_success(tmp_path, monkeypatch
         if gid == "g1":
             raise RuntimeError("chroma down")  # g1 失败保留
 
-    monkeypatch.setattr("service.ingest_service._purge_generation_external", purge)
+    monkeypatch.setattr("cogdoc.service.ingest_service._purge_generation_external", purge)
     done = ingest_service.drain_purge_queue(now=100)
 
     assert done == 1  # 仅 g2 成功出队
@@ -214,14 +214,14 @@ def test_drain_purge_queue_retries_and_dequeues_on_success(tmp_path, monkeypatch
 # 验证 drain purge queue skips not yet due。
 def test_drain_purge_queue_skips_not_yet_due(tmp_path, monkeypatch):
     # 未过 grace period 的条目不清理。
-    from service.purge_queue import PurgeQueue
+    from cogdoc.service.purge_queue import PurgeQueue
 
     q = PurgeQueue(path=str(tmp_path / "pq.json"))
-    monkeypatch.setattr("service.ingest_service.shared_purge_queue", lambda: q)
+    monkeypatch.setattr("cogdoc.service.ingest_service.shared_purge_queue", lambda: q)
     q.add("kb", "g1", not_before=1000)
     called = []
     monkeypatch.setattr(
-        "service.ingest_service._purge_generation_external",
+        "cogdoc.service.ingest_service._purge_generation_external",
         lambda kb, gid: called.append(gid),
     )
     assert ingest_service.drain_purge_queue(now=10) == 0
@@ -236,11 +236,11 @@ def test_delete_transactional_rejects_inflight_staging(tmp_path):
     state.mark_ready(gen_id, expected_count=1, documents=[])
 
     with (
-        patch("service.ingest_service.shared_epoch_store", return_value=epochs),
-        patch("service.ingest_service.KBState", return_value=state),
-        patch("service.ingest_service._schedule_kb_purge"),
-        patch("service.ingest_service._remove_manifest"),
-        patch("service.ingest_service.RetrieverFactory"),
+        patch("cogdoc.service.ingest_service.shared_epoch_store", return_value=epochs),
+        patch("cogdoc.service.ingest_service.KBState", return_value=state),
+        patch("cogdoc.service.ingest_service._schedule_kb_purge"),
+        patch("cogdoc.service.ingest_service._remove_manifest"),
+        patch("cogdoc.service.ingest_service.RetrieverFactory"),
     ):
         delete_kb_index_transactional("kb-del")
 
@@ -259,14 +259,14 @@ def test_delete_nonempty_kb_with_active_generation_succeeds(tmp_path):
 
     removed = []
     with (
-        patch("service.ingest_service.shared_epoch_store", return_value=epochs),
-        patch("service.ingest_service.KBState", return_value=state),
-        patch("service.ingest_service._schedule_kb_purge"),
+        patch("cogdoc.service.ingest_service.shared_epoch_store", return_value=epochs),
+        patch("cogdoc.service.ingest_service.KBState", return_value=state),
+        patch("cogdoc.service.ingest_service._schedule_kb_purge"),
         patch(
-            "service.ingest_service._remove_manifest",
+            "cogdoc.service.ingest_service._remove_manifest",
             side_effect=lambda kb: removed.append(kb),
         ),
-        patch("service.ingest_service.RetrieverFactory"),
+        patch("cogdoc.service.ingest_service.RetrieverFactory"),
     ):
         delete_kb_index_transactional("kb-live")  # 不应抛 KBCleanupError
 
@@ -276,10 +276,10 @@ def test_delete_nonempty_kb_with_active_generation_succeeds(tmp_path):
 # 验证 submit compat path aborts on stale epoch。
 def test_submit_compat_path_aborts_on_stale_epoch(tmp_path, monkeypatch):
     # submit() 兼容路径同样受 epoch 守卫：删库 bump 后入队的旧任务必须放弃构建。
-    from api.persistence import InMemoryJobStore
+    from cogdoc.api.persistence import InMemoryJobStore
 
     epochs = EpochStore(path=str(tmp_path / "ep.json"))
-    monkeypatch.setattr("api.ingest.shared_epoch_store", lambda: epochs)
+    monkeypatch.setattr("cogdoc.api.ingest.shared_epoch_store", lambda: epochs)
 
     store = InMemoryJobStore()
     called = []
@@ -359,7 +359,7 @@ def test_submit_upload_writes_file_before_ingest(tmp_path):
 # 验证 submit delete doc missing file job fails。
 def test_submit_delete_doc_missing_file_job_fails(tmp_path):
     # 文件不存在时 submit_delete_doc 仍返回 job；executor 执行时检测，job 以 DOCUMENT_NOT_FOUND 失败。
-    from api.persistence import InMemoryJobStore
+    from cogdoc.api.persistence import InMemoryJobStore
 
     store = InMemoryJobStore()
     mgr = IndexJobManager(
@@ -417,7 +417,7 @@ def _boom_ingest(kb_id, source_dir):
 def test_upload_build_failure_restores_old_file(tmp_path):
     # 覆盖上传：构建失败时旧文件内容必须恢复，备份清理。
     import os
-    from api.persistence import InMemoryJobStore
+    from cogdoc.api.persistence import InMemoryJobStore
 
     source_dir = str(tmp_path / "sources")
     os.makedirs(source_dir)
@@ -443,7 +443,7 @@ def test_upload_build_failure_restores_old_file(tmp_path):
 def test_upload_build_failure_removes_new_file(tmp_path):
     # 新增上传：构建失败时新文件必须删除，回到上传前状态。
     import os
-    from api.persistence import InMemoryJobStore
+    from cogdoc.api.persistence import InMemoryJobStore
 
     source_dir = str(tmp_path / "sources")
     store = InMemoryJobStore()
@@ -462,7 +462,7 @@ def test_upload_build_failure_removes_new_file(tmp_path):
 def test_delete_doc_build_failure_restores_file(tmp_path):
     # 删文档：构建失败时被删文件必须从隔离区恢复。
     import os
-    from api.persistence import InMemoryJobStore
+    from cogdoc.api.persistence import InMemoryJobStore
 
     source_dir = str(tmp_path / "sources")
     os.makedirs(source_dir)
@@ -492,10 +492,10 @@ def test_delete_doc_build_failure_restores_file(tmp_path):
 def test_upload_stale_epoch_aborts(tmp_path, monkeypatch):
     # 提交后、执行前 epoch 被 bump（模拟删库）：陈旧上传放弃，不调用 ingest、不写文件。
     import os
-    from api.persistence import InMemoryJobStore
+    from cogdoc.api.persistence import InMemoryJobStore
 
     epochs = EpochStore(path=str(tmp_path / "ep.json"))
-    monkeypatch.setattr("api.ingest.shared_epoch_store", lambda: epochs)
+    monkeypatch.setattr("cogdoc.api.ingest.shared_epoch_store", lambda: epochs)
 
     source_dir = str(tmp_path / "sources")
     store = InMemoryJobStore()
@@ -540,7 +540,7 @@ def test_get_executor_raises_after_shutdown():
 
 # 验证 get executor raises at max limit。
 def test_get_executor_raises_at_max_limit():
-    from api.ingest import _MAX_KB_EXECUTORS
+    from cogdoc.api.ingest import _MAX_KB_EXECUTORS
 
     mgr = IndexJobManager(
         ingest_fn=lambda kb, d: MagicMock(document_count=0, chunk_count=0)
@@ -555,7 +555,7 @@ def test_get_executor_raises_at_max_limit():
 # 验证 release executor frees slot。
 def test_release_executor_frees_slot():
     # 删库后释放 executor 槽位，同 kb_id 可再次创建新 executor。
-    from api.ingest import _MAX_KB_EXECUTORS
+    from cogdoc.api.ingest import _MAX_KB_EXECUTORS
 
     mgr = IndexJobManager(
         ingest_fn=lambda kb, d: MagicMock(document_count=0, chunk_count=0)
@@ -572,7 +572,7 @@ def test_release_executor_frees_slot():
 # 验证 upload aborted when kb deleted。
 def test_upload_aborted_when_kb_deleted(tmp_path):
     # kb_exists 在 executor command 内再次检查：标志在入队前已置 False 模拟删库完成后的状态。
-    from api.persistence import InMemoryJobStore
+    from cogdoc.api.persistence import InMemoryJobStore
 
     store = InMemoryJobStore()
     kb_deleted = [True]  # 直接置 True，保证 _run_with_write 检查时看到 KB 已删
@@ -597,9 +597,9 @@ def test_upload_aborted_when_kb_deleted(tmp_path):
 # 验证 get engine returns empty when deleting。
 def test_get_engine_returns_empty_when_deleting(monkeypatch):
     # 删库进行中：get_engine 短路返回空引擎，不构造读取正在拆除的代。
-    from graph.subgraphs.qa import RetrieverFactory
-    from tools.retriever.hybrid import HybridRetriever
-    from service.kb_lifecycle import shared_lifecycle_store, LIFECYCLE_DELETING
+    from cogdoc.graph.subgraphs.qa import RetrieverFactory
+    from cogdoc.tools.retriever.hybrid import HybridRetriever
+    from cogdoc.service.kb_lifecycle import shared_lifecycle_store, LIFECYCLE_DELETING
 
     shared_lifecycle_store().set("kb-del", LIFECYCLE_DELETING)
     called = []
@@ -616,8 +616,8 @@ def test_get_engine_returns_empty_when_deleting(monkeypatch):
 # 验证 mutation rejected when deleting。
 def test_mutation_rejected_when_deleting(tmp_path):
     # 删库进行中：新上传任务被 _stale 拦下并标记失败，不写文件不构建。
-    from api.persistence import InMemoryJobStore
-    from service.kb_lifecycle import shared_lifecycle_store, LIFECYCLE_DELETING
+    from cogdoc.api.persistence import InMemoryJobStore
+    from cogdoc.service.kb_lifecycle import shared_lifecycle_store, LIFECYCLE_DELETING
     import os
 
     shared_lifecycle_store().set("kb", LIFECYCLE_DELETING)
@@ -642,8 +642,8 @@ def test_mutation_rejected_when_deleting(tmp_path):
 # 验证 create resets lifecycle to active。
 def test_create_resets_lifecycle_to_active(tmp_path):
     # 重建同名 KB：清除 deleted tombstone，恢复 active 可读写。
-    from api.ingest import KnowledgeBaseRegistry
-    from service.kb_lifecycle import (
+    from cogdoc.api.ingest import KnowledgeBaseRegistry
+    from cogdoc.service.kb_lifecycle import (
         shared_lifecycle_store,
         LIFECYCLE_DELETED,
         LIFECYCLE_ACTIVE,
@@ -661,17 +661,17 @@ def test_create_resets_lifecycle_to_active(tmp_path):
 # 验证 delete transactional sets deleting。
 def test_delete_transactional_sets_deleting(tmp_path):
     # delete_kb_index_transactional 一进入即落 deleting 门控读路径。
-    from service.kb_lifecycle import shared_lifecycle_store, LIFECYCLE_DELETING
+    from cogdoc.service.kb_lifecycle import shared_lifecycle_store, LIFECYCLE_DELETING
 
     epochs = EpochStore(path=str(tmp_path / "ep.json"))
     mock_state = MagicMock()
     mock_state.generation_ids.return_value = []
     with (
-        patch("service.ingest_service.shared_epoch_store", return_value=epochs),
-        patch("service.ingest_service.KBState", return_value=mock_state),
-        patch("service.ingest_service._schedule_kb_purge"),
-        patch("service.ingest_service._remove_manifest"),
-        patch("service.ingest_service.RetrieverFactory"),
+        patch("cogdoc.service.ingest_service.shared_epoch_store", return_value=epochs),
+        patch("cogdoc.service.ingest_service.KBState", return_value=mock_state),
+        patch("cogdoc.service.ingest_service._schedule_kb_purge"),
+        patch("cogdoc.service.ingest_service._remove_manifest"),
+        patch("cogdoc.service.ingest_service.RetrieverFactory"),
     ):
         delete_kb_index_transactional("kb-del")
     assert shared_lifecycle_store().status("kb-del") == LIFECYCLE_DELETING
@@ -682,7 +682,7 @@ def test_delete_transactional_sets_deleting(tmp_path):
 
 # 验证 successful upload clears journal。
 def test_successful_upload_clears_journal(tmp_path):
-    from service.mutation_journal import shared_mutation_journal
+    from cogdoc.service.mutation_journal import shared_mutation_journal
 
     source_dir = str(tmp_path / "src")
     mgr = IndexJobManager(
@@ -697,7 +697,7 @@ def test_successful_upload_clears_journal(tmp_path):
 
 # 验证 failed upload clears journal。
 def test_failed_upload_clears_journal(tmp_path):
-    from service.mutation_journal import shared_mutation_journal
+    from cogdoc.service.mutation_journal import shared_mutation_journal
 
     source_dir = str(tmp_path / "src")
     mgr = IndexJobManager(ingest_fn=_boom_ingest, source_dir_for=lambda kb: source_dir)

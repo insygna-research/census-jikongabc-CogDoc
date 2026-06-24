@@ -2,8 +2,8 @@ import math
 import numpy as np
 import pytest
 from unittest.mock import MagicMock
-from tools.embedder import Embedder
-from tools.retriever.vector_retriever import VectorRetriever
+from cogdoc.tools.embedder import Embedder
+from cogdoc.tools.retriever.vector_retriever import VectorRetriever
 
 
 # 处理 good 相关逻辑。
@@ -39,8 +39,8 @@ def test_get_model_pins_revision(monkeypatch):
         captured["revision"] = revision
         return _FakeModel(Embedder.EMBEDDING_DIM)
 
-    monkeypatch.setattr("tools.embedder.SentenceTransformer", fake_st)
-    monkeypatch.setattr("tools.embedder.resolve_device", lambda *a, **k: "cpu")
+    monkeypatch.setattr("cogdoc.tools.embedder.SentenceTransformer", fake_st)
+    monkeypatch.setattr("cogdoc.tools.embedder.resolve_device", lambda *a, **k: "cpu")
     _reset_model()
     try:
         Embedder.get_model()

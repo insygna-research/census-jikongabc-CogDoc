@@ -1,12 +1,12 @@
 from langchain_core.messages import AIMessage
 from pydantic import BaseModel
 import pytest
-from agents.structured_output import (
+from cogdoc.agents.structured_output import (
     _METHOD_CACHE,
     _extract_json_object,
     invoke_structured,
 )
-from config.settings import get_settings
+from cogdoc.config.settings import get_settings
 
 
 class DemoSchema(BaseModel):

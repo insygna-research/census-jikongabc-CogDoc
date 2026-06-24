@@ -1,7 +1,7 @@
-from agents import summary_generator
-from graph import workflow
-from graph.subgraphs import summary
-from graph.subgraphs.summary import (
+from cogdoc.agents import summary_generator
+from cogdoc.graph import workflow
+from cogdoc.graph.subgraphs import summary
+from cogdoc.graph.subgraphs.summary import (
     document_loader_check,
     document_loader_node,
     global_summary_node,

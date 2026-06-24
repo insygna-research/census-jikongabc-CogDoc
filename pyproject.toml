@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cogdoc"
+version = "0.1.0"
+description = "面向论文的混合检索 RAG 问答系统（向量 + BM25 + RRF，Rust 加速核心）"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+
+# 运行时依赖（原 requirements.txt）。rust_core 原生扩展单独经 maturin 构建安装，不在本 wheel 内。
+dependencies = [
+    "chromadb==1.5.9",
+    "pymupdf==1.27.2.3",
+    "langgraph==1.2.5",
+    "langchain-core==1.4.7",
+    "langchain-openai==1.3.2",
+    "sentence-transformers==5.5.1",
+    "torch==2.12.0",
+    "transformers==5.12.0",
+    "jieba==0.42.1",
+    "pydantic==2.13.4",
+    "pydantic-settings==2.14.1",
+    "fastapi==0.115.14",
+    "starlette==0.46.2",
+    "uvicorn==0.49.0",
+    "httpx==0.28.1",
+    "python-multipart==0.0.20",
+    "prometheus-client==0.25.0",
+]
+
+[project.optional-dependencies]
+# 开发：原生扩展构建 + 测试 + BM25 对齐参照（原 requirements-dev.txt）。
+dev = [
+    "maturin==1.14.0",
+    "pytest==9.1.0",
+    "rank-bm25==0.2.2",
+]
+# 前端瘦客户端（原 requirements-frontend.txt），与后端解耦，可单独安装。
+frontend = [
+    "streamlit==1.58.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+# src-layout 下让测试无需安装即可导入 cogdoc.*；根目录入口 run.py 经 conftest 自动入路径。
+pythonpath = ["src"]

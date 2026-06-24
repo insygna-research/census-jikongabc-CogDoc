@@ -1,6 +1,6 @@
 import pytest
-from tools import device, embedder
-from tools.embedder import Embedder
+from cogdoc.tools import device, embedder
+from cogdoc.tools.embedder import Embedder
 
 
 # 恢复 restore embedder state 相关逻辑。

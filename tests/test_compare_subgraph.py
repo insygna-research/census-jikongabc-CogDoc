@@ -1,8 +1,8 @@
 import time
-from agents import compare_generator, compare_profile
-from graph import workflow
-from graph.subgraphs import compare
-from graph.subgraphs.compare import (
+from cogdoc.agents import compare_generator, compare_profile
+from cogdoc.graph import workflow
+from cogdoc.graph.subgraphs import compare
+from cogdoc.graph.subgraphs.compare import (
     citation_node,
     compare_table_node,
     document_loader_check,

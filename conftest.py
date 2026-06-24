@@ -13,7 +13,7 @@ if ROOT not in sys.path:
 def _reset_retriever_engine_cache():
     # 防止进程级引擎缓存在测试间留脏；仅在用过检索栈时清，不强行拉起重依赖。
     yield
-    module = sys.modules.get("graph.subgraphs.qa")
+    module = sys.modules.get("cogdoc.graph.subgraphs.qa")
     if module is not None:
         factory = module.RetrieverFactory
         with factory._lock:
@@ -24,10 +24,10 @@ def _reset_retriever_engine_cache():
 @pytest.fixture(autouse=True)
 def _isolate_epoch_store(tmp_path, monkeypatch):
     # 全局 epoch / lifecycle / journal / purge 单例隔离到每个测试 tmp，避免污染仓库或跨测试串状态。
-    import service.kb_epoch as ke
-    import service.kb_lifecycle as kl
-    import service.mutation_journal as mj
-    import service.purge_queue as pq
+    import cogdoc.service.kb_epoch as ke
+    import cogdoc.service.kb_lifecycle as kl
+    import cogdoc.service.mutation_journal as mj
+    import cogdoc.service.purge_queue as pq
 
     monkeypatch.setattr(
         ke, "_shared", ke.EpochStore(path=str(tmp_path / "epochs.json"))
@@ -45,6 +45,6 @@ def _isolate_epoch_store(tmp_path, monkeypatch):
     monkeypatch.setenv("COGDOC_ALLOW_MULTI", "1")
     yield
     # 取消测试中残留的后台 Timer，避免 daemon 线程跨测试触发真实清理。
-    import service.ingest_service as isvc
+    import cogdoc.service.ingest_service as isvc
 
     isvc.cancel_all_timers()

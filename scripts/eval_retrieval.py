@@ -5,12 +5,13 @@ from pathlib import Path
 from typing import Dict, List
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+if str(ROOT / "src") not in sys.path:
+    # src-layout：包源码在 src/ 下；ROOT 仍用于解析数据文件相对路径。
+    sys.path.insert(0, str(ROOT / "src"))
 
-from config.settings import get_settings
-from graph.subgraphs.qa import RetrieverFactory
-from tools.eval.retrieval_metrics import aggregate, evaluate_query
+from cogdoc.config.settings import get_settings
+from cogdoc.graph.subgraphs.qa import RetrieverFactory
+from cogdoc.tools.eval.retrieval_metrics import aggregate, evaluate_query
 
 
 def _project_path(path: str) -> Path:
@@ -48,7 +49,7 @@ def retrieve_sources(query: str, doc_id: str, top_k: int, rerank: bool) -> List[
     engine = RetrieverFactory.get_engine(doc_id)
     docs = engine.search(query=query, top_k=top_k)
     if rerank and docs:
-        from tools.reranker import BGEReranker
+        from cogdoc.tools.reranker import BGEReranker
 
         docs = BGEReranker.rerank(query=query, docs=docs, top_n=len(docs))
     return [doc["meta"]["source"] for doc in docs]

@@ -1,10 +1,10 @@
 from unittest.mock import MagicMock, patch
 import pytest
-from api.ingest import IndexJobManager
-from api.persistence import InMemoryJobStore
-from service.mutation_journal import MutationJournal, MutationJournalError
-from service.kb_lifecycle import LifecycleStore, LIFECYCLE_DELETING, LIFECYCLE_ACTIVE
-from service.purge_queue import PurgeQueue, PurgeQueueCorruptError
+from cogdoc.api.ingest import IndexJobManager
+from cogdoc.api.persistence import InMemoryJobStore
+from cogdoc.service.mutation_journal import MutationJournal, MutationJournalError
+from cogdoc.service.kb_lifecycle import LifecycleStore, LIFECYCLE_DELETING, LIFECYCLE_ACTIVE
+from cogdoc.service.purge_queue import PurgeQueue, PurgeQueueCorruptError
 
 
 # 处理 boom ingest 相关逻辑。
@@ -42,7 +42,7 @@ def test_upload_build_failure_restore_fail_keeps_journal(tmp_path):
             raise OSError("disk error")
         return real_replace(src, dst)
 
-    with patch("api.ingest.os.replace", side_effect=replace_fail_restore):
+    with patch("cogdoc.api.ingest.os.replace", side_effect=replace_fail_restore):
         job = mgr.submit_upload("kb", source_dir, "a.pdf", b"NEW")
         mgr.run_blocking("kb", lambda: None)
     mgr.shutdown()
@@ -64,7 +64,7 @@ def test_upload_new_file_build_failure_remove_fail_keeps_journal(tmp_path):
         job_store=InMemoryJobStore(),
         journal=journal,
     )
-    with patch("api.ingest.os.remove", side_effect=OSError("locked")):
+    with patch("cogdoc.api.ingest.os.remove", side_effect=OSError("locked")):
         mgr.submit_upload("kb", source_dir, "a.pdf", b"NEW")
         mgr.run_blocking("kb", lambda: None)
     mgr.shutdown()
@@ -88,8 +88,8 @@ def test_journal_recover_remove_fail_keeps_entry(tmp_path):
     state = MagicMock()
     state.active.return_value = None  # 未提交
     with (
-        patch("service.kb_state.KBState", return_value=state),
-        patch("service.mutation_journal.os.remove", side_effect=OSError("locked")),
+        patch("cogdoc.service.kb_state.KBState", return_value=state),
+        patch("cogdoc.service.mutation_journal.os.remove", side_effect=OSError("locked")),
     ):
         with pytest.raises(MutationJournalError, match="未恢复"):
             j.recover_all()
@@ -160,7 +160,7 @@ def test_committed_marker_prevents_rollback_after_gen_switch(tmp_path):
     j.mark_committed("job1")
     state = MagicMock()
     state.active.return_value = {"id": "gNEWER"}  # active 已前进到更新的代
-    with patch("service.kb_state.KBState", return_value=state):
+    with patch("cogdoc.service.kb_state.KBState", return_value=state):
         j.recover_all()
 
     assert dest.read_bytes() == b"NEW"  # 未被误回滚
@@ -182,7 +182,7 @@ def test_committed_marker_survives_deleted_kb(tmp_path):
     j.mark_committed("job1")
     state = MagicMock()
     state.active.return_value = None
-    with patch("service.kb_state.KBState", return_value=state):
+    with patch("cogdoc.service.kb_state.KBState", return_value=state):
         j.recover_all()
 
     assert dest.read_bytes() == b"NEW"
@@ -224,7 +224,7 @@ def test_lifecycle_degraded_persists_global_fail_closed(tmp_path):
 
 # 验证 epoch corrupt quarantines and raises。
 def test_epoch_corrupt_quarantines_and_raises(tmp_path):
-    from service.kb_epoch import EpochStore, EpochCorruptError
+    from cogdoc.service.kb_epoch import EpochStore, EpochCorruptError
 
     path = tmp_path / "epochs.json"
     path.write_text("{ 损坏", encoding="utf-8")

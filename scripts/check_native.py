@@ -3,12 +3,12 @@ import os
 import sys
 
 # 校验 rust_core 是否已构建且运行链路依赖的 native 符号齐全。
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT not in sys.path:
-    # 从任意目录调用时都优先导入仓库源码。
-    sys.path.insert(0, ROOT)
+SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+if SRC not in sys.path:
+    # src-layout：从任意目录调用时都优先导入仓库源码。
+    sys.path.insert(0, SRC)
 
-from tools.rust_core_loader import REQUIRED_NATIVE_SYMBOLS, ensure_rust_core
+from cogdoc.tools.rust_core_loader import REQUIRED_NATIVE_SYMBOLS, ensure_rust_core
 
 REQUIRED_SYMBOLS = REQUIRED_NATIVE_SYMBOLS
 

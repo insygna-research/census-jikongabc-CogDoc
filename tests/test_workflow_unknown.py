@@ -1,7 +1,7 @@
 import importlib
-from agents.router import RouterAgent
-from graph import workflow
-from graph.workflow import route_by_task, unknown_node
+from cogdoc.agents.router import RouterAgent
+from cogdoc.graph import workflow
+from cogdoc.graph.workflow import route_by_task, unknown_node
 
 
 def test_route_by_task_sends_unknown_to_terminal_node():

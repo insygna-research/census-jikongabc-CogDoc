@@ -1,5 +1,5 @@
 import pytest
-from tools import manifest
+from cogdoc.tools import manifest
 
 
 @pytest.fixture(autouse=True)

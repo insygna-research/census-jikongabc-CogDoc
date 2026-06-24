@@ -1,6 +1,6 @@
 import pytest
-from service import chat_service
-from service.chat_service import ChatServiceError, run_chat_sync
+from cogdoc.service import chat_service
+from cogdoc.service.chat_service import ChatServiceError, run_chat_sync
 
 
 def _doc() -> dict:

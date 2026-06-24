@@ -1,8 +1,8 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
-from api.access_control import TokenBucketRateLimiter, build_rate_limiter
-from api.app import create_app
-from api.session_store import SessionStore
+from cogdoc.api.access_control import TokenBucketRateLimiter, build_rate_limiter
+from cogdoc.api.app import create_app
+from cogdoc.api.session_store import SessionStore
 
 
 @pytest.fixture
@@ -11,12 +11,12 @@ def anyio_backend():
 
 
 def _app(monkeypatch, **kwargs):
-    import api.app as app_module
+    import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
 
     def runner(doc_id, query, is_local, chat_history, forced_task):
-        from service.chat_service import ChatResult
+        from cogdoc.service.chat_service import ChatResult
 
         return ChatResult(
             answer="ok",
@@ -104,7 +104,7 @@ async def test_auth_disabled_when_no_keys(monkeypatch):
 
 @pytest.mark.anyio
 async def test_startup_warns_when_auth_disabled(monkeypatch):
-    import api.app as app_module
+    import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
     events = []
@@ -118,7 +118,7 @@ async def test_startup_warns_when_auth_disabled(monkeypatch):
 
 @pytest.mark.anyio
 async def test_no_startup_warning_when_auth_enabled(monkeypatch):
-    import api.app as app_module
+    import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
     events = []

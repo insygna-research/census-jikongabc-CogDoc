@@ -1,17 +1,17 @@
 import pytest
 from unittest.mock import MagicMock
-from service.kb_epoch import EpochStore
-from service.kb_state import KBState
-from service import ingest_service
-from service.ingest_service import (
+from cogdoc.service.kb_epoch import EpochStore
+from cogdoc.service.kb_state import KBState
+from cogdoc.service import ingest_service
+from cogdoc.service.ingest_service import (
     INDEX_BUILD_VERSION,
     IncrementalPlan,
     IndexInconsistencyError,
     _populate_staging,
     _fill_staging_incremental,
 )
-from tools.chunk_identity import build_chunk_id
-from tools.embedder import Embedder
+from cogdoc.tools.chunk_identity import build_chunk_id
+from cogdoc.tools.embedder import Embedder
 
 
 # 构造 make state 相关逻辑。

@@ -1,9 +1,9 @@
 import time
 from unittest.mock import MagicMock
-from api.ingest import IndexJobManager
-from service import sweeper as sweeper_mod
-from service.kb_epoch import EpochStore
-from service.kb_state import KBState
+from cogdoc.api.ingest import IndexJobManager
+from cogdoc.service import sweeper as sweeper_mod
+from cogdoc.service.kb_epoch import EpochStore
+from cogdoc.service.kb_state import KBState
 
 
 # 验证 sweep gcs stale generations。
@@ -79,7 +79,7 @@ def test_evict_idle_keeps_busy_executor():
 
 # 验证 compact locks drops unkept。
 def test_compact_locks_drops_unkept():
-    import service.kb_locks as kl
+    import cogdoc.service.kb_locks as kl
 
     # with 进出后引用计数归零，方可被压缩；模拟锁曾被用过但当前空闲。
     with kl.kb_write_lock("keep-me"):
@@ -94,7 +94,7 @@ def test_compact_locks_drops_unkept():
 # 验证 compact locks keeps referenced handle。
 def test_compact_locks_keeps_referenced_handle():
     # 已发放但未释放的句柄（即便尚未 acquire）引用计数 >0，不得被回收，杜绝同名 KB 两把锁。
-    import service.kb_locks as kl
+    import cogdoc.service.kb_locks as kl
 
     handle = kl.kb_write_lock("busy")  # 仅构造，未进入 with
     kl.compact_locks(set())

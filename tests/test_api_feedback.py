@@ -1,8 +1,8 @@
 import json
 import pytest
 from httpx import ASGITransport, AsyncClient
-from api.app import create_app
-from api.feedback_store import FeedbackStore
+from cogdoc.api.app import create_app
+from cogdoc.api.feedback_store import FeedbackStore
 
 
 @pytest.fixture
@@ -11,7 +11,7 @@ def anyio_backend():
 
 
 def _make_app(tmp_path, monkeypatch):
-    import api.app as app_module
+    import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
     store = FeedbackStore(

@@ -1,6 +1,6 @@
 import pytest
-from service.kb_epoch import EpochStore
-from service.kb_state import (
+from cogdoc.service.kb_epoch import EpochStore
+from cogdoc.service.kb_state import (
     GENERATION_BUILDING,
     GENERATION_READY,
     KBState,
@@ -105,7 +105,7 @@ def test_epoch_survives_separate_store(tmp_path):
 # 验证 epoch invalid entry fails closed。
 def test_epoch_invalid_entry_fails_closed(tmp_path):
     import json
-    from service.kb_epoch import EpochCorruptError
+    from cogdoc.service.kb_epoch import EpochCorruptError
 
     path = tmp_path / "epochs.json"
     path.write_text(json.dumps({"kb": "bad"}), encoding="utf-8")

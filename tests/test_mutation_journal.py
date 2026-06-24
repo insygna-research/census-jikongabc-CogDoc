@@ -1,5 +1,5 @@
 from unittest.mock import MagicMock, patch
-from service.mutation_journal import MutationJournal
+from cogdoc.service.mutation_journal import MutationJournal
 
 
 # 处理 journal 相关逻辑。
@@ -12,7 +12,7 @@ def _active(gen_id):
     # 让 recovery 内 KBState(kb).active() 返回指定 active gen，用于模拟"已提交"。
     state = MagicMock()
     state.active.return_value = {"id": gen_id} if gen_id else None
-    return patch("service.kb_state.KBState", return_value=state)
+    return patch("cogdoc.service.kb_state.KBState", return_value=state)
 
 
 # 验证 recover upload overwrite staged rolls back。

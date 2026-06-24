@@ -1,13 +1,13 @@
 import pytest
 from collections import OrderedDict
 from unittest.mock import MagicMock, patch
-from config.settings import get_settings
-from service.kb_epoch import EpochStore
-from service.kb_state import KBState
-from graph.subgraphs.qa import RetrieverFactory
-from tools.retriever.base_retriever import NullRetriever, NullWriteError
-from tools.retriever.hybrid import HybridRetriever, IndexCorruptError
-from tools.retriever.vector_retriever import EmbeddingModelMismatchError
+from cogdoc.config.settings import get_settings
+from cogdoc.service.kb_epoch import EpochStore
+from cogdoc.service.kb_state import KBState
+from cogdoc.graph.subgraphs.qa import RetrieverFactory
+from cogdoc.tools.retriever.base_retriever import NullRetriever, NullWriteError
+from cogdoc.tools.retriever.hybrid import HybridRetriever, IndexCorruptError
+from cogdoc.tools.retriever.vector_retriever import EmbeddingModelMismatchError
 
 
 # 构造 make state 相关逻辑。
@@ -85,7 +85,7 @@ def test_collection_id_within_chroma_limit():
 # 验证 resolve gen id no active。
 def test_resolve_gen_id_no_active(tmp_path):
     state = _make_state(tmp_path)
-    with patch("graph.subgraphs.qa.KBState", return_value=state):
+    with patch("cogdoc.graph.subgraphs.qa.KBState", return_value=state):
         assert RetrieverFactory._resolve_gen_id("kb") is None
 
 
@@ -95,7 +95,7 @@ def test_resolve_gen_id_expected_count_zero(tmp_path):
     gen_id = state.begin_generation("m", "v")
     state.mark_ready(gen_id, expected_count=0, documents=[])
     state.switch_active(gen_id)
-    with patch("graph.subgraphs.qa.KBState", return_value=state):
+    with patch("cogdoc.graph.subgraphs.qa.KBState", return_value=state):
         assert RetrieverFactory._resolve_gen_id("kb") is None
 
 
@@ -105,7 +105,7 @@ def test_resolve_gen_id_returns_active_id(tmp_path):
     gen_id = state.begin_generation("m", "v")
     state.mark_ready(gen_id, expected_count=3, documents=[])
     state.switch_active(gen_id)
-    with patch("graph.subgraphs.qa.KBState", return_value=state):
+    with patch("cogdoc.graph.subgraphs.qa.KBState", return_value=state):
         assert RetrieverFactory._resolve_gen_id("kb") == gen_id
 
 
@@ -131,14 +131,14 @@ def test_build_engine_uses_settings_collection_id(tmp_path):
     expected_cid = get_settings().kb_collection_id(kb_id, gen_id)
 
     with (
-        patch("graph.subgraphs.qa.KBState", return_value=state),
-        patch("graph.subgraphs.qa.VectorRetriever") as MockVec,
-        patch("graph.subgraphs.qa.BM25Retriever") as MockBm25,
+        patch("cogdoc.graph.subgraphs.qa.KBState", return_value=state),
+        patch("cogdoc.graph.subgraphs.qa.VectorRetriever") as MockVec,
+        patch("cogdoc.graph.subgraphs.qa.BM25Retriever") as MockBm25,
     ):
         mock_engine = MagicMock(spec=HybridRetriever)
         mock_engine.count.return_value = 2
         mock_engine.is_consistent.return_value = True
-        with patch("graph.subgraphs.qa.HybridRetriever", return_value=mock_engine):
+        with patch("cogdoc.graph.subgraphs.qa.HybridRetriever", return_value=mock_engine):
             RetrieverFactory._build_engine(kb_id, gen_id)
 
     MockVec.assert_called_once_with(collection_id=expected_cid)
@@ -153,9 +153,9 @@ def test_build_engine_model_mismatch_returns_null(tmp_path):
     state.switch_active(gen_id)
 
     with (
-        patch("graph.subgraphs.qa.KBState", return_value=state),
+        patch("cogdoc.graph.subgraphs.qa.KBState", return_value=state),
         patch(
-            "graph.subgraphs.qa.VectorRetriever",
+            "cogdoc.graph.subgraphs.qa.VectorRetriever",
             side_effect=EmbeddingModelMismatchError("mismatch"),
         ),
     ):
@@ -174,14 +174,14 @@ def test_build_engine_count_mismatch_raises(tmp_path):
     state.switch_active(gen_id)
 
     with (
-        patch("graph.subgraphs.qa.KBState", return_value=state),
-        patch("graph.subgraphs.qa.VectorRetriever"),
-        patch("graph.subgraphs.qa.BM25Retriever"),
+        patch("cogdoc.graph.subgraphs.qa.KBState", return_value=state),
+        patch("cogdoc.graph.subgraphs.qa.VectorRetriever"),
+        patch("cogdoc.graph.subgraphs.qa.BM25Retriever"),
     ):
         mock_engine = MagicMock(spec=HybridRetriever)
         mock_engine.count.return_value = 0  # 磁盘数据丢失，count 为 0
         mock_engine.is_consistent.return_value = True
-        with patch("graph.subgraphs.qa.HybridRetriever", return_value=mock_engine):
+        with patch("cogdoc.graph.subgraphs.qa.HybridRetriever", return_value=mock_engine):
             with pytest.raises(IndexCorruptError):
                 RetrieverFactory._build_engine("kb", gen_id)
 
@@ -190,9 +190,9 @@ def test_build_engine_count_mismatch_raises(tmp_path):
 def test_build_engine_gen_gcod_returns_null():
     # 该代在构造期间已被 GC 回收（get() 返回 None）：返回空引擎，不报错。 get_engine 在插入前重解析 gen_id 不符，不会把这个空引擎写回缓存。
     with (
-        patch("graph.subgraphs.qa.KBState") as MockKBState,
-        patch("graph.subgraphs.qa.VectorRetriever"),
-        patch("graph.subgraphs.qa.BM25Retriever"),
+        patch("cogdoc.graph.subgraphs.qa.KBState") as MockKBState,
+        patch("cogdoc.graph.subgraphs.qa.VectorRetriever"),
+        patch("cogdoc.graph.subgraphs.qa.BM25Retriever"),
     ):
         mock_state = MagicMock()
         mock_state.get.return_value = None  # 已被 GC 回收
@@ -213,14 +213,14 @@ def test_build_engine_inconsistent_raises(tmp_path):
     state.switch_active(gen_id)
 
     with (
-        patch("graph.subgraphs.qa.KBState", return_value=state),
-        patch("graph.subgraphs.qa.VectorRetriever"),
-        patch("graph.subgraphs.qa.BM25Retriever"),
+        patch("cogdoc.graph.subgraphs.qa.KBState", return_value=state),
+        patch("cogdoc.graph.subgraphs.qa.VectorRetriever"),
+        patch("cogdoc.graph.subgraphs.qa.BM25Retriever"),
     ):
         mock_engine = MagicMock(spec=HybridRetriever)
         mock_engine.count.return_value = 3  # count 正确
         mock_engine.is_consistent.return_value = False  # 但 chunk_id 集合不等
-        with patch("graph.subgraphs.qa.HybridRetriever", return_value=mock_engine):
+        with patch("cogdoc.graph.subgraphs.qa.HybridRetriever", return_value=mock_engine):
             with pytest.raises(IndexCorruptError):
                 RetrieverFactory._build_engine("kb", gen_id)
 

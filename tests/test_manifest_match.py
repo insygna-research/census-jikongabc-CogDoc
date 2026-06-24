@@ -1,5 +1,5 @@
-from tools.chunk_identity import CHUNK_IDENTITY_VERSION
-from tools.manifest import manifests_match
+from cogdoc.tools.chunk_identity import CHUNK_IDENTITY_VERSION
+from cogdoc.tools.manifest import manifests_match
 
 DOCS = [{"name": "a.pdf", "size": 10, "sha256": "abc123"}]
 

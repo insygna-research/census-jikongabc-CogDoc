@@ -7,6 +7,11 @@ env/
 venv/
 ENV/
 
+# Python 打包产物（pip install -e . / build）。
+*.egg-info/
+build/
+dist/
+
 .env
 .env.*
 !.env.example

@@ -1,11 +1,11 @@
-from tools.document_loader import (
+from cogdoc.tools.document_loader import (
     list_sources,
     load_source_chunks,
     select_sources_for_compare,
     select_source_for_summary,
     sort_document_chunks,
 )
-from tools.retriever.bm25_retriever import BM25Retriever
+from cogdoc.tools.retriever.bm25_retriever import BM25Retriever
 
 
 def _doc(source: str, page: int, local_chunk_index: int, chunk_id: str = None) -> dict:

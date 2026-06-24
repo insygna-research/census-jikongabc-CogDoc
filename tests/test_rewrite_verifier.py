@@ -1,5 +1,5 @@
-from agents import rewrite_verifier
-from agents.rewrite_verifier import RewriteVerifyAgent, filter_rewrites_by_similarity
+from cogdoc.agents import rewrite_verifier
+from cogdoc.agents.rewrite_verifier import RewriteVerifyAgent, filter_rewrites_by_similarity
 
 
 def test_keeps_above_threshold_drops_below():

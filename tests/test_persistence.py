@@ -1,7 +1,7 @@
 import time
 from types import SimpleNamespace
-from api.ingest import IndexJobManager
-from api.persistence import SqliteJobStore, SqliteSessionStore
+from cogdoc.api.ingest import IndexJobManager
+from cogdoc.api.persistence import SqliteJobStore, SqliteSessionStore
 
 
 def test_session_survives_new_store_instance(tmp_path):

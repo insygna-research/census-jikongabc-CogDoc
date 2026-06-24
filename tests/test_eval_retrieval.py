@@ -1,4 +1,4 @@
-from tools.eval.retrieval_metrics import (
+from cogdoc.tools.eval.retrieval_metrics import (
     aggregate,
     evaluate_query,
     hit_at_k,

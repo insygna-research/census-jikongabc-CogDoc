@@ -19,16 +19,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY requirements.txt .
-# 默认 CPU 部署：先装 CPU 版 torch，避免镜像塞入数 GB 用不上的 CUDA 包。
-RUN pip install --no-cache-dir torch==2.12.0 --index-url https://download.pytorch.org/whl/cpu \
-    && pip install --no-cache-dir -r requirements.txt
-COPY --from=rust-builder /wheels/*.whl /tmp/
-RUN pip install --no-cache-dir /tmp/*.whl && rm -f /tmp/*.whl
+# 默认 CPU 部署：先装 CPU 版 torch（独立缓存层），避免镜像塞入数 GB 用不上的 CUDA 包。
+RUN pip install --no-cache-dir torch==2.12.0 --index-url https://download.pytorch.org/whl/cpu
 
 COPY . .
+# 依赖与包元数据统一在 pyproject.toml；torch 已满足版本约束不会重装。
+RUN pip install --no-cache-dir .
+COPY --from=rust-builder /wheels/*.whl /tmp/
+RUN pip install --no-cache-dir /tmp/*.whl && rm -f /tmp/*.whl
 
 # BGE 嵌入/精排模型首次使用时从 HuggingFace 下载；生产可挂载缓存卷或预下载。
 # GPU 部署需换 nvidia/cuda 基础镜像并装对应 torch。
 EXPOSE 8000
-CMD ["python", "-m", "uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "cogdoc.api.app:app", "--host", "0.0.0.0", "--port", "8000"]

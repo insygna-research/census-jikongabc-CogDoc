@@ -1,8 +1,8 @@
 import json
 import pytest
 from httpx import ASGITransport, AsyncClient
-from api.app import _unhandled_error_response, create_app
-from api.session_store import SessionStore
+from cogdoc.api.app import _unhandled_error_response, create_app
+from cogdoc.api.session_store import SessionStore
 
 
 @pytest.fixture
@@ -17,7 +17,7 @@ async def _client(app, raise_app_exceptions=True):
 
 @pytest.mark.anyio
 async def test_healthz_is_ok(monkeypatch):
-    import api.app as app_module
+    import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
     app = create_app(session_store=SessionStore())
@@ -32,7 +32,7 @@ async def test_healthz_is_ok(monkeypatch):
 
 @pytest.mark.anyio
 async def test_readyz_reports_native_dependency(monkeypatch):
-    import api.app as app_module
+    import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
     app = create_app(session_store=SessionStore())
@@ -47,8 +47,8 @@ async def test_readyz_reports_native_dependency(monkeypatch):
 
 @pytest.mark.anyio
 async def test_readyz_returns_503_when_native_missing(monkeypatch):
-    import api.app as app_module
-    import api.routes.health as health_module
+    import cogdoc.api.app as app_module
+    import cogdoc.api.routes.health as health_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
 
@@ -89,7 +89,7 @@ def test_unhandled_error_response_maps_generic_to_500_without_stack():
 
 @pytest.mark.anyio
 async def test_chat_unexpected_exception_maps_to_internal_error(monkeypatch):
-    import api.app as app_module
+    import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
 

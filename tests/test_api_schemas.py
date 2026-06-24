@@ -1,13 +1,13 @@
 import pytest
 from pydantic import ValidationError
-from api.schemas import (
+from cogdoc.api.schemas import (
     API_SCHEMA_VERSION,
     ChatRequest,
     ErrorCode,
     build_error_response,
     chat_result_to_response,
 )
-from service.chat_service import ChatResult
+from cogdoc.service.chat_service import ChatResult
 
 
 def test_chat_request_defaults_and_forced_task():

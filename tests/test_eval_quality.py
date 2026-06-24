@@ -1,5 +1,5 @@
 import json
-from tools.eval.quality_metrics import compare_baseline, run_eval
+from cogdoc.tools.eval.quality_metrics import compare_baseline, run_eval
 
 
 def _doc(source: str = "a.pdf", page: int = 1) -> dict:

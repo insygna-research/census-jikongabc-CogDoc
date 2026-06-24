@@ -1,7 +1,7 @@
 import random
 import pytest
 from rank_bm25 import BM25Okapi
-from tools.rust_core_loader import ensure_rust_core
+from cogdoc.tools.rust_core_loader import ensure_rust_core
 
 _rust_core = ensure_rust_core("Bm25Index")
 

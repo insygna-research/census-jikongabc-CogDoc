@@ -1,5 +1,5 @@
-from agents.qa_generator import Generator
-from agents.router import RouteDecision, RouterAgent, classify_intent_by_rule
+from cogdoc.agents.qa_generator import Generator
+from cogdoc.agents.router import RouteDecision, RouterAgent, classify_intent_by_rule
 
 
 class RaisingStructuredLLM:

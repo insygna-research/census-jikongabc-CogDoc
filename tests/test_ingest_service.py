@@ -1,6 +1,6 @@
 import types
 from collections import OrderedDict
-from service import ingest_service
+from cogdoc.service import ingest_service
 
 
 # 封装 FakeEngine 的状态与行为。
@@ -70,7 +70,7 @@ def test_build_kb_index_clears_stale_index_when_no_chunks(tmp_path, monkeypatch)
 
 # 验证 invalidate only evicts target kb。
 def test_invalidate_only_evicts_target_kb(monkeypatch):
-    from graph.subgraphs.qa import RetrieverFactory
+    from cogdoc.graph.subgraphs.qa import RetrieverFactory
 
     sentinel_a, sentinel_b = object(), object()
     monkeypatch.setattr(RetrieverFactory, "_engines", OrderedDict())

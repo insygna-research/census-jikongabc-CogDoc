@@ -1,5 +1,5 @@
 import pytest
-from service.process_lock import (
+from cogdoc.service.process_lock import (
     acquire_single_instance_lock,
     release_single_instance_lock,
 )

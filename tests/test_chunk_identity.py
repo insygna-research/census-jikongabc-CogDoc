@@ -1,12 +1,12 @@
 import pytest
-from tools.chunk_identity import build_chunk_id
-from tools.chunk_identity import (
+from cogdoc.tools.chunk_identity import build_chunk_id
+from cogdoc.tools.chunk_identity import (
     CHUNK_IDENTITY_VERSION,
     DEFAULT_CHUNK_CHAR_OVERLAP,
     DEFAULT_CHUNK_CHAR_SIZE,
     MIN_CHUNK_CHARS,
 )
-from tools.chunker import chunk_paper
+from cogdoc.tools.chunker import chunk_paper
 
 
 SOURCE_SHA = "a" * 64

@@ -1,5 +1,5 @@
 import pytest
-from tools.tokenizer import (
+from cogdoc.tools.tokenizer import (
     _tokenize_mixed_text_python,
     tokenize_corpus,
     tokenize_mixed_text,

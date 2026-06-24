@@ -1,7 +1,7 @@
 import pytest
-from tools.embedder import Embedder
-from tools.retriever.bm25_retriever import BM25Retriever
-from tools.retriever.vector_retriever import VectorRetriever
+from cogdoc.tools.embedder import Embedder
+from cogdoc.tools.retriever.bm25_retriever import BM25Retriever
+from cogdoc.tools.retriever.vector_retriever import VectorRetriever
 
 
 # 封装 _DummyBM25 的状态与行为。

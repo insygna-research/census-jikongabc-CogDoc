@@ -2,7 +2,7 @@
 
 **A RAG console for papers and technical docs — LangGraph agents on top, deterministic Rust kernels underneath.**
 
-[English](README.md) · [简体中文](README_zh-CN.md)
+[English](README.md) · [简体中文](docs/README_zh-CN.md)
 
 ---
 
@@ -25,13 +25,13 @@ The result: the deterministic, verifiable behavior stays in tested kernels and s
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt -r requirements-dev.txt
+pip install -e ".[dev]"   # runtime + build/test deps (editable, src-layout)
 make native     # build the Rust extension: cd rust_core && maturin develop --release
 make check      # verify the extension and its native symbols
 make run        # build/reuse the index, warm up models, start the console
 ```
 
-Python dependencies are split into [requirements.txt](requirements.txt) for runtime packages and [requirements-dev.txt](requirements-dev.txt) for build/test tooling.
+Dependencies live in [pyproject.toml](pyproject.toml): runtime in `[project.dependencies]`, with `dev` (build/test) and `frontend` (Streamlit client) as optional extras — install via `.[dev]` / `.[frontend]`. The package uses a `src/` layout (`src/cogdoc/`); the `make` targets put `src/` on `PYTHONPATH`, so no install is strictly required to run the suite.
 
 Put PDFs in `测试论文/` (or set `COGDOC_DOC_DIR`). In the console, `/local` uses Ollama, `/cloud` uses the cloud backend, `exit` quits. `make native` must be re-run after any change under `rust_core/src/` — the `.so` is not auto-rebuilt and not committed.
 
@@ -165,30 +165,23 @@ For Summary, name the target file when the corpus has multiple PDFs. For Compare
 
 ```text
 CogDoc/
-├── agents/                  # router, query_rewriter, rewrite_verifier, qa_generator,
-│                            # citation_validator, structured_output,
-│                            # summary_planner, summary_generator,
-│                            # compare_profile, compare_generator
-├── graph/
-│   ├── state.py             # GraphState / RetrievedDoc / DocMeta / Evidence / Summary+Compare types
-│   ├── workflow.py          # top-level graph: intent_router -> qa | summary | compare
-│   └── subgraphs/           # qa.py, summary.py, compare.py
-├── tools/
-│   ├── parser.py            # PyMuPDF parsing, two-column reflow + OCR-fallback flag
-│   ├── chunker.py           # char-window chunking with page-span mapping
-│   ├── chunk_identity.py    # chunk_id format + versioned identity contract
-│   ├── manifest.py          # manifest IO + match logic for index reuse
-│   ├── tokenizer.py         # facade over tokenize_mixed_text_native (jieba-rs)
-│   ├── document_loader.py   # source selection + chunk loading for Summary/Compare
-│   ├── embedder.py          # bge-small-zh-v1.5 (normalized)
-│   ├── reranker.py          # bge-reranker-v2-m3 cross-encoder
-│   ├── rust_core_loader.py  # ensure_rust_core: load + symbol check
-│   └── retriever/           # vector (Chroma), bm25 (native Bm25Index), hybrid (Rust RRF)
+├── src/cogdoc/              # the importable package (src-layout)
+│   ├── agents/              # router, query_rewriter, rewrite_verifier, qa_generator,
+│   │                        # citation_validator, structured_output, summary_*, compare_*
+│   ├── api/                 # FastAPI app, routes, persistence, access control, metrics
+│   ├── config/              # pydantic-settings configuration
+│   ├── frontend/            # Streamlit thin client
+│   ├── graph/               # state.py, workflow.py, subgraphs/ (qa, summary, compare)
+│   ├── observability/       # structured logging + trace export
+│   ├── service/             # chat/ingest services, KB lifecycle, transactional indexing
+│   └── tools/               # parser, chunker, manifest, tokenizer, embedder, reranker,
+│                            # rust_core_loader, retriever/ (vector, native bm25, hybrid)
 ├── rust_core/src/           # lib.rs, scanner.rs, rrf.rs, citation.rs, tokenizer.rs, bm25.rs
-├── scripts/check_native.py  # native extension health check (5 required symbols)
+├── scripts/check_native.py  # native extension health check (6 required symbols)
 ├── tests/                   # Python regression tests
-├── data/                    # generated chroma_db / bm25_db / manifests (runtime state)
-├── 测试论文/                 # default PDF corpus dir (override with COGDOC_DOC_DIR)
+├── eval/                    # example offline-eval datasets
+├── docs/                    # README_zh-CN and other docs
+├── pyproject.toml           # project metadata, dependencies, build, pytest config
 └── run.py                   # interactive console entry point
 ```
 

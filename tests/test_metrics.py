@@ -1,9 +1,9 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
-from api.app import create_app
-from api.metrics import Metrics
-from api.session_store import SessionStore
-from service.chat_service import ChatResult
+from cogdoc.api.app import create_app
+from cogdoc.api.metrics import Metrics
+from cogdoc.api.session_store import SessionStore
+from cogdoc.service.chat_service import ChatResult
 
 
 @pytest.fixture
@@ -28,7 +28,7 @@ def _runner_ok(doc_id, query, is_local, chat_history, forced_task):
 
 
 def _app(monkeypatch, **kwargs):
-    import api.app as app_module
+    import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
     return create_app(chat_runner=_runner_ok, session_store=SessionStore(), **kwargs)
@@ -49,7 +49,7 @@ def test_metrics_render_is_prometheus_text():
 @pytest.mark.anyio
 async def test_middleware_records_500_when_call_next_raises():
     # call_next 抛未兜底异常时：仍记一条 status=500、在途归零，且异常透传。
-    from api.metrics import MetricsMiddleware
+    from cogdoc.api.metrics import MetricsMiddleware
 
     metrics = Metrics()
     mw = MetricsMiddleware(app=None, metrics=metrics)

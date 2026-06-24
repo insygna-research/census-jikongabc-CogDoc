@@ -1,9 +1,9 @@
 import pytest
 import threading
 from httpx import ASGITransport, AsyncClient
-from api.app import create_app
-from api.session_store import SessionStore
-from service.chat_service import ChatEvent, ChatResult, ChatServiceError
+from cogdoc.api.app import create_app
+from cogdoc.api.session_store import SessionStore
+from cogdoc.service.chat_service import ChatEvent, ChatResult, ChatServiceError
 
 
 @pytest.fixture
@@ -50,7 +50,7 @@ def _result(answer: str, trace_id: str, messages=None) -> ChatResult:
 
 @pytest.mark.anyio
 async def test_chat_endpoint_maps_response_and_trace_header(monkeypatch):
-    import api.app as app_module
+    import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
     calls = []
@@ -101,7 +101,7 @@ async def test_chat_endpoint_maps_response_and_trace_header(monkeypatch):
 
 @pytest.mark.anyio
 async def test_chat_endpoint_reuses_session_history(monkeypatch):
-    import api.app as app_module
+    import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
     history_lengths = []
@@ -134,7 +134,7 @@ async def test_chat_endpoint_reuses_session_history(monkeypatch):
 
 @pytest.mark.anyio
 async def test_session_history_endpoint_returns_stored_turns(monkeypatch):
-    import api.app as app_module
+    import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
 
@@ -169,7 +169,7 @@ async def test_session_history_endpoint_returns_stored_turns(monkeypatch):
 
 @pytest.mark.anyio
 async def test_list_and_delete_sessions(monkeypatch):
-    import api.app as app_module
+    import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
 
@@ -209,7 +209,7 @@ async def test_list_and_delete_sessions(monkeypatch):
 
 @pytest.mark.anyio
 async def test_chat_endpoint_offloads_runner(monkeypatch):
-    import api.app as app_module
+    import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
     caller_thread_id = threading.get_ident()
@@ -230,7 +230,7 @@ async def test_chat_endpoint_offloads_runner(monkeypatch):
 
 @pytest.mark.anyio
 async def test_chat_stream_emits_sse_frames_and_writes_session(monkeypatch):
-    import api.app as app_module
+    import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
     result = _result("最终答案", "trace-sse")
@@ -267,7 +267,7 @@ async def test_chat_stream_emits_sse_frames_and_writes_session(monkeypatch):
 
 @pytest.mark.anyio
 async def test_chat_stream_maps_error_event_and_skips_session(monkeypatch):
-    import api.app as app_module
+    import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
 
@@ -321,7 +321,7 @@ def test_session_store_purges_expired_history():
 
 @pytest.mark.anyio
 async def test_chat_endpoint_maps_runtime_error_to_stable_error_code(monkeypatch):
-    import api.app as app_module
+    import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
 
@@ -353,7 +353,7 @@ async def test_chat_endpoint_maps_runtime_error_to_stable_error_code(monkeypatch
 
 @pytest.mark.anyio
 async def test_chat_endpoint_maps_stream_stage_to_interrupted(monkeypatch):
-    import api.app as app_module
+    import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
 
@@ -374,7 +374,7 @@ async def test_chat_endpoint_maps_stream_stage_to_interrupted(monkeypatch):
 
 
 def test_run_chat_sync_raises_typed_error_when_no_final(monkeypatch):
-    from service import chat_service
+    from cogdoc.service import chat_service
 
     class CrashingApp:
         def stream(self, *args, **kwargs):

@@ -1,9 +1,9 @@
 import json
 import logging
 import pytest
-from config.settings import Settings
-import observability.logger as logger_module
-from observability.logger import configure_logging, log_event, new_trace_id
+from cogdoc.config.settings import Settings
+import cogdoc.observability.logger as logger_module
+from cogdoc.observability.logger import configure_logging, log_event, new_trace_id
 
 
 @pytest.fixture(autouse=True)

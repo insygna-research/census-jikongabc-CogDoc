@@ -1,5 +1,5 @@
 import pytest
-from config.settings import Settings, get_settings
+from cogdoc.config.settings import Settings, get_settings
 
 
 @pytest.fixture(autouse=True)

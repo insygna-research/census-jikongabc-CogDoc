@@ -1,5 +1,5 @@
-from agents.answer_markers import NO_RELEVANT_CONTENT_MARKER
-from agents.conversation_memory import (
+from cogdoc.agents.answer_markers import NO_RELEVANT_CONTENT_MARKER
+from cogdoc.agents.conversation_memory import (
     clean_answer_for_memory,
     extract_chat_turn,
     extract_final_answer,

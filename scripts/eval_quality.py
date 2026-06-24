@@ -5,11 +5,12 @@ from pathlib import Path
 from typing import List
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+if str(ROOT / "src") not in sys.path:
+    # src-layout：包源码在 src/ 下；ROOT 仍用于解析数据文件相对路径。
+    sys.path.insert(0, str(ROOT / "src"))
 
-from config.settings import get_settings
-from tools.eval.quality_metrics import compare_baseline, run_eval
+from cogdoc.config.settings import get_settings
+from cogdoc.tools.eval.quality_metrics import compare_baseline, run_eval
 
 
 def _project_path(path: str) -> Path:

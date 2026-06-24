@@ -3,8 +3,8 @@ import time
 from types import SimpleNamespace
 import pytest
 from httpx import ASGITransport, AsyncClient
-from api.app import create_app
-from api.ingest import IndexJobManager, KnowledgeBaseRegistry
+from cogdoc.api.app import create_app
+from cogdoc.api.ingest import IndexJobManager, KnowledgeBaseRegistry
 
 
 # 指定异步测试后端。
@@ -21,7 +21,7 @@ def _ok_ingest(kb_id, source_dir):
 # 构造 make app 相关逻辑。
 def _make_app(tmp_path, ingest_fn=_ok_ingest, monkeypatch=None):
     if monkeypatch is not None:
-        import api.app as app_module
+        import cogdoc.api.app as app_module
 
         monkeypatch.setattr(app_module, "configure_logging", lambda: None)
 
@@ -59,7 +59,7 @@ async def _wait_job(client, job_id, timeout=2.0):
 
 # 验证 registry corrupt quarantines and fails closed。
 def test_registry_corrupt_quarantines_and_fails_closed(tmp_path):
-    from api.ingest import RegistryCorruptError
+    from cogdoc.api.ingest import RegistryCorruptError
 
     reg_path = tmp_path / "registry.json"
     reg_path.write_text("{ 半截损坏的 json", encoding="utf-8")
@@ -75,7 +75,7 @@ def test_registry_corrupt_quarantines_and_fails_closed(tmp_path):
 
 # 验证 create rolls back when lifecycle finalize fails。
 def test_create_rolls_back_when_lifecycle_finalize_fails(tmp_path, monkeypatch):
-    from api.ingest import KnowledgeBaseRegistry
+    from cogdoc.api.ingest import KnowledgeBaseRegistry
 
     source_dir = tmp_path / "kb" / "sources"
     registry = KnowledgeBaseRegistry(
@@ -83,7 +83,7 @@ def test_create_rolls_back_when_lifecycle_finalize_fails(tmp_path, monkeypatch):
         source_dir_for=lambda _: str(source_dir),
     )
     monkeypatch.setattr(
-        "api.ingest.shared_lifecycle_store",
+        "cogdoc.api.ingest.shared_lifecycle_store",
         lambda: type(
             "BrokenLifecycle",
             (),
@@ -123,7 +123,7 @@ async def test_delete_knowledge_base(tmp_path, monkeypatch):
     import os
 
     app, source_dir_for = _make_app(tmp_path, monkeypatch=monkeypatch)
-    import api.routes.documents as docs_module
+    import cogdoc.api.routes.documents as docs_module
 
     monkeypatch.setattr(
         docs_module, "delete_kb_index_transactional", lambda kb_id: None
@@ -145,10 +145,10 @@ async def test_delete_knowledge_base(tmp_path, monkeypatch):
 # 验证 delete kb cleanup failure keeps kb。
 @pytest.mark.anyio
 async def test_delete_kb_cleanup_failure_keeps_kb(tmp_path, monkeypatch):
-    from service.ingest_service import KBCleanupError
+    from cogdoc.service.ingest_service import KBCleanupError
 
     app, _ = _make_app(tmp_path, monkeypatch=monkeypatch)
-    import api.routes.documents as docs_module
+    import cogdoc.api.routes.documents as docs_module
 
     # 模拟失败路径。
     def boom(kb_id):
@@ -243,7 +243,7 @@ async def test_upload_rejects_bad_inputs(tmp_path, monkeypatch):
 @pytest.mark.anyio
 async def test_upload_rejects_oversize(tmp_path, monkeypatch):
     app, _ = _make_app(tmp_path, monkeypatch=monkeypatch)
-    import api.routes.documents as docs_module
+    import cogdoc.api.routes.documents as docs_module
 
     monkeypatch.setattr(
         docs_module, "get_settings", lambda: SimpleNamespace(max_upload_mb=0)

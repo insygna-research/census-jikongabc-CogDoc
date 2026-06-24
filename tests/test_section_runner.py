@@ -1,6 +1,6 @@
 import threading
 import time
-from agents.summary_generator import resolve_section_workers, run_section_cells
+from cogdoc.agents.summary_generator import resolve_section_workers, run_section_cells
 
 
 def test_resolve_workers_serializes_local_and_single_task():
