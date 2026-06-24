@@ -80,7 +80,7 @@ The Python layer owns orchestration, prompts, model clients, indexing, and the c
 
 ## Indexing Pipeline
 
-Driven by `run.py` (`build_index`) before the console starts:
+Driven by `cogdoc.cli` (`build_index`) before the console starts:
 
 1. **Scan** — `scan_pdf_manifest_native` (Rust) hashes every PDF with rayon-parallel, 1 MiB-buffered SHA-256 and returns `{doc_id, documents: [{name, size, sha256}]}`, sorted by filename.
 2. **Compare** — `manifests_match` reuses the index only if `doc_id`, `chunk_identity_version`, and every `{name, sha256}` match the saved manifest; any mismatch forces a rebuild.
@@ -166,6 +166,7 @@ For Summary, name the target file when the corpus has multiple PDFs. For Compare
 ```text
 CogDoc/
 ├── src/cogdoc/              # the importable package (src-layout)
+│   ├── cli.py               # interactive console entry point (python -m cogdoc.cli / `cogdoc`)
 │   ├── agents/              # router, query_rewriter, rewrite_verifier, qa_generator,
 │   │                        # citation_validator, structured_output, summary_*, compare_*
 │   ├── api/                 # FastAPI app, routes, persistence, access control, metrics
@@ -181,15 +182,14 @@ CogDoc/
 ├── tests/                   # Python regression tests
 ├── eval/                    # example offline-eval datasets
 ├── docs/                    # README_zh-CN and other docs
-├── pyproject.toml           # project metadata, dependencies, build, pytest config
-└── run.py                   # interactive console entry point
+└── pyproject.toml           # project metadata, dependencies, build, pytest config
 ```
 
 ## Configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `COGDOC_DOC_DIR` | `测试论文` | PDF corpus directory scanned by `run.py` |
+| `COGDOC_DOC_DIR` | `测试论文` | PDF corpus directory scanned by `cogdoc.cli` |
 | `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Local OpenAI-compatible Ollama endpoint |
 | `OLLAMA_MODEL_NAME` | `qwen2.5:7b` | Local model name |
 | `LLM_BASE_URL` | `https://api.deepseek.com/v1` | Cloud OpenAI-compatible endpoint |

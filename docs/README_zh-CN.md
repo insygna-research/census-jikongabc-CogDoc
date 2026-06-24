@@ -80,7 +80,7 @@ Python 层负责图编排、Prompt、模型客户端、索引和控制台。Rust
 
 ## 索引链路
 
-由 `run.py`(`build_index`)在控制台启动前驱动:
+由 `cogdoc.cli`(`build_index`)在控制台启动前驱动:
 
 1. **扫描** — `scan_pdf_manifest_native`(Rust)用 rayon 并行、1 MiB 缓冲的 SHA-256 计算每个 PDF,返回 `{doc_id, documents: [{name, size, sha256}]}`,按文件名排序。
 2. **比对** — `manifests_match` 仅当 `doc_id`、`chunk_identity_version` 及每个 `{name, sha256}` 都与已存 manifest 一致时才复用索引;任一不匹配都强制重建。
@@ -166,6 +166,7 @@ Summary 在多 PDF 语料库中需要点名目标文件。Compare 需要点名�
 ```text
 CogDoc/
 ├── src/cogdoc/              # 可导入的发行包(src-layout)
+│   ├── cli.py               # 交互式控制台入口(python -m cogdoc.cli / `cogdoc`)
 │   ├── agents/              # router、query_rewriter、rewrite_verifier、qa_generator、
 │   │                        # citation_validator、structured_output、summary_*、compare_*
 │   ├── api/                 # FastAPI app、routes、持久化、访问控制、metrics
@@ -181,15 +182,14 @@ CogDoc/
 ├── tests/                   # Python 回归测试
 ├── eval/                    # 离线评测示例数据集
 ├── docs/                    # 中文 README 及其他文档
-├── pyproject.toml           # 项目元数据、依赖、构建、pytest 配置
-└── run.py                   # 交互式控制台入口
+└── pyproject.toml           # 项目元数据、依赖、构建、pytest 配置
 ```
 
 ## 配置
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `COGDOC_DOC_DIR` | `测试论文` | `run.py` 扫描的 PDF 语料目录 |
+| `COGDOC_DOC_DIR` | `测试论文` | `cogdoc.cli` 扫描的 PDF 语料目录 |
 | `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | 本地 OpenAI 兼容 Ollama endpoint |
 | `OLLAMA_MODEL_NAME` | `qwen2.5:7b` | 本地模型名 |
 | `LLM_BASE_URL` | `https://api.deepseek.com/v1` | 云端 OpenAI 兼容 endpoint |

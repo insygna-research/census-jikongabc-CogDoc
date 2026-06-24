@@ -9,11 +9,6 @@ try:
 except ImportError:
     readline = None
 
-# src-layout：未安装包时也能 `python run.py`，把 src/ 注入路径。
-_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
-if _SRC not in sys.path:
-    sys.path.insert(0, _SRC)
-
 from cogdoc.config.settings import get_settings
 from cogdoc.tools.rust_core_loader import ensure_rust_core
 from cogdoc.tools.manifest import (

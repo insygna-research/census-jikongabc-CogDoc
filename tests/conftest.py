@@ -1,11 +1,5 @@
-import os
 import sys
 import pytest
-
-ROOT = os.path.dirname(os.path.abspath(__file__))
-if ROOT not in sys.path:
-    # 测试进程需优先导入仓库源码。
-    sys.path.insert(0, ROOT)
 
 
 # 处理 reset retriever engine cache 相关逻辑。

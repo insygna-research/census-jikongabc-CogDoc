@@ -15,7 +15,7 @@ help:
 	@echo "make test    - 运行 pytest 全量测试"
 	@echo "make eval    - 离线检索评测 recall@k/MRR (scripts/eval_retrieval.py)"
 	@echo "make eval-quality - 离线质量评测 router/citation/faithfulness (scripts/eval_quality.py)"
-	@echo "make run     - 启动 RAG 问答控制台 (run.py)"
+	@echo "make run     - 启动 RAG 问答控制台 (python -m cogdoc.cli)"
 	@echo "make serve   - 启动 FastAPI 服务 (uvicorn cogdoc.api.app:app)"
 	@echo "make frontend - 启动 Streamlit 前端 (src/cogdoc/frontend/app.py)"
 
@@ -39,7 +39,7 @@ eval-quality:
 	$(PYTHON) scripts/eval_quality.py
 
 run:
-	$(PYTHON) run.py
+	$(PYTHON) -m cogdoc.cli
 
 serve:
 	$(PYTHON) -m uvicorn cogdoc.api.app:app --host 0.0.0.0 --port 8000

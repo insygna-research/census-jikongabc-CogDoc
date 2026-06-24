@@ -1,4 +1,4 @@
-from run import parse_forced_mode
+from cogdoc.cli import parse_forced_mode
 
 
 def test_parse_forced_mode_reads_explicit_prefixes():
