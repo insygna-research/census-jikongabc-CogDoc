@@ -5,6 +5,11 @@ from typing import List
 from graph.state import ParsedPage
 
 
+# 解析逻辑变化时 bump：进入增量复用门控，避免未变文档复用旧解析结果。
+PARSER_VERSION = "pymupdf_smart_parse_v1"
+
+
+# 处理 smart parse 相关逻辑。
 def smart_parse(pdf_path: str) -> List[ParsedPage]:
     source_name = os.path.basename(pdf_path)  # 文件名
     doc = fitz.open(pdf_path)

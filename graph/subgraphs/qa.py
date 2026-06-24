@@ -6,9 +6,16 @@ from langgraph.graph import StateGraph, START, END
 from config.settings import get_settings
 from graph.state import GraphState, Evidence
 from observability.logger import log_event
-from tools.retriever.vector_retriever import VectorRetriever
+from service.kb_lifecycle import LIFECYCLE_ACTIVE, shared_lifecycle_store
+from service.kb_readers import kb_read_lease
+from service.kb_state import KBState
+from tools.retriever.base_retriever import NullRetriever
+from tools.retriever.vector_retriever import (
+    VectorRetriever,
+    EmbeddingModelMismatchError,
+)
 from tools.retriever.bm25_retriever import BM25Retriever
-from tools.retriever.hybrid import HybridRetriever
+from tools.retriever.hybrid import HybridRetriever, IndexCorruptError
 from tools.reranker import BGEReranker
 from agents.qa_generator import Generator
 from agents.query_rewriter import QueryRewriteAgent
@@ -16,51 +23,117 @@ from agents.rewrite_verifier import RewriteVerifyAgent
 from agents.citation_validator import CitationValidatorAgent
 
 
+# 封装 RetrieverFactory 的状态与行为。
 class RetrieverFactory:
-    # 进程内按 kb_id 缓存引擎，支持单库失效；线程安全且有界。
-    _engines: "OrderedDict[str, HybridRetriever]" = OrderedDict()
+    # 进程内按 (kb_id, gen_id) 缓存引擎，gen_id=None 代表无活跃代/空代；线程安全且有界。 switch_active 后必须调用 invalidate(kb_id)，以强制下次 get_engine 重解析 active generation。
+    _engines: "OrderedDict[tuple, HybridRetriever]" = OrderedDict()
     _lock = RLock()
     _max_engines = 32
 
+    # 获取 get engine 相关逻辑。
     @classmethod
-    def get_engine(cls, doc_id: str) -> HybridRetriever:
+    def get_engine(cls, kb_id: str) -> HybridRetriever:
+        # 删库进行中/已删：禁读正在拆除的代，返回空引擎且不缓存。
+        if shared_lifecycle_store().status(kb_id) != LIFECYCLE_ACTIVE:
+            return HybridRetriever(NullRetriever(), NullRetriever())
+
+        # 锁外解析 active gen_id（读 state.json），以 (kb_id, gen_id) 为缓存键查缓存。
+        gen_id = cls._resolve_gen_id(kb_id)
+        cache_key = (kb_id, gen_id)
+
         with cls._lock:
-            engine = cls._engines.get(doc_id)
+            engine = cls._engines.get(cache_key)
             if engine is not None:
-                cls._engines.move_to_end(doc_id)
+                # 缓存命中前再查一次 lifecycle：首检后删库可能已切 deleting，缓存引擎不得再供读。
+                if shared_lifecycle_store().status(kb_id) != LIFECYCLE_ACTIVE:
+                    return HybridRetriever(NullRetriever(), NullRetriever())
+                cls._engines.move_to_end(cache_key)
                 return engine
 
-        # 在锁外构造，避免不同 kb 的冷启动相互阻塞。
-        built = HybridRetriever(
-            vector_retriever=VectorRetriever(collection_id=doc_id),
-            bm25_retriever=BM25Retriever(collection_id=doc_id),
-        )
+        # 锁外构造：不同 kb 冷启动互不阻塞。
+        built = cls._build_engine(kb_id, gen_id)
+
         with cls._lock:
-            engine = cls._engines.get(doc_id)
+            # 构造期间被删库则丢弃，返回空引擎不缓存，关闭"构造窗口内转入 deleting"的竞态。
+            if shared_lifecycle_store().status(kb_id) != LIFECYCLE_ACTIVE:
+                return HybridRetriever(NullRetriever(), NullRetriever())
+            # 插入前重新解析：防止构造期间 switch_active + invalidate 使 gen_id 已失效。
+            current_gen_id = cls._resolve_gen_id(kb_id)
+            if current_gen_id != gen_id:
+                # 代已切换，丢弃刚构造的引擎不写回缓存；下次请求自然构造新代引擎。
+                return built
+            engine = cls._engines.get(cache_key)
             if engine is None:
-                cls._engines[doc_id] = built
+                cls._engines[cache_key] = built
                 engine = built
                 while len(cls._engines) > cls._max_engines:
                     cls._engines.popitem(last=False)
-            cls._engines.move_to_end(doc_id)
+            cls._engines.move_to_end(cache_key)
             return engine
 
+    # 解析 resolve gen id 相关逻辑。
     @classmethod
-    def invalidate(cls, doc_id: str) -> None:
-        # 只失效重建过的 kb，不波及其他知识库的已缓存引擎。
+    def _resolve_gen_id(cls, kb_id: str) -> str | None:
+        # 读 active generation id；无活跃代或合法空索引（expected_count=0）均返回 None。
+        active = KBState(kb_id).active()
+        if active is None or active.get("expected_count") == 0:
+            return None
+        return active["id"]
+
+    # 构建 build engine 相关逻辑。
+    @classmethod
+    def _build_engine(cls, kb_id: str, gen_id: str | None) -> HybridRetriever:
+        if gen_id is None:
+            # 无活跃代或合法空索引：返回空引擎，不报错。
+            return HybridRetriever(NullRetriever(), NullRetriever())
+
+        collection_id = get_settings().kb_collection_id(kb_id, gen_id)
+        try:
+            engine = HybridRetriever(
+                vector_retriever=VectorRetriever(collection_id=collection_id),
+                bm25_retriever=BM25Retriever(collection_id=collection_id),
+            )
+        except EmbeddingModelMismatchError:
+            # 嵌入模型已更换，当前代向量集合不可用：返回空引擎。 Phase 4 coordinator 检测到 index_build_version 不符时将触发新代重建。
+            return HybridRetriever(NullRetriever(), NullRetriever())
+
+        # 按 gen_id 精确读取该代记录，避免构造期间切代后拿新代 expected_count 校验旧代引擎。
+        gen_state = KBState(kb_id).get(gen_id)
+        if gen_state is None:
+            # 该代在构造期间已被 GC 回收：返回空引擎，get_engine 会因 gen_id 不符而不缓存。
+            return HybridRetriever(NullRetriever(), NullRetriever())
+        expected = gen_state.get("expected_count")
+        actual = engine.count()
+        consistent = engine.is_consistent()
+        if actual != expected or not consistent:
+            raise IndexCorruptError(
+                f"generation {gen_id}: expected_count={expected}, actual={actual}, "
+                f"consistent={consistent}; rebuild required"
+            )
+        return engine
+
+    # 使缓存失效 invalidate 相关逻辑。
+    @classmethod
+    def invalidate(cls, kb_id: str) -> None:
+        # 删除该 kb 的全部代缓存；switch_active 后调用，强制下次重解析 active generation。
         with cls._lock:
-            cls._engines.pop(doc_id, None)
+            stale_keys = [k for k in cls._engines if k[0] == kb_id]
+            for k in stale_keys:
+                del cls._engines[k]
 
 
+# 处理 rewrite node 相关逻辑。
 def rewrite_node(state: GraphState) -> dict:
     return QueryRewriteAgent.rewrite_query(state)
 
 
+# 校验 verify rewrite node 相关逻辑。
 def verify_rewrite_node(state: GraphState) -> dict:
     # 在检索前过滤语义漂移的 query rewrite。
     return RewriteVerifyAgent.verify_rewrites(state)
 
 
+# 处理 retrieve node 相关逻辑。
 def retrieve_node(state: GraphState) -> dict:
     original_query = state.get("query", "")
     doc_id = state.get("doc_id", "default")
@@ -71,27 +144,26 @@ def retrieve_node(state: GraphState) -> dict:
         if q not in queries:
             queries.append(q)
 
-    engine = RetrieverFactory.get_engine(doc_id)
-
     retrieved_docs = []
     seen_chunk_keys = set()
     settings = get_settings()
+    with kb_read_lease(doc_id):
+        engine = RetrieverFactory.get_engine(doc_id)
+        for query in queries:
+            docs = engine.search(query=query, top_k=settings.qa_retrieval_top_k)
+            for doc in docs:
+                meta = doc["meta"]
+                # 检索去重只认稳定 chunk_id。
+                chunk_key = meta["chunk_id"]
+                if chunk_key not in seen_chunk_keys:
+                    seen_chunk_keys.add(chunk_key)
 
-    for query in queries:
-        docs = engine.search(query=query, top_k=settings.qa_retrieval_top_k)
-        for doc in docs:
-            meta = doc["meta"]
-            # 检索去重只认稳定 chunk_id。
-            chunk_key = meta["chunk_id"]
-            if chunk_key not in seen_chunk_keys:
-                seen_chunk_keys.add(chunk_key)
-
-                if query != original_query:
-                    doc_copy = copy.deepcopy(doc)
-                    doc_copy.setdefault("retrieval", {})["rewrite_query"] = query
-                else:
-                    doc_copy = doc
-                retrieved_docs.append(doc_copy)
+                    if query != original_query:
+                        doc_copy = copy.deepcopy(doc)
+                        doc_copy.setdefault("retrieval", {})["rewrite_query"] = query
+                    else:
+                        doc_copy = doc
+                    retrieved_docs.append(doc_copy)
 
     log_event(
         "qa",
@@ -104,6 +176,7 @@ def retrieve_node(state: GraphState) -> dict:
     return {"retrieved_docs": retrieved_docs}
 
 
+# 处理 rerank node 相关逻辑。
 def rerank_node(state: GraphState) -> dict:
     query = state.get("query", "")
     docs = state.get("retrieved_docs", [])
@@ -126,6 +199,7 @@ def rerank_node(state: GraphState) -> dict:
     return {"reranked_docs": reranked_docs}
 
 
+# 处理 generate node 相关逻辑。
 def generate_node(state: GraphState) -> dict:
     query = state.get("query", "")
     is_local = state.get("is_local", False)
@@ -185,6 +259,7 @@ def generate_node(state: GraphState) -> dict:
     }
 
 
+# 处理 citation node 相关逻辑。
 def citation_node(state: GraphState) -> dict:
     answer = state.get("answer", "")
     final_docs = state.get("reranked_docs", [])
@@ -208,6 +283,7 @@ def citation_node(state: GraphState) -> dict:
     }
 
 
+# 处理 citation check 相关逻辑。
 def citation_check(state: GraphState) -> str:
     critique = state.get("critique", "")
     iteration_count = state.get("iteration_count", 0)

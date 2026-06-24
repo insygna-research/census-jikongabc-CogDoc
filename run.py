@@ -1,7 +1,9 @@
+import atexit
 import sys
 import os
 import re
 import signal
+
 try:
     import readline
 except ImportError:
@@ -18,7 +20,19 @@ from graph.workflow import UNKNOWN_RESPONSE
 from graph.subgraphs.qa import RetrieverFactory
 from observability.logger import configure_logging
 from service.chat_service import ChatEvent, ChatResult, run_chat
-from service.ingest_service import build_kb_index
+from service.ingest_service import (
+    build_kb_index_transactional,
+    cancel_all_timers,
+    drain_purge_queue,
+    stamp_index_build_version,
+)
+from service.mutation_journal import shared_mutation_journal
+from service.process_lock import (
+    acquire_single_instance_lock,
+    locking_supported,
+    release_single_instance_lock,
+    strict_single_process,
+)
 from agents.conversation_memory import (
     CHAT_HISTORY_MESSAGE_LIMIT,
     extract_final_answer,
@@ -34,6 +48,14 @@ FORCED_MODE_PATTERN = re.compile(
 rust_core = None
 
 
+# 释放 release runtime lock 相关逻辑。
+def _release_runtime_lock(lock_fh) -> None:
+    # 仅在后台 Timer 确已排空时显式释放锁；否则留给进程退出由 OS 释放，避免锁已放而旧线程仍在写。
+    if cancel_all_timers():
+        release_single_instance_lock(lock_fh)
+
+
+# 获取 get rust core 相关逻辑。
 def get_rust_core():
     global rust_core
     if rust_core is None:
@@ -41,6 +63,7 @@ def get_rust_core():
     return rust_core
 
 
+# 解析 parse forced mode 相关逻辑。
 def parse_forced_mode(user_input: str) -> tuple[str | None, str]:
     match = FORCED_MODE_PATTERN.match(user_input.strip())
     if not match:
@@ -48,6 +71,7 @@ def parse_forced_mode(user_input: str) -> tuple[str | None, str]:
     return match.group(1).lower(), (match.group(2) or "").strip()
 
 
+# 处理 safe print on interrupt 相关逻辑。
 def safe_print_on_interrupt(message: str) -> None:
     # 打印退出提示时临时忽略 SIGINT，避免 Ctrl+C 连按打断清理路径。
     previous_handler = signal.getsignal(signal.SIGINT)
@@ -58,6 +82,7 @@ def safe_print_on_interrupt(message: str) -> None:
         signal.signal(signal.SIGINT, previous_handler)
 
 
+# 写入索引 index is current 相关逻辑。
 def _index_is_current(doc_id: str, doc_dir: str, engine):
     # 任一路索引缺失都视为不可复用。
     if not (engine.vector_retriever.exists() and engine.bm25_retriever.exists()):
@@ -66,14 +91,18 @@ def _index_is_current(doc_id: str, doc_dir: str, engine):
         return False, None
 
     abs_dir = os.path.abspath(doc_dir)
-    current_manifest = stamp_chunk_identity_contract(
-        get_rust_core().scan_pdf_manifest_native(doc_id, abs_dir)
+    # 与入库同样 stamp 构建版本，否则仅改 parser/tokenizer/嵌入模型时 CLI 会误判索引仍有效。
+    current_manifest = stamp_index_build_version(
+        stamp_chunk_identity_contract(
+            get_rust_core().scan_pdf_manifest_native(doc_id, abs_dir)
+        )
     )
     return manifests_match(
         current_manifest, load_index_manifest(doc_id)
     ), current_manifest
 
 
+# 预热 warm up runtime 相关逻辑。
 def warm_up_runtime(engine) -> None:
     print("🧠 正在预热检索与重排模型，请稍候...")
     Embedder.get_model()
@@ -82,6 +111,7 @@ def warm_up_runtime(engine) -> None:
     print("✅ 模型与分词资源预热完成。")
 
 
+# 构建 build index 相关逻辑。
 def build_index(
     doc_id: str, doc_dir: str = DEFAULT_DOC_DIR, current_manifest: dict = None
 ):
@@ -94,7 +124,7 @@ def build_index(
         return
 
     print("📚 检测到静态索引缺失或过期，开始构建知识库多轨索引...")
-    result = build_kb_index(doc_id, doc_dir)
+    result = build_kb_index_transactional(doc_id, doc_dir)
     if result.document_count == 0:
         print(f"⚠️ 提示: 目录 【{doc_dir}】 当前为空，未检测到任何 PDF 文件。")
         return
@@ -105,6 +135,7 @@ def build_index(
     print("✅ 物理多轨索引构建成功并落盘，数据管线安全关闭。\n")
 
 
+# 输出 print final qa output 相关逻辑。
 def print_final_qa_output(subgraph_output: dict) -> None:
     final_docs = subgraph_output.get("reranked_docs", [])
 
@@ -138,6 +169,7 @@ def print_final_qa_output(subgraph_output: dict) -> None:
     print("=" * 50)
 
 
+# 输出 print final summary output 相关逻辑。
 def print_final_summary_output(subgraph_output: dict) -> None:
     summary_source = subgraph_output.get("summary_source", "")
     final_answer = subgraph_output.get("answer", "")
@@ -158,6 +190,7 @@ def print_final_summary_output(subgraph_output: dict) -> None:
     print("=" * 50)
 
 
+# 输出 print final compare output 相关逻辑。
 def print_final_compare_output(subgraph_output: dict) -> None:
     content = extract_final_answer("compare", subgraph_output)
 
@@ -169,12 +202,14 @@ def print_final_compare_output(subgraph_output: dict) -> None:
     print("=" * 50)
 
 
+# 输出 print final unknown output 相关逻辑。
 def print_final_unknown_output(subgraph_output: dict) -> None:
     content = extract_final_answer("unknown", subgraph_output) or UNKNOWN_RESPONSE
     print(f"\n🤖 [AI]: {content}")
     print("=" * 50)
 
 
+# 渲染 render chat event 相关逻辑。
 def render_chat_event(event: ChatEvent) -> ChatResult | None:
     if event.type == "router_decided":
         task = event.payload.get("task_type", "qa")
@@ -258,6 +293,7 @@ def render_chat_event(event: ChatEvent) -> ChatResult | None:
     return None
 
 
+# 处理 ask 相关逻辑。
 def ask(
     doc_id: str,
     query: str,
@@ -283,6 +319,7 @@ def ask(
     return []
 
 
+# 处理 main 相关逻辑。
 def main():
     # CLI 默认绑定一个本地知识库隔离域。
     configure_logging()
@@ -290,10 +327,28 @@ def main():
     TARGET_DOC_ID = settings.cogdoc_default_doc_id
     TARGET_DOC_DIR = settings.cogdoc_doc_dir
 
+    # CLI 与 API 共用同一把进程锁：CLI 会构建索引（写），不得与运行中的 API 实例并发写同一数据目录。
+    lock_fh = acquire_single_instance_lock()
+    if lock_fh is None and strict_single_process():
+        # 无锁可取或平台无 flock：fail-closed 拒绝启动，避免与其他实例并发写坏索引。逃生口 COGDOC_ALLOW_MULTI=1。
+        reason = (
+            "当前平台不支持进程锁，无法保证单实例"
+            if not locking_supported()
+            else "已有 CogDoc 实例（API 或 CLI）在运行"
+        )
+        print(f"❌ {reason}；如确需放行请设 COGDOC_ALLOW_MULTI=1。")
+        sys.exit(1)
+    atexit.register(_release_runtime_lock, lock_fh)
+
+    # 必须在任何构建前回放 journal：否则 CLI 构建新代会改 active，使上次崩溃遗留的 journal gen 不再是 active，API 后续恢复时把已提交的源文件误回滚。
+    shared_mutation_journal().recover_all()
+    drain_purge_queue()
+
     try:
         get_rust_core()
     except RuntimeError as exc:
         print(f"❌ {exc}")
+        _release_runtime_lock(lock_fh)
         sys.exit(1)
 
     engine = RetrieverFactory.get_engine(TARGET_DOC_ID)
@@ -305,6 +360,8 @@ def main():
         print(f"⚠️ 预检提示: 知识库 【{TARGET_DOC_ID}】 的本地索引缺失或已过期。")
         try:
             build_index(TARGET_DOC_ID, TARGET_DOC_DIR, current_manifest)
+            # build 后重取引擎：transactional build 会 invalidate 旧缓存，必须重新解析 active gen。
+            engine = RetrieverFactory.get_engine(TARGET_DOC_ID)
             if not (
                 engine.vector_retriever.exists() and engine.bm25_retriever.exists()
             ):
@@ -312,9 +369,11 @@ def main():
                 input(
                     "⚙️ 请在上述目标文件夹内放入 PDF 文档后，按回车键退出并重新拉起系统..."
                 )
+                _release_runtime_lock(lock_fh)
                 sys.exit(1)
         except Exception as e:
             print(f"❌ 自动化索引流构建失败: {e}")
+            _release_runtime_lock(lock_fh)
             sys.exit(1)
     else:
         print(f"✅ 知识库 【{TARGET_DOC_ID}】 索引与源PDF哈希指纹完全一致，无需重建。")
@@ -380,6 +439,8 @@ def main():
             break
         except Exception as e:
             print(f"⚠️ [控制台内部异常捕获]: {e}")
+
+    _release_runtime_lock(lock_fh)
 
 
 if __name__ == "__main__":

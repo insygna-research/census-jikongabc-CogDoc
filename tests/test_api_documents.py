@@ -7,37 +7,47 @@ from api.app import create_app
 from api.ingest import IndexJobManager, KnowledgeBaseRegistry
 
 
+# 指定异步测试后端。
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
 
 
+# 处理 ok ingest 相关逻辑。
 def _ok_ingest(kb_id, source_dir):
     return SimpleNamespace(document_count=1, chunk_count=3)
 
 
+# 构造 make app 相关逻辑。
 def _make_app(tmp_path, ingest_fn=_ok_ingest, monkeypatch=None):
     if monkeypatch is not None:
         import api.app as app_module
 
         monkeypatch.setattr(app_module, "configure_logging", lambda: None)
 
+    # 获取源文件 source dir for 相关逻辑。
     def source_dir_for(kb_id: str) -> str:
         return str(tmp_path / "kb" / kb_id / "sources")
 
     registry = KnowledgeBaseRegistry(
         registry_path=str(tmp_path / "registry.json"), source_dir_for=source_dir_for
     )
-    jobs = IndexJobManager(ingest_fn=ingest_fn, source_dir_for=source_dir_for)
+    jobs = IndexJobManager(
+        ingest_fn=ingest_fn,
+        source_dir_for=source_dir_for,
+        kb_exists=registry.exists,
+    )
     app = create_app(kb_registry=registry, index_jobs=jobs)
     return app, source_dir_for
 
 
+# 处理 client 相关逻辑。
 async def _client(app):
     transport = ASGITransport(app=app)
     return AsyncClient(transport=transport, base_url="http://testserver")
 
 
+# 等待 wait job 相关逻辑。
 async def _wait_job(client, job_id, timeout=2.0):
     deadline = time.time() + timeout
     resp = await client.get(f"/v1/index-jobs/{job_id}")
@@ -47,23 +57,46 @@ async def _wait_job(client, job_id, timeout=2.0):
     return resp
 
 
-def test_registry_recovers_from_corrupt_file(tmp_path):
+# 验证 registry corrupt quarantines and fails closed。
+def test_registry_corrupt_quarantines_and_fails_closed(tmp_path):
+    from api.ingest import RegistryCorruptError
+
     reg_path = tmp_path / "registry.json"
     reg_path.write_text("{ 半截损坏的 json", encoding="utf-8")
 
-    # 损坏的 registry 不应让构造（即 create_app 启动）抛异常。
+    # 损坏的 registry 不再静默退回空表（否则现存 KB 全消失、同名重建复用旧数据），而是隔离并 fail-closed 抛错。
+    with pytest.raises(RegistryCorruptError):
+        KnowledgeBaseRegistry(
+            registry_path=str(reg_path), source_dir_for=lambda kb: str(tmp_path / kb)
+        )
+    # 损坏文件被改名留存供人工恢复。
+    assert list(tmp_path.glob("registry.json.corrupt-*"))
+
+
+# 验证 create rolls back when lifecycle finalize fails。
+def test_create_rolls_back_when_lifecycle_finalize_fails(tmp_path, monkeypatch):
+    from api.ingest import KnowledgeBaseRegistry
+
+    source_dir = tmp_path / "kb" / "sources"
     registry = KnowledgeBaseRegistry(
-        registry_path=str(reg_path), source_dir_for=lambda kb: str(tmp_path / kb)
+        registry_path=str(tmp_path / "registry.json"),
+        source_dir_for=lambda _: str(source_dir),
     )
-    assert registry.list() == []
-
-    registry.create("kb1")
-    reloaded = KnowledgeBaseRegistry(
-        registry_path=str(reg_path), source_dir_for=lambda kb: str(tmp_path / kb)
+    monkeypatch.setattr(
+        "api.ingest.shared_lifecycle_store",
+        lambda: type(
+            "BrokenLifecycle",
+            (),
+            {"set": lambda *args: (_ for _ in ()).throw(OSError("disk"))},
+        )(),
     )
-    assert [r["kb_id"] for r in reloaded.list()] == ["kb1"]
+    with pytest.raises(OSError, match="disk"):
+        registry.create("kb")
+    assert not registry.exists("kb")
+    assert not source_dir.parent.exists()
 
 
+# 验证 create list get knowledge base。
 @pytest.mark.anyio
 async def test_create_list_get_knowledge_base(tmp_path, monkeypatch):
     app, _ = _make_app(tmp_path, monkeypatch=monkeypatch)
@@ -84,15 +117,17 @@ async def test_create_list_get_knowledge_base(tmp_path, monkeypatch):
     assert missing.status_code == 404 and missing.json()["error_code"] == "KB_NOT_FOUND"
 
 
+# 验证 delete knowledge base。
 @pytest.mark.anyio
 async def test_delete_knowledge_base(tmp_path, monkeypatch):
     import os
 
     app, source_dir_for = _make_app(tmp_path, monkeypatch=monkeypatch)
-    # 删库要清索引，打桩避免触碰真实 chroma/bm25。
     import api.routes.documents as docs_module
 
-    monkeypatch.setattr(docs_module, "delete_kb_index", lambda kb_id: None)
+    monkeypatch.setattr(
+        docs_module, "delete_kb_index_transactional", lambda kb_id: None
+    )
 
     async with app.router.lifespan_context(app):
         async with await _client(app) as client:
@@ -107,6 +142,33 @@ async def test_delete_knowledge_base(tmp_path, monkeypatch):
     assert missing.status_code == 404 and missing.json()["error_code"] == "KB_NOT_FOUND"
 
 
+# 验证 delete kb cleanup failure keeps kb。
+@pytest.mark.anyio
+async def test_delete_kb_cleanup_failure_keeps_kb(tmp_path, monkeypatch):
+    from service.ingest_service import KBCleanupError
+
+    app, _ = _make_app(tmp_path, monkeypatch=monkeypatch)
+    import api.routes.documents as docs_module
+
+    # 模拟失败路径。
+    def boom(kb_id):
+        raise KBCleanupError("部分代清理失败")
+
+    monkeypatch.setattr(docs_module, "delete_kb_index_transactional", boom)
+
+    async with app.router.lifespan_context(app):
+        async with await _client(app) as client:
+            await client.post("/v1/knowledge-bases", json={"kb_id": "kb"})
+            resp = await client.delete("/v1/knowledge-bases/kb")
+            after = await client.get("/v1/knowledge-bases")
+
+    # 清理失败：返回可重试错误，KB 仍存在于 registry。
+    assert resp.status_code == 500
+    assert resp.json()["error_code"] == "KB_CLEANUP_FAILED"
+    assert [kb["kb_id"] for kb in after.json()] == ["kb"]
+
+
+# 验证 create kb rejects overlong id。
 @pytest.mark.anyio
 async def test_create_kb_rejects_overlong_id(tmp_path, monkeypatch):
     app, _ = _make_app(tmp_path, monkeypatch=monkeypatch)
@@ -124,6 +186,7 @@ async def test_create_kb_rejects_overlong_id(tmp_path, monkeypatch):
     assert boundary.status_code == 201
 
 
+# 验证 upload triggers job until succeeded。
 @pytest.mark.anyio
 async def test_upload_triggers_job_until_succeeded(tmp_path, monkeypatch):
     app, source_dir_for = _make_app(tmp_path, monkeypatch=monkeypatch)
@@ -146,6 +209,7 @@ async def test_upload_triggers_job_until_succeeded(tmp_path, monkeypatch):
     assert os.path.exists(os.path.join(source_dir_for("kb"), "a.pdf"))
 
 
+# 验证 upload rejects bad inputs。
 @pytest.mark.anyio
 async def test_upload_rejects_bad_inputs(tmp_path, monkeypatch):
     app, _ = _make_app(tmp_path, monkeypatch=monkeypatch)
@@ -175,6 +239,7 @@ async def test_upload_rejects_bad_inputs(tmp_path, monkeypatch):
     )
 
 
+# 验证 upload rejects oversize。
 @pytest.mark.anyio
 async def test_upload_rejects_oversize(tmp_path, monkeypatch):
     app, _ = _make_app(tmp_path, monkeypatch=monkeypatch)
@@ -194,31 +259,50 @@ async def test_upload_rejects_oversize(tmp_path, monkeypatch):
     assert resp.status_code == 413 and resp.json()["error_code"] == "FILE_TOO_LARGE"
 
 
+# 验证 delete document and job not found。
 @pytest.mark.anyio
 async def test_delete_document_and_job_not_found(tmp_path, monkeypatch):
     app, source_dir_for = _make_app(tmp_path, monkeypatch=monkeypatch)
     async with app.router.lifespan_context(app):
         async with await _client(app) as client:
             await client.post("/v1/knowledge-bases", json={"kb_id": "kb"})
-            await client.post(
+            up = await client.post(
                 "/v1/knowledge-bases/kb/documents",
                 files={"file": ("a.pdf", b"%PDF-1.4 data", "application/pdf")},
             )
+            # 文件写入在 executor 内异步完成；等 upload job 结束后文件才落盘。
+            await _wait_job(client, up.json()["job_id"])
             deleted = await client.delete("/v1/knowledge-bases/kb/documents/a.pdf")
             delete_missing = await client.delete(
                 "/v1/knowledge-bases/kb/documents/ghost.pdf"
             )
             job_missing = await client.get("/v1/index-jobs/does-not-exist")
 
+    # delete_document 始终 202；文档不存在时 job 以 DOCUMENT_NOT_FOUND 状态失败。
     assert deleted.status_code == 202
-    assert delete_missing.status_code == 404
-    assert delete_missing.json()["error_code"] == "DOCUMENT_NOT_FOUND"
+    assert delete_missing.status_code == 202
     assert job_missing.status_code == 404
     assert job_missing.json()["error_code"] == "JOB_NOT_FOUND"
 
 
+# 验证 delete missing document job fails with not found。
+@pytest.mark.anyio
+async def test_delete_missing_document_job_fails_with_not_found(tmp_path, monkeypatch):
+    app, _ = _make_app(tmp_path, monkeypatch=monkeypatch)
+    async with app.router.lifespan_context(app):
+        async with await _client(app) as client:
+            await client.post("/v1/knowledge-bases", json={"kb_id": "kb"})
+            resp = await client.delete("/v1/knowledge-bases/kb/documents/ghost.pdf")
+            assert resp.status_code == 202
+            done = await _wait_job(client, resp.json()["job_id"])
+    assert done.json()["status"] == "failed"
+    assert done.json()["error_code"] == "DOCUMENT_NOT_FOUND"
+
+
+# 验证 ingest failure marks job failed。
 @pytest.mark.anyio
 async def test_ingest_failure_marks_job_failed(tmp_path, monkeypatch):
+    # 模拟失败路径。
     def boom(kb_id, source_dir):
         raise ValueError("解析崩了")
 

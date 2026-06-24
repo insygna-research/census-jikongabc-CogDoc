@@ -1,0 +1,707 @@
+import threading
+import pytest
+from unittest.mock import MagicMock, patch
+from api.ingest import IndexJobManager
+from service import ingest_service
+from service.ingest_service import delete_kb_index_transactional
+from service.kb_epoch import EpochStore
+from service.kb_state import KBState, StaleGenerationError
+
+
+# 构造 make state 相关逻辑。
+def _make_state(tmp_path, kb_id="kb"):
+    epochs = EpochStore(path=str(tmp_path / "epochs.json"))
+    return KBState(
+        kb_id, path=str(tmp_path / kb_id / "state.json"), epochs=epochs
+    ), epochs
+
+
+# ---- IndexJobManager：per-KB executor ----
+
+
+# 验证 different kbs get different executors。
+def test_different_kbs_get_different_executors():
+    mgr = IndexJobManager(
+        ingest_fn=lambda kb, d: MagicMock(document_count=0, chunk_count=0)
+    )
+    ex_a = mgr._get_executor("kb-a")
+    ex_b = mgr._get_executor("kb-b")
+    assert ex_a is not ex_b
+    mgr.shutdown()
+
+
+# 验证 same kb reuses executor。
+def test_same_kb_reuses_executor():
+    mgr = IndexJobManager(
+        ingest_fn=lambda kb, d: MagicMock(document_count=0, chunk_count=0)
+    )
+    ex1 = mgr._get_executor("kb-x")
+    ex2 = mgr._get_executor("kb-x")
+    assert ex1 is ex2
+    mgr.shutdown()
+
+
+# 验证 default ingest fn is transactional。
+def test_default_ingest_fn_is_transactional():
+    # 默认必须指向事务化构建，而非旧 build_kb_index。
+    mgr = IndexJobManager()
+    assert mgr._ingest_fn is ingest_service.build_kb_index_transactional
+    mgr.shutdown()
+
+
+# 验证 run blocking serializes behind submitted job。
+def test_run_blocking_serializes_behind_submitted_job():
+    # 同一 KB：先 submit 的 ingest 必须先完成，run_blocking 排在其后执行。
+    order = []
+    ingest_started = threading.Event()
+    proceed = threading.Event()
+
+    # 处理 slow ingest 相关逻辑。
+    def slow_ingest(kb_id, source_dir):
+        ingest_started.set()
+        proceed.wait()
+        order.append("ingest")
+        return MagicMock(document_count=1, chunk_count=1)
+
+    store = MagicMock()
+    store.get.return_value = {"kb_id": "kb", "status": "pending"}
+
+    mgr = IndexJobManager(
+        ingest_fn=slow_ingest,
+        source_dir_for=lambda kb: "/fake",
+        job_store=store,
+    )
+
+    mgr.submit("kb")
+    ingest_started.wait(timeout=2)  # ingest 已启动并阻塞在 proceed
+
+    result_holder = []
+    t = threading.Thread(
+        target=lambda: mgr.run_blocking("kb", lambda: result_holder.append("delete"))
+    )
+    t.start()
+
+    import time
+
+    time.sleep(0.03)  # 让 run_blocking 把 delete 排进队列
+    proceed.set()
+    t.join(timeout=2)
+    mgr.shutdown()
+
+    assert order == ["ingest"]
+    assert result_holder == ["delete"]
+
+
+# 验证 shutdown stops all executors。
+def test_shutdown_stops_all_executors():
+    mgr = IndexJobManager(
+        ingest_fn=lambda kb, d: MagicMock(document_count=0, chunk_count=0)
+    )
+    mgr._get_executor("kb-a")
+    mgr._get_executor("kb-b")
+    assert len(mgr._executors) == 2
+    mgr.shutdown()
+    assert len(mgr._executors) == 0
+
+
+# ---- delete_kb_index_transactional ----
+
+
+# 验证 delete transactional bumps epoch。
+def test_delete_transactional_bumps_epoch(tmp_path):
+    epochs = EpochStore(path=str(tmp_path / "epochs.json"))
+    mock_state = MagicMock()
+    mock_state.generation_ids.return_value = []
+
+    with (
+        patch("service.ingest_service.shared_epoch_store", return_value=epochs),
+        patch("service.ingest_service.KBState", return_value=mock_state),
+        patch("service.ingest_service._schedule_kb_purge"),
+        patch("service.ingest_service._remove_manifest"),
+        patch("service.ingest_service.RetrieverFactory"),
+    ):
+        delete_kb_index_transactional("kb-del")
+
+    assert epochs.current("kb-del") == 1
+
+
+# 验证 delete schedules purge for all generations。
+def test_delete_schedules_purge_for_all_generations(tmp_path):
+    # 物理清理延迟到 grace period：删库只调度，不同步删 Chroma/BM25（保护在途检索）。
+    epochs = EpochStore(path=str(tmp_path / "epochs.json"))
+    mock_state = MagicMock()
+    mock_state.generation_ids.return_value = ["g1", "g2"]
+    scheduled = []
+
+    with (
+        patch("service.ingest_service.shared_epoch_store", return_value=epochs),
+        patch("service.ingest_service.KBState", return_value=mock_state),
+        patch(
+            "service.ingest_service._schedule_kb_purge",
+            side_effect=lambda kb, gids: scheduled.extend(gids),
+        ),
+        patch("service.ingest_service._remove_manifest"),
+        patch("service.ingest_service.RetrieverFactory"),
+    ):
+        delete_kb_index_transactional("kb-del")
+
+    assert set(scheduled) == {"g1", "g2"}
+
+
+# 验证 delete transactional invalidates engine cache。
+def test_delete_transactional_invalidates_engine_cache(tmp_path):
+    epochs = EpochStore(path=str(tmp_path / "epochs.json"))
+    mock_state = MagicMock()
+    mock_state.generation_ids.return_value = []
+    mock_factory = MagicMock()
+
+    with (
+        patch("service.ingest_service.shared_epoch_store", return_value=epochs),
+        patch("service.ingest_service.KBState", return_value=mock_state),
+        patch("service.ingest_service._schedule_kb_purge"),
+        patch("service.ingest_service._remove_manifest"),
+        patch("service.ingest_service.RetrieverFactory", mock_factory),
+    ):
+        delete_kb_index_transactional("kb-del")
+
+    mock_factory.invalidate.assert_called_once_with("kb-del")
+
+
+# 验证 delete does not raise when purge deferred。
+def test_delete_does_not_raise_when_purge_deferred(tmp_path):
+    # 物理清理改为异步 best-effort：删库本身不再因 Chroma 失败同步抛 KBCleanupError。
+    epochs = EpochStore(path=str(tmp_path / "epochs.json"))
+    mock_state = MagicMock()
+    mock_state.generation_ids.return_value = ["g1"]
+
+    with (
+        patch("service.ingest_service.shared_epoch_store", return_value=epochs),
+        patch("service.ingest_service.KBState", return_value=mock_state),
+        patch("service.ingest_service._schedule_kb_purge"),
+        patch("service.ingest_service._remove_manifest"),
+        patch("service.ingest_service.RetrieverFactory"),
+    ):
+        delete_kb_index_transactional("kb-del")  # 不抛错
+
+
+# 验证 drain purge queue retries and dequeues on success。
+def test_drain_purge_queue_retries_and_dequeues_on_success(tmp_path, monkeypatch):
+    # 持久 purge 队列：到期条目清理成功才出队，失败保留待下一轮重试。
+    from service.purge_queue import PurgeQueue
+
+    q = PurgeQueue(path=str(tmp_path / "pq.json"))
+    monkeypatch.setattr("service.ingest_service.shared_purge_queue", lambda: q)
+    q.add("kb", "g1", not_before=0)
+    q.add("kb", "g2", not_before=0)
+
+    calls = []
+
+    # 清理 purge 相关逻辑。
+    def purge(kb, gid):
+        calls.append(gid)
+        if gid == "g1":
+            raise RuntimeError("chroma down")  # g1 失败保留
+
+    monkeypatch.setattr("service.ingest_service._purge_generation_external", purge)
+    done = ingest_service.drain_purge_queue(now=100)
+
+    assert done == 1  # 仅 g2 成功出队
+    assert set(calls) == {"g1", "g2"}
+    remaining = {i["gen_id"] for i in q.due(now=100)}
+    assert remaining == {"g1"}
+
+
+# 验证 drain purge queue skips not yet due。
+def test_drain_purge_queue_skips_not_yet_due(tmp_path, monkeypatch):
+    # 未过 grace period 的条目不清理。
+    from service.purge_queue import PurgeQueue
+
+    q = PurgeQueue(path=str(tmp_path / "pq.json"))
+    monkeypatch.setattr("service.ingest_service.shared_purge_queue", lambda: q)
+    q.add("kb", "g1", not_before=1000)
+    called = []
+    monkeypatch.setattr(
+        "service.ingest_service._purge_generation_external",
+        lambda kb, gid: called.append(gid),
+    )
+    assert ingest_service.drain_purge_queue(now=10) == 0
+    assert called == []
+
+
+# 验证 delete transactional rejects inflight staging。
+def test_delete_transactional_rejects_inflight_staging(tmp_path):
+    # epoch 自增后，在途 staging 的 switch_active 因 base_epoch 不符被拒。
+    state, epochs = _make_state(tmp_path, "kb-del")
+    gen_id = state.begin_generation("m", "v")
+    state.mark_ready(gen_id, expected_count=1, documents=[])
+
+    with (
+        patch("service.ingest_service.shared_epoch_store", return_value=epochs),
+        patch("service.ingest_service.KBState", return_value=state),
+        patch("service.ingest_service._schedule_kb_purge"),
+        patch("service.ingest_service._remove_manifest"),
+        patch("service.ingest_service.RetrieverFactory"),
+    ):
+        delete_kb_index_transactional("kb-del")
+
+    with pytest.raises(StaleGenerationError):
+        state.switch_active(gen_id)
+
+
+# 验证 delete nonempty kb with active generation succeeds。
+def test_delete_nonempty_kb_with_active_generation_succeeds(tmp_path):
+    # 回归：含 active generation 的正常 KB 删库不得因 remove_generation 拒删 active 而误报失败。
+    state, epochs = _make_state(tmp_path, "kb-live")
+    gen_id = state.begin_generation("m", "v")
+    state.mark_ready(gen_id, expected_count=1, documents=[])
+    state.switch_active(gen_id)
+    assert state.active() is not None
+
+    removed = []
+    with (
+        patch("service.ingest_service.shared_epoch_store", return_value=epochs),
+        patch("service.ingest_service.KBState", return_value=state),
+        patch("service.ingest_service._schedule_kb_purge"),
+        patch(
+            "service.ingest_service._remove_manifest",
+            side_effect=lambda kb: removed.append(kb),
+        ),
+        patch("service.ingest_service.RetrieverFactory"),
+    ):
+        delete_kb_index_transactional("kb-live")  # 不应抛 KBCleanupError
+
+    assert removed == ["kb-live"]
+
+
+# 验证 submit compat path aborts on stale epoch。
+def test_submit_compat_path_aborts_on_stale_epoch(tmp_path, monkeypatch):
+    # submit() 兼容路径同样受 epoch 守卫：删库 bump 后入队的旧任务必须放弃构建。
+    from api.persistence import InMemoryJobStore
+
+    epochs = EpochStore(path=str(tmp_path / "ep.json"))
+    monkeypatch.setattr("api.ingest.shared_epoch_store", lambda: epochs)
+
+    store = InMemoryJobStore()
+    called = []
+
+    # 处理 track ingest 相关逻辑。
+    def track_ingest(kb_id, d):
+        called.append(1)
+        return MagicMock(document_count=0, chunk_count=0)
+
+    mgr = IndexJobManager(
+        ingest_fn=track_ingest, source_dir_for=lambda kb: str(tmp_path), job_store=store
+    )
+    gate = threading.Event()
+    mgr._get_executor("kb").submit(gate.wait)
+    job = mgr.submit("kb")  # base_epoch=0
+    epochs.bump("kb")
+    gate.set()
+    mgr.run_blocking("kb", lambda: None)
+    mgr.shutdown()
+
+    assert called == []
+    assert store.get(job["job_id"])["status"] == "failed"
+
+
+# 验证 run blocking rejects same kb executor thread。
+def test_run_blocking_rejects_same_kb_executor_thread():
+    # run_blocking 从同 KB executor 线程内调用会自等待死锁，必须运行时拒绝。
+    mgr = IndexJobManager(
+        ingest_fn=lambda kb, d: MagicMock(document_count=0, chunk_count=0)
+    )
+    captured = {}
+    done = threading.Event()
+
+    # 处理 reenter 相关逻辑。
+    def reenter():
+        try:
+            mgr.run_blocking("kb", lambda: None)
+        except Exception as exc:
+            captured["err"] = exc
+        finally:
+            done.set()
+
+    mgr._get_executor("kb").submit(reenter)
+    done.wait(timeout=2)
+    mgr.shutdown()
+    assert isinstance(captured.get("err"), RuntimeError)
+
+
+# ---- IndexJobManager：submit_upload / submit_delete_doc ----
+
+
+# 验证 submit upload writes file before ingest。
+def test_submit_upload_writes_file_before_ingest(tmp_path):
+    # 文件写入与 ingest 必须在同一 executor command 内，ingest 时文件已落盘。
+    seen_files = []
+
+    # 处理 capture ingest 相关逻辑。
+    def capture_ingest(kb_id, source_dir):
+        import os
+
+        seen_files.extend(os.listdir(source_dir))
+        return MagicMock(document_count=1, chunk_count=1)
+
+    source_dir = str(tmp_path / "sources")
+    mgr = IndexJobManager(
+        ingest_fn=capture_ingest, source_dir_for=lambda kb: source_dir
+    )
+    job = mgr.submit_upload("kb", source_dir, "a.pdf", b"%PDF content")
+    # 阻塞等 executor 完成；通过 run_blocking 排在同 KB 队尾
+    mgr.run_blocking("kb", lambda: None)
+    mgr.shutdown()
+
+    assert job["job_id"]
+    assert "a.pdf" in seen_files
+
+
+# 验证 submit delete doc missing file job fails。
+def test_submit_delete_doc_missing_file_job_fails(tmp_path):
+    # 文件不存在时 submit_delete_doc 仍返回 job；executor 执行时检测，job 以 DOCUMENT_NOT_FOUND 失败。
+    from api.persistence import InMemoryJobStore
+
+    store = InMemoryJobStore()
+    mgr = IndexJobManager(
+        ingest_fn=lambda kb, d: MagicMock(document_count=0, chunk_count=0),
+        job_store=store,
+    )
+    job = mgr.submit_delete_doc("kb", str(tmp_path / "nonexistent.pdf"))
+    assert job is not None
+    # 等 executor 跑完
+    mgr.run_blocking("kb", lambda: None)
+    mgr.shutdown()
+    record = store.get(job["job_id"])
+    assert record["status"] == "failed"
+    assert record["error_code"] == "DOCUMENT_NOT_FOUND"
+
+
+# 验证 submit delete doc removes file before ingest。
+def test_submit_delete_doc_removes_file_before_ingest(tmp_path):
+    source_dir = str(tmp_path / "sources")
+    import os
+
+    os.makedirs(source_dir)
+    path = os.path.join(source_dir, "a.pdf")
+    with open(path, "wb") as f:
+        f.write(b"%PDF content")
+
+    seen_files = []
+
+    # 处理 capture ingest 相关逻辑。
+    def capture_ingest(kb_id, source_dir):
+        seen_files.extend(os.listdir(source_dir))
+        return MagicMock(document_count=0, chunk_count=0)
+
+    mgr = IndexJobManager(
+        ingest_fn=capture_ingest, source_dir_for=lambda kb: source_dir
+    )
+    job = mgr.submit_delete_doc("kb", path)
+    mgr.run_blocking("kb", lambda: None)
+    mgr.shutdown()
+
+    assert job is not None
+    assert "a.pdf" not in seen_files
+    assert not os.path.exists(path)
+
+
+# ---- 构建失败回滚源文件 ----
+
+
+# _boom_ingest：处理对应功能。
+def _boom_ingest(kb_id, source_dir):
+    raise ValueError("build failed")
+
+
+# 验证 upload build failure restores old file。
+def test_upload_build_failure_restores_old_file(tmp_path):
+    # 覆盖上传：构建失败时旧文件内容必须恢复，备份清理。
+    import os
+    from api.persistence import InMemoryJobStore
+
+    source_dir = str(tmp_path / "sources")
+    os.makedirs(source_dir)
+    dest = os.path.join(source_dir, "a.pdf")
+    with open(dest, "wb") as f:
+        f.write(b"OLD")
+
+    store = InMemoryJobStore()
+    mgr = IndexJobManager(
+        ingest_fn=_boom_ingest, source_dir_for=lambda kb: source_dir, job_store=store
+    )
+    job = mgr.submit_upload("kb", source_dir, "a.pdf", b"NEW")
+    mgr.run_blocking("kb", lambda: None)
+    mgr.shutdown()
+
+    with open(dest, "rb") as f:
+        assert f.read() == b"OLD"
+    assert not os.path.exists(dest + ".cogdoc-bak")
+    assert store.get(job["job_id"])["status"] == "failed"
+
+
+# 验证 upload build failure removes new file。
+def test_upload_build_failure_removes_new_file(tmp_path):
+    # 新增上传：构建失败时新文件必须删除，回到上传前状态。
+    import os
+    from api.persistence import InMemoryJobStore
+
+    source_dir = str(tmp_path / "sources")
+    store = InMemoryJobStore()
+    mgr = IndexJobManager(
+        ingest_fn=_boom_ingest, source_dir_for=lambda kb: source_dir, job_store=store
+    )
+    job = mgr.submit_upload("kb", source_dir, "a.pdf", b"NEW")
+    mgr.run_blocking("kb", lambda: None)
+    mgr.shutdown()
+
+    assert not os.path.exists(os.path.join(source_dir, "a.pdf"))
+    assert store.get(job["job_id"])["status"] == "failed"
+
+
+# 验证 delete doc build failure restores file。
+def test_delete_doc_build_failure_restores_file(tmp_path):
+    # 删文档：构建失败时被删文件必须从隔离区恢复。
+    import os
+    from api.persistence import InMemoryJobStore
+
+    source_dir = str(tmp_path / "sources")
+    os.makedirs(source_dir)
+    path = os.path.join(source_dir, "a.pdf")
+    with open(path, "wb") as f:
+        f.write(b"DOC")
+
+    store = InMemoryJobStore()
+    mgr = IndexJobManager(
+        ingest_fn=_boom_ingest, source_dir_for=lambda kb: source_dir, job_store=store
+    )
+    job = mgr.submit_delete_doc("kb", path)
+    mgr.run_blocking("kb", lambda: None)
+    mgr.shutdown()
+
+    assert os.path.exists(path)
+    with open(path, "rb") as f:
+        assert f.read() == b"DOC"
+    assert not os.path.exists(path + ".cogdoc-bak")
+    assert store.get(job["job_id"])["status"] == "failed"
+
+
+# ---- epoch 守卫：删库后重建 incarnation 安全 ----
+
+
+# 验证 upload stale epoch aborts。
+def test_upload_stale_epoch_aborts(tmp_path, monkeypatch):
+    # 提交后、执行前 epoch 被 bump（模拟删库）：陈旧上传放弃，不调用 ingest、不写文件。
+    import os
+    from api.persistence import InMemoryJobStore
+
+    epochs = EpochStore(path=str(tmp_path / "ep.json"))
+    monkeypatch.setattr("api.ingest.shared_epoch_store", lambda: epochs)
+
+    source_dir = str(tmp_path / "sources")
+    store = InMemoryJobStore()
+    called = []
+
+    # 处理 track ingest 相关逻辑。
+    def track_ingest(kb_id, d):
+        called.append(1)
+        return MagicMock(document_count=0, chunk_count=0)
+
+    mgr = IndexJobManager(
+        ingest_fn=track_ingest, source_dir_for=lambda kb: source_dir, job_store=store
+    )
+    gate = threading.Event()
+    # 占住单线程 executor，保证 upload 入队后、执行前能 bump epoch
+    mgr._get_executor("kb").submit(gate.wait)
+    job = mgr.submit_upload("kb", source_dir, "a.pdf", b"NEW")  # base_epoch=0
+    epochs.bump("kb")  # 模拟删库：epoch 0→1
+    gate.set()
+    mgr.run_blocking("kb", lambda: None)
+    mgr.shutdown()
+
+    assert called == []
+    assert not os.path.exists(os.path.join(source_dir, "a.pdf"))
+    rec = store.get(job["job_id"])
+    assert rec["status"] == "failed"
+    assert "已被删除或重建" in rec["message"]
+
+
+# ---- _closed 与上限保护 ----
+
+
+# 验证 get executor raises after shutdown。
+def test_get_executor_raises_after_shutdown():
+    mgr = IndexJobManager(
+        ingest_fn=lambda kb, d: MagicMock(document_count=0, chunk_count=0)
+    )
+    mgr.shutdown()
+    with pytest.raises(RuntimeError, match="closed"):
+        mgr._get_executor("kb")
+
+
+# 验证 get executor raises at max limit。
+def test_get_executor_raises_at_max_limit():
+    from api.ingest import _MAX_KB_EXECUTORS
+
+    mgr = IndexJobManager(
+        ingest_fn=lambda kb, d: MagicMock(document_count=0, chunk_count=0)
+    )
+    for i in range(_MAX_KB_EXECUTORS):
+        mgr._get_executor(f"kb-{i}")
+    with pytest.raises(RuntimeError, match="上限"):
+        mgr._get_executor("kb-overflow")
+    mgr.shutdown()
+
+
+# 验证 release executor frees slot。
+def test_release_executor_frees_slot():
+    # 删库后释放 executor 槽位，同 kb_id 可再次创建新 executor。
+    from api.ingest import _MAX_KB_EXECUTORS
+
+    mgr = IndexJobManager(
+        ingest_fn=lambda kb, d: MagicMock(document_count=0, chunk_count=0)
+    )
+    for i in range(_MAX_KB_EXECUTORS):
+        mgr._get_executor(f"kb-{i}")
+    # 上限已满；释放一个槽位后应能创建新 executor。
+    mgr.release_executor("kb-0")
+    ex_new = mgr._get_executor("kb-new")
+    assert ex_new is not None
+    mgr.shutdown()
+
+
+# 验证 upload aborted when kb deleted。
+def test_upload_aborted_when_kb_deleted(tmp_path):
+    # kb_exists 在 executor command 内再次检查：标志在入队前已置 False 模拟删库完成后的状态。
+    from api.persistence import InMemoryJobStore
+
+    store = InMemoryJobStore()
+    kb_deleted = [True]  # 直接置 True，保证 _run_with_write 检查时看到 KB 已删
+    mgr = IndexJobManager(
+        ingest_fn=lambda kb, d: MagicMock(document_count=1, chunk_count=1),
+        source_dir_for=lambda kb: str(tmp_path / kb / "sources"),
+        job_store=store,
+        kb_exists=lambda kb: not kb_deleted[0],
+    )
+    source_dir = str(tmp_path / "kb" / "sources")
+    job = mgr.submit_upload("kb", source_dir, "a.pdf", b"%PDF content")
+    mgr.run_blocking("kb", lambda: None)
+    mgr.shutdown()
+    record = store.get(job["job_id"])
+    assert record["status"] == "failed"
+    assert "已被删除" in record["message"]
+
+
+# ---- #8 lifecycle / tombstone 读写门控 ----
+
+
+# 验证 get engine returns empty when deleting。
+def test_get_engine_returns_empty_when_deleting(monkeypatch):
+    # 删库进行中：get_engine 短路返回空引擎，不构造读取正在拆除的代。
+    from graph.subgraphs.qa import RetrieverFactory
+    from tools.retriever.hybrid import HybridRetriever
+    from service.kb_lifecycle import shared_lifecycle_store, LIFECYCLE_DELETING
+
+    shared_lifecycle_store().set("kb-del", LIFECYCLE_DELETING)
+    called = []
+    monkeypatch.setattr(
+        RetrieverFactory,
+        "_build_engine",
+        classmethod(lambda cls, k, g: called.append(1)),
+    )
+    engine = RetrieverFactory.get_engine("kb-del")
+    assert called == []
+    assert isinstance(engine, HybridRetriever)
+
+
+# 验证 mutation rejected when deleting。
+def test_mutation_rejected_when_deleting(tmp_path):
+    # 删库进行中：新上传任务被 _stale 拦下并标记失败，不写文件不构建。
+    from api.persistence import InMemoryJobStore
+    from service.kb_lifecycle import shared_lifecycle_store, LIFECYCLE_DELETING
+    import os
+
+    shared_lifecycle_store().set("kb", LIFECYCLE_DELETING)
+    store = InMemoryJobStore()
+    called = []
+    mgr = IndexJobManager(
+        ingest_fn=lambda k, d: (
+            called.append(1) or MagicMock(document_count=0, chunk_count=0)
+        ),
+        source_dir_for=lambda kb: str(tmp_path),
+        job_store=store,
+    )
+    job = mgr.submit_upload("kb", str(tmp_path), "a.pdf", b"%PDF")
+    mgr.run_blocking("kb", lambda: None)
+    mgr.shutdown()
+
+    assert called == []
+    assert not os.path.exists(os.path.join(str(tmp_path), "a.pdf"))
+    assert store.get(job["job_id"])["status"] == "failed"
+
+
+# 验证 create resets lifecycle to active。
+def test_create_resets_lifecycle_to_active(tmp_path):
+    # 重建同名 KB：清除 deleted tombstone，恢复 active 可读写。
+    from api.ingest import KnowledgeBaseRegistry
+    from service.kb_lifecycle import (
+        shared_lifecycle_store,
+        LIFECYCLE_DELETED,
+        LIFECYCLE_ACTIVE,
+    )
+
+    shared_lifecycle_store().set("kb", LIFECYCLE_DELETED)
+    reg = KnowledgeBaseRegistry(
+        registry_path=str(tmp_path / "r.json"),
+        source_dir_for=lambda k: str(tmp_path / k / "src"),
+    )
+    reg.create("kb")
+    assert shared_lifecycle_store().status("kb") == LIFECYCLE_ACTIVE
+
+
+# 验证 delete transactional sets deleting。
+def test_delete_transactional_sets_deleting(tmp_path):
+    # delete_kb_index_transactional 一进入即落 deleting 门控读路径。
+    from service.kb_lifecycle import shared_lifecycle_store, LIFECYCLE_DELETING
+
+    epochs = EpochStore(path=str(tmp_path / "ep.json"))
+    mock_state = MagicMock()
+    mock_state.generation_ids.return_value = []
+    with (
+        patch("service.ingest_service.shared_epoch_store", return_value=epochs),
+        patch("service.ingest_service.KBState", return_value=mock_state),
+        patch("service.ingest_service._schedule_kb_purge"),
+        patch("service.ingest_service._remove_manifest"),
+        patch("service.ingest_service.RetrieverFactory"),
+    ):
+        delete_kb_index_transactional("kb-del")
+    assert shared_lifecycle_store().status("kb-del") == LIFECYCLE_DELETING
+
+
+# ---- #5 journal 在正常/失败路径都清空 ----
+
+
+# 验证 successful upload clears journal。
+def test_successful_upload_clears_journal(tmp_path):
+    from service.mutation_journal import shared_mutation_journal
+
+    source_dir = str(tmp_path / "src")
+    mgr = IndexJobManager(
+        ingest_fn=lambda k, d: MagicMock(document_count=1, chunk_count=1),
+        source_dir_for=lambda kb: source_dir,
+    )
+    mgr.submit_upload("kb", source_dir, "a.pdf", b"%PDF")
+    mgr.run_blocking("kb", lambda: None)
+    mgr.shutdown()
+    assert shared_mutation_journal().recover_all() == []
+
+
+# 验证 failed upload clears journal。
+def test_failed_upload_clears_journal(tmp_path):
+    from service.mutation_journal import shared_mutation_journal
+
+    source_dir = str(tmp_path / "src")
+    mgr = IndexJobManager(ingest_fn=_boom_ingest, source_dir_for=lambda kb: source_dir)
+    mgr.submit_upload("kb", source_dir, "a.pdf", b"%PDF")
+    mgr.run_blocking("kb", lambda: None)
+    mgr.shutdown()
+    assert shared_mutation_journal().recover_all() == []

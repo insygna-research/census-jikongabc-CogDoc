@@ -196,9 +196,7 @@ async def test_list_and_delete_sessions(monkeypatch):
                 "/v1/chat", json={"query": "另一问", "doc_id": "kb", "session_id": "s2"}
             )
             listed = await client.get("/v1/sessions", params={"doc_id": "kb"})
-            deleted = await client.delete(
-                "/v1/sessions/s1", params={"doc_id": "kb"}
-            )
+            deleted = await client.delete("/v1/sessions/s1", params={"doc_id": "kb"})
             after = await client.get("/v1/sessions", params={"doc_id": "kb"})
 
     sessions = listed.json()["sessions"]

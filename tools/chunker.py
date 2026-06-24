@@ -9,6 +9,7 @@ from tools.chunk_identity import (
 )
 
 
+# 切分 chunk paper 相关逻辑。
 def chunk_paper(
     parsed_pages: List[ParsedPage],
     source_sha256: str = "",
@@ -53,6 +54,7 @@ def chunk_paper(
     # local_chunk_index 只在单个 PDF 内递增，参与稳定 chunk_id。
     local_chunk_index = 0
 
+    # 查找 find page by pos 相关逻辑。
     def find_page_by_pos(pos: int) -> int:
         idx = bisect.bisect_right(page_starts, pos) - 1
         return page_nums[max(0, idx)]
@@ -81,7 +83,9 @@ def chunk_paper(
         if len(chunk_text) > MIN_CHUNK_CHARS:
             p_start = find_page_by_pos(start_idx)
             p_end = find_page_by_pos(end_idx - 1)
-            chunk_id = build_chunk_id(source_sha256, p_start, p_end, local_chunk_index)
+            chunk_id = build_chunk_id(
+                source_sha256, source_name, p_start, p_end, local_chunk_index
+            )
 
             chunks.append(
                 {

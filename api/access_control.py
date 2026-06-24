@@ -66,7 +66,9 @@ def _reject(code: ErrorCode, message: str) -> JSONResponse:
 
 class AccessControlMiddleware(BaseHTTPMiddleware):
     # 统一入口的鉴权 + 限流：先校验 API key，再按身份限流，最后放行到路由。
-    def __init__(self, app, *, api_keys: set[str], rate_limiter: TokenBucketRateLimiter):
+    def __init__(
+        self, app, *, api_keys: set[str], rate_limiter: TokenBucketRateLimiter
+    ):
         super().__init__(app)
         self._api_keys = api_keys
         self._limiter = rate_limiter

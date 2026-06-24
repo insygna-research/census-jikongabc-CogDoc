@@ -6,19 +6,22 @@ from agents.source_resolver import resolve_compare_sources
 from graph.state import GraphState
 from graph.subgraphs.qa import RetrieverFactory
 from observability.logger import log_event
+from service.kb_readers import kb_read_lease
 from tools.document_loader import select_sources_for_compare
 
 
 LOCAL_COMPARE_MAX_SOURCES = 2
 
 
+# 处理 document loader node 相关逻辑。
 def document_loader_node(state: GraphState) -> dict:
     # Compare MVP 只处理用户显式点名的多文档对比。
     query = state.get("query", "")
     doc_id = state.get("doc_id", "default")
     is_local = state.get("is_local", False)
-    engine = RetrieverFactory.get_engine(doc_id)
-    sources = engine.list_sources()
+    with kb_read_lease(doc_id):
+        engine = RetrieverFactory.get_engine(doc_id)
+        sources = engine.list_sources()
     selected_sources = select_sources_for_compare(query, sources)
 
     resolution_trace = []
@@ -83,10 +86,12 @@ def document_loader_node(state: GraphState) -> dict:
         return result
 
     docs_by_source = {}
-    for source in selected_sources:
-        docs = engine.load_source_chunks(source)
-        if docs:
-            docs_by_source[source] = docs
+    with kb_read_lease(doc_id):
+        engine = RetrieverFactory.get_engine(doc_id)
+        for source in selected_sources:
+            docs = engine.load_source_chunks(source)
+            if docs:
+                docs_by_source[source] = docs
 
     if len(docs_by_source) < 2:
         loaded_sources = "，".join(docs_by_source.keys()) if docs_by_source else "无"
@@ -138,6 +143,7 @@ def document_loader_node(state: GraphState) -> dict:
     return result
 
 
+# 处理 document profile node 相关逻辑。
 def document_profile_node(state: GraphState) -> dict:
     try:
         return DocumentProfileAgent.build_profiles(state)
@@ -172,20 +178,24 @@ def document_profile_node(state: GraphState) -> dict:
         return result
 
 
+# 处理 compare table node 相关逻辑。
 def compare_table_node(state: GraphState) -> dict:
     return CompareGeneratorAgent.build_compare_answer(state)
 
 
+# 处理 citation node 相关逻辑。
 def citation_node(state: GraphState) -> dict:
     return CompareGeneratorAgent.validate_compare_answer(state)
 
 
+# 处理 document loader check 相关逻辑。
 def document_loader_check(state: GraphState) -> str:
     if len(state.get("compare_docs_by_source", {})) < 2:
         return END
     return "document_profile_node"
 
 
+# 处理 document profile check 相关逻辑。
 def document_profile_check(state: GraphState) -> str:
     if not state.get("document_profiles"):
         return END

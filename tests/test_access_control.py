@@ -108,9 +108,7 @@ async def test_startup_warns_when_auth_disabled(monkeypatch):
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
     events = []
-    monkeypatch.setattr(
-        app_module, "log_event", lambda *a, **k: events.append((a, k))
-    )
+    monkeypatch.setattr(app_module, "log_event", lambda *a, **k: events.append((a, k)))
     app = _app(monkeypatch, api_keys=set())
     async with app.router.lifespan_context(app):
         pass
@@ -124,9 +122,7 @@ async def test_no_startup_warning_when_auth_enabled(monkeypatch):
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
     events = []
-    monkeypatch.setattr(
-        app_module, "log_event", lambda *a, **k: events.append((a, k))
-    )
+    monkeypatch.setattr(app_module, "log_event", lambda *a, **k: events.append((a, k)))
     app = _app(monkeypatch, api_keys={"secret"})
     async with app.router.lifespan_context(app):
         pass
@@ -214,8 +210,7 @@ async def test_job_polling_exempt_from_rate_limit(monkeypatch):
     async with app.router.lifespan_context(app):
         async with await _client(app) as c:
             statuses = [
-                (await c.get("/v1/index-jobs/whatever")).status_code
-                for _ in range(10)
+                (await c.get("/v1/index-jobs/whatever")).status_code for _ in range(10)
             ]
     # 全部 404（job 不存在）而非 429，证明没走限流。
     assert all(code == 404 for code in statuses)
@@ -242,15 +237,9 @@ async def test_rate_limit_is_per_key(monkeypatch):
     async with app.router.lifespan_context(app):
         async with await _client(app) as c:
             body = {"query": "q", "doc_id": "kb"}
-            k1_first = await c.post(
-                "/v1/chat", json=body, headers={"X-API-Key": "k1"}
-            )
-            k1_second = await c.post(
-                "/v1/chat", json=body, headers={"X-API-Key": "k1"}
-            )
-            k2_first = await c.post(
-                "/v1/chat", json=body, headers={"X-API-Key": "k2"}
-            )
+            k1_first = await c.post("/v1/chat", json=body, headers={"X-API-Key": "k1"})
+            k1_second = await c.post("/v1/chat", json=body, headers={"X-API-Key": "k1"})
+            k2_first = await c.post("/v1/chat", json=body, headers={"X-API-Key": "k2"})
     assert k1_first.status_code == 200
     assert k1_second.status_code == 429
     # 另一个 key 的额度独立，不受 k1 耗尽影响。

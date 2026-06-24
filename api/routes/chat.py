@@ -111,7 +111,9 @@ async def session_history(
     # 前端刷新后凭 URL 里的 session_id 拉回多轮历史；会话态仍在内存（服务存活期内）。
     kb_id = doc_id or get_settings().cogdoc_default_doc_id
     messages = request.app.state.session_store.get_display(kb_id, session_id)
-    return SessionHistoryResponse(session_id=session_id, doc_id=kb_id, messages=messages)
+    return SessionHistoryResponse(
+        session_id=session_id, doc_id=kb_id, messages=messages
+    )
 
 
 @router.delete("/sessions/{session_id}", status_code=204)

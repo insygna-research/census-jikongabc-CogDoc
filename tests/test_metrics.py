@@ -31,9 +31,7 @@ def _app(monkeypatch, **kwargs):
     import api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
-    return create_app(
-        chat_runner=_runner_ok, session_store=SessionStore(), **kwargs
-    )
+    return create_app(chat_runner=_runner_ok, session_store=SessionStore(), **kwargs)
 
 
 async def _client(app):
@@ -90,7 +88,10 @@ async def test_requests_are_counted(monkeypatch):
             await c.post("/v1/chat", json={"query": "q", "doc_id": "kb"})
             scraped = (await c.get("/metrics")).text
     # 计数按路由模板聚合，POST /v1/chat 200 应出现。
-    assert 'cogdoc_http_requests_total{method="POST",route="/v1/chat",status="200"}' in scraped
+    assert (
+        'cogdoc_http_requests_total{method="POST",route="/v1/chat",status="200"}'
+        in scraped
+    )
     assert "cogdoc_http_request_duration_seconds_count" in scraped
 
 

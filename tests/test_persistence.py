@@ -28,8 +28,18 @@ def test_session_survives_new_store_instance(tmp_path):
 
 def test_session_record_appends_across_turns(tmp_path):
     store = SqliteSessionStore(str(tmp_path / "state.db"))
-    store.record("kb", "s1", [{"role": "user", "content": "a"}], [{"role": "user", "content": "a"}])
-    store.record("kb", "s1", [{"role": "user", "content": "b"}], [{"role": "user", "content": "b"}])
+    store.record(
+        "kb",
+        "s1",
+        [{"role": "user", "content": "a"}],
+        [{"role": "user", "content": "a"}],
+    )
+    store.record(
+        "kb",
+        "s1",
+        [{"role": "user", "content": "b"}],
+        [{"role": "user", "content": "b"}],
+    )
     assert len(store.get_history("kb", "s1")) == 2
 
 
@@ -87,9 +97,7 @@ def test_job_record_survives_new_manager(tmp_path):
     manager.shutdown()
 
     # 新进程：换一个 manager + 新的 store 实例，已完成任务仍可查询。
-    reopened = IndexJobManager(
-        ingest_fn=_ok_ingest, job_store=SqliteJobStore(db)
-    )
+    reopened = IndexJobManager(ingest_fn=_ok_ingest, job_store=SqliteJobStore(db))
     assert reopened.get(job_id)["status"] == "succeeded"
 
 

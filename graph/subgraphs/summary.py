@@ -6,16 +6,19 @@ from agents.source_resolver import resolve_summary_source
 from graph.state import GraphState
 from graph.subgraphs.qa import RetrieverFactory
 from observability.logger import log_event
+from service.kb_readers import kb_read_lease
 from tools.document_loader import select_source_for_summary
 
 
+# 处理 document loader node 相关逻辑。
 def document_loader_node(state: GraphState) -> dict:
     # Summary MVP 从当前索引直接加载单个 source 的全部 chunk。
     query = state.get("query", "")
     doc_id = state.get("doc_id", "default")
     is_local = state.get("is_local", False)
-    engine = RetrieverFactory.get_engine(doc_id)
-    sources = engine.list_sources()
+    with kb_read_lease(doc_id):
+        engine = RetrieverFactory.get_engine(doc_id)
+        sources = engine.list_sources()
     selected_source = select_source_for_summary(query, sources)
 
     resolution_trace = []
@@ -55,7 +58,8 @@ def document_loader_node(state: GraphState) -> dict:
         )
         return result
 
-    docs = engine.load_source_chunks(selected_source)
+    with kb_read_lease(doc_id):
+        docs = RetrieverFactory.get_engine(doc_id).load_source_chunks(selected_source)
     if not docs:
         message = f"未能从当前索引加载文档：{selected_source}。请重建索引后再试。"
         result = {
@@ -98,18 +102,22 @@ def document_loader_node(state: GraphState) -> dict:
     return result
 
 
+# 处理 section planner node 相关逻辑。
 def section_planner_node(state: GraphState) -> dict:
     return SectionPlannerAgent.plan_sections(state)
 
 
+# 处理 section summary node 相关逻辑。
 def section_summary_node(state: GraphState) -> dict:
     return SectionSummaryAgent.summarize_sections(state)
 
 
+# 处理 global summary node 相关逻辑。
 def global_summary_node(state: GraphState) -> dict:
     return GlobalSummaryAgent.build_final_summary(state)
 
 
+# 处理 document loader check 相关逻辑。
 def document_loader_check(state: GraphState) -> str:
     # 文档加载失败时直接结束，避免下游节点在空 docs 上运行。
     if not state.get("summary_docs"):

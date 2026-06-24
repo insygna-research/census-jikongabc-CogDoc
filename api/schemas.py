@@ -7,12 +7,13 @@ from config.settings import get_settings
 API_SCHEMA_VERSION = "v1"
 
 
+# 封装 ApiModel 的状态与行为。
 class ApiModel(BaseModel):
-    # 所有 API 模型的基类，统一严格契约与枚举字符串化。
-    # extra=forbid 拒绝未知字段（契约严格）；use_enum_values 让字段存枚举的字符串值。
+    # 所有 API 模型的基类，统一严格契约与枚举字符串化。 extra=forbid 拒绝未知字段（契约严格）；use_enum_values 让字段存枚举的字符串值。
     model_config = ConfigDict(extra="forbid", use_enum_values=True)
 
 
+# 封装 ChatMode 的状态与行为。
 class ChatMode(str, Enum):
     # 对话请求模式：自动路由或强制 qa/summary/compare。
     AUTO = "auto"
@@ -21,6 +22,7 @@ class ChatMode(str, Enum):
     COMPARE = "compare"
 
 
+# 封装 ChatTask 的状态与行为。
 class ChatTask(str, Enum):
     # 实际执行的任务类型，响应里回显（含 unknown）。
     QA = "qa"
@@ -29,6 +31,7 @@ class ChatTask(str, Enum):
     UNKNOWN = "unknown"
 
 
+# 封装 ErrorCode 的状态与行为。
 class ErrorCode(str, Enum):
     # 稳定错误码，前端按码处理失败、不依赖文案。
     CITATION_REJECTED = "CITATION_REJECTED"
@@ -49,8 +52,10 @@ class ErrorCode(str, Enum):
     FILE_TOO_LARGE = "FILE_TOO_LARGE"
     JOB_NOT_FOUND = "JOB_NOT_FOUND"
     INGEST_FAILED = "INGEST_FAILED"
+    KB_CLEANUP_FAILED = "KB_CLEANUP_FAILED"
 
 
+# 封装 ChatRequest 的状态与行为。
 class ChatRequest(ApiModel):
     # /v1/chat 与 /v1/chat/stream 的请求体。
     schema_version: Literal["v1"] = API_SCHEMA_VERSION
@@ -60,6 +65,7 @@ class ChatRequest(ApiModel):
     mode: ChatMode = ChatMode.AUTO
     is_local: bool = False
 
+    # 处理 strip required text 相关逻辑。
     @field_validator("query", "doc_id")
     @classmethod
     def _strip_required_text(cls, value: str) -> str:
@@ -68,12 +74,14 @@ class ChatRequest(ApiModel):
             raise ValueError("must not be blank")
         return stripped
 
+    # 处理 forced task 相关逻辑。
     @property
     def forced_task(self) -> str | None:
         # use_enum_values 下 self.mode 已是字符串，str() 得 "qa"/"summary"/"compare"。
         return None if self.mode == ChatMode.AUTO else str(self.mode)
 
 
+# 封装 Citation 的状态与行为。
 class Citation(ApiModel):
     # 引用来源，取自 doc meta，不含正文。
     chunk_id: str = ""
@@ -83,6 +91,7 @@ class Citation(ApiModel):
     page_end: int | None = None
 
 
+# 封装 Evidence 的状态与行为。
 class Evidence(ApiModel):
     # 证据片段，带截断 preview，供前端 evidence 面板展示。
     chunk_id: str = ""
@@ -96,6 +105,7 @@ class Evidence(ApiModel):
     text_preview: str = ""
 
 
+# 封装 ChatResponse 的状态与行为。
 class ChatResponse(ApiModel):
     # /v1/chat 结构化响应。
     schema_version: Literal["v1"] = API_SCHEMA_VERSION
@@ -111,6 +121,7 @@ class ChatResponse(ApiModel):
     is_valid: bool
 
 
+# 封装 ErrorResponse 的状态与行为。
 class ErrorResponse(ApiModel):
     # 统一错误响应体，所有失败路径共用。
     schema_version: Literal["v1"] = API_SCHEMA_VERSION
@@ -121,6 +132,7 @@ class ErrorResponse(ApiModel):
     details: dict[str, Any] | None = None
 
 
+# 封装 JobStatus 的状态与行为。
 class JobStatus(str, Enum):
     # 入库任务状态机。
     PENDING = "pending"
@@ -129,11 +141,12 @@ class JobStatus(str, Enum):
     FAILED = "failed"
 
 
+# 封装 KnowledgeBaseCreate 的状态与行为。
 class KnowledgeBaseCreate(ApiModel):
-    # 建知识库请求体。
-    # 上限 56：VectorRetriever 把 collection 名截到 f"col-{kb_id}"[:60]，超长会撞库。
+    # 建知识库请求体。 上限 56：VectorRetriever 把 collection 名截到 f"col-{kb_id}"[:60]，超长会撞库。
     kb_id: str = Field(min_length=1, max_length=56)
 
+    # 处理 slug 相关逻辑。
     @field_validator("kb_id")
     @classmethod
     def _slug(cls, value: str) -> str:
@@ -148,6 +161,7 @@ class KnowledgeBaseCreate(ApiModel):
         return stripped
 
 
+# 封装 KnowledgeBase 的状态与行为。
 class KnowledgeBase(ApiModel):
     # 知识库元数据；tenant_id/owner_id 预留多租户。
     kb_id: str
@@ -157,12 +171,14 @@ class KnowledgeBase(ApiModel):
     owner_id: str = "default"
 
 
+# 封装 Document 的状态与行为。
 class Document(ApiModel):
     # 知识库内的一篇文档，来自 manifest。
     name: str
     sha256: str = ""
 
 
+# 封装 IndexJob 的状态与行为。
 class IndexJob(ApiModel):
     # 后台入库任务记录，供轮询状态。
     job_id: str
@@ -176,6 +192,7 @@ class IndexJob(ApiModel):
     message: str | None = None
 
 
+# 封装 FeedbackType 的状态与行为。
 class FeedbackType(str, Enum):
     # 反馈类型：赞 / 踩 / 纠错。
     THUMBS_UP = "thumbs_up"
@@ -183,6 +200,7 @@ class FeedbackType(str, Enum):
     CORRECTION = "correction"
 
 
+# 封装 FeedbackRequest 的状态与行为。
 class FeedbackRequest(ApiModel):
     # /v1/feedback 请求体，trace_id 关联被反馈的那次回答。
     schema_version: Literal["v1"] = API_SCHEMA_VERSION
@@ -195,6 +213,7 @@ class FeedbackRequest(ApiModel):
     correction: str | None = None
 
 
+# 封装 FeedbackResponse 的状态与行为。
 class FeedbackResponse(ApiModel):
     # 反馈落盘结果，is_bad_case 表示是否进了坏样本集。
     schema_version: Literal["v1"] = API_SCHEMA_VERSION
@@ -203,6 +222,7 @@ class FeedbackResponse(ApiModel):
     is_bad_case: bool
 
 
+# 封装 SessionHistoryResponse 的状态与行为。
 class SessionHistoryResponse(ApiModel):
     # 会话多轮历史，刷新后前端据此还原聊天记录。
     schema_version: Literal["v1"] = API_SCHEMA_VERSION
@@ -211,6 +231,7 @@ class SessionHistoryResponse(ApiModel):
     messages: list[dict[str, Any]] = Field(default_factory=list)
 
 
+# 封装 SessionSummary 的状态与行为。
 class SessionSummary(ApiModel):
     # 会话列表里的一条，title 取首条用户消息。
     session_id: str
@@ -218,6 +239,7 @@ class SessionSummary(ApiModel):
     message_count: int
 
 
+# 封装 SessionListResponse 的状态与行为。
 class SessionListResponse(ApiModel):
     # 某知识库下的全部会话，供前端多对话列表。
     schema_version: Literal["v1"] = API_SCHEMA_VERSION
@@ -225,6 +247,7 @@ class SessionListResponse(ApiModel):
     sessions: list[SessionSummary] = Field(default_factory=list)
 
 
+# 处理 as mapping 相关逻辑。
 def _as_mapping(value: Any) -> Mapping[str, Any]:
     if isinstance(value, Mapping):
         return value
@@ -235,6 +258,7 @@ def _as_mapping(value: Any) -> Mapping[str, Any]:
     return {}
 
 
+# 处理 int or none 相关逻辑。
 def _int_or_none(value: Any) -> int | None:
     if value is None:
         return None
@@ -244,6 +268,7 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
+# 处理 float or none 相关逻辑。
 def _float_or_none(value: Any) -> float | None:
     if value is None:
         return None
@@ -253,12 +278,14 @@ def _float_or_none(value: Any) -> float | None:
         return None
 
 
+# 处理 normalize task type 相关逻辑。
 def _normalize_task_type(value: Any) -> str:
     # 上游意外/缺失 task_type 一律归一到 unknown，契约不因字段漂移崩。
     task = str(value or ChatTask.UNKNOWN.value)
     return task if task in {item.value for item in ChatTask} else ChatTask.UNKNOWN.value
 
 
+# 处理 citation from mapping 相关逻辑。
 def _citation_from_mapping(item: Any) -> Citation:
     data = _as_mapping(item)
     page = _int_or_none(data.get("page"))
@@ -271,6 +298,7 @@ def _citation_from_mapping(item: Any) -> Citation:
     )
 
 
+# 处理 evidence from mapping 相关逻辑。
 def _evidence_from_mapping(item: Any) -> Evidence:
     data = _as_mapping(item)
     page = _int_or_none(data.get("page"))
@@ -287,6 +315,7 @@ def _evidence_from_mapping(item: Any) -> Evidence:
     )
 
 
+# 处理 chat result to response 相关逻辑。
 def chat_result_to_response(
     result: Any,
     *,
@@ -314,6 +343,7 @@ def chat_result_to_response(
     )
 
 
+# 构建 build error response 相关逻辑。
 def build_error_response(
     error_code: ErrorCode,
     message: str,
