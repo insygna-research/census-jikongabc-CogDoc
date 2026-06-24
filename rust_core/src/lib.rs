@@ -64,6 +64,12 @@ fn tokenize_mixed_text_native(text: String) -> Vec<String> {
     tokenizer::tokenize_mixed_text_core(&text)
 }
 
+// 整批分词，rayon 并行后单次跨界返回，供索引入库摊薄逐 chunk 调用
+#[pyfunction]
+fn tokenize_corpus_native(texts: Vec<String>) -> Vec<Vec<String>> {
+    tokenizer::tokenize_corpus_core(texts)
+}
+
 // 模块入口：向 Python 注册导出的 native 函数
 #[pymodule]
 fn rust_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -71,6 +77,7 @@ fn rust_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rrf_fusion_native, m)?)?;
     m.add_function(wrap_pyfunction!(validate_citations_native, m)?)?;
     m.add_function(wrap_pyfunction!(tokenize_mixed_text_native, m)?)?;
+    m.add_function(wrap_pyfunction!(tokenize_corpus_native, m)?)?;
     m.add_class::<bm25::Bm25Index>()?;
     Ok(())
 }

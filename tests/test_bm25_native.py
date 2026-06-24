@@ -61,3 +61,41 @@ def test_native_bm25_matches_rank_bm25_ranking(query):
 def test_native_bm25_handles_empty_corpus():
     index = _rust_core.Bm25Index([])
     assert list(index.score_topk(["模型"], 5)) == []
+
+
+def test_native_bm25_serialization_roundtrip_preserves_scores():
+    corpus = _build_corpus(seed=11, size=80)
+    index = _rust_core.Bm25Index(corpus)
+    restored = _rust_core.Bm25Index.from_bytes(index.to_bytes())
+
+    query = ["模型", "检索", "向量", "不存在词"]
+    assert list(index.score_topk(query, 10)) == list(restored.score_topk(query, 10))
+
+
+def test_native_bm25_from_bytes_rejects_garbage():
+    with pytest.raises(ValueError):
+        _rust_core.Bm25Index.from_bytes(b"not a valid index")
+
+
+def test_native_bm25_rebuild_from_kept_matches_full_rebuild():
+    corpus = _build_corpus(seed=3, size=60)
+    index = _rust_core.Bm25Index(corpus)
+
+    # 丢弃偶数下标文档，再追加两篇新文档：等价于按相同顺序的全量重建。
+    keep_indices = [i for i in range(len(corpus)) if i % 2 == 1]
+    new_tokens = [["模型", "新增", "检索"], ["摘要", "对比"]]
+    incremental = index.rebuild_from_kept(keep_indices, new_tokens)
+
+    expected_corpus = [corpus[i] for i in keep_indices] + new_tokens
+    full = _rust_core.Bm25Index(expected_corpus)
+
+    query = ["模型", "检索", "摘要"]
+    assert list(incremental.score_topk(query, 10)) == list(
+        full.score_topk(query, 10)
+    )
+
+
+def test_native_bm25_rebuild_rejects_out_of_range_index():
+    index = _rust_core.Bm25Index(_build_corpus(seed=5, size=10))
+    with pytest.raises(ValueError):
+        index.rebuild_from_kept([99], [])

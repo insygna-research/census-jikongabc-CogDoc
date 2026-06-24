@@ -1,5 +1,9 @@
 import pytest
-from tools.tokenizer import _tokenize_mixed_text_python, tokenize_mixed_text
+from tools.tokenizer import (
+    _tokenize_mixed_text_python,
+    tokenize_corpus,
+    tokenize_mixed_text,
+)
 
 
 def test_tokenize_mixed_text_keeps_word_level_chinese_tokens():
@@ -38,3 +42,18 @@ def test_tokenize_mixed_text_keeps_latin_tokens():
 )
 def test_native_tokenizer_matches_python_reference(text):
     assert tokenize_mixed_text(text) == _tokenize_mixed_text_python(text)
+
+
+def test_tokenize_corpus_matches_per_text_tokenization():
+    texts = [
+        "模型 方法 架构",
+        "BGE-reranker v2.5 chunk_id",
+        "对比 a.pdf 和 b.pdf 的方法和实验结论",
+        "",
+        "   ",
+    ]
+    assert tokenize_corpus(texts) == [tokenize_mixed_text(t) for t in texts]
+
+
+def test_tokenize_corpus_empty_input():
+    assert tokenize_corpus([]) == []

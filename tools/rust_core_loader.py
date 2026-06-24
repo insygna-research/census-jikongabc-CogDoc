@@ -8,6 +8,7 @@ REQUIRED_NATIVE_SYMBOLS = (
     "rrf_fusion_native",
     "validate_citations_native",
     "tokenize_mixed_text_native",
+    "tokenize_corpus_native",
     "Bm25Index",
 )
 

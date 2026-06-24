@@ -6,13 +6,16 @@ from typing import List
 from config.settings import get_settings
 from graph.state import RetrievedDoc
 from tools.document_loader import list_sources, load_source_chunks
-from tools.tokenizer import tokenize_mixed_text
+from tools.tokenizer import tokenize_mixed_text, tokenize_corpus
 from tools.rust_core_loader import ensure_rust_core
 from tools.retriever.base_retriever import BaseRetriever
 
 
-# BM25 计算下放 rust_core，持久化仍只存语料和 chunk 注册表。
+# BM25 计算与索引序列化均下放 rust_core，持久化只存 chunk 注册表 + 原生索引字节。
 _rust_core = ensure_rust_core("Bm25Index")
+
+# 落盘载荷格式标记；BM25 持久化结构变化时 bump，旧格式按无索引处理触发重建。
+_PERSIST_FORMAT = "bm25_index_bytes_v1"
 
 
 # 封装 BM25Retriever 的状态与行为。
@@ -23,31 +26,29 @@ class BM25Retriever(BaseRetriever):
         os.makedirs(persist_directory, exist_ok=True)
         self.db_path = os.path.join(persist_directory, f"bm25_{collection_id}.pkl")
 
-        # 保护 (bm25, doc_registry, tokenized_corpus) 三元组的原子替换与一致快照读取。
+        # 保护 (bm25, doc_registry) 二元组的原子替换与一致快照读取；分词语料随索引存于 Rust 侧。
         self._lock = RLock()
         self._init_collection()
-
-    # 构建 build index 相关逻辑。
-    def _build_index(self, tokenized_corpus: List[List[str]]):
-        # 原生 BM25 与 rank_bm25.BM25Okapi 逐位对齐（k1=1.5, b=0.75, epsilon=0.25 默认）。
-        return _rust_core.Bm25Index(tokenized_corpus)
 
     # 处理 init collection 相关逻辑。
     def _init_collection(self) -> None:
         self.bm25 = None
         self.doc_registry: List[RetrievedDoc] = []
-        self.tokenized_corpus: List[List[str]] = []
 
         if os.path.exists(self.db_path):
             try:
                 with open(self.db_path, "rb") as f:
                     state = pickle.load(f)
-                    self.doc_registry = state.get("doc_registry", [])
-                    self.tokenized_corpus = state.get("tokenized_corpus", [])
-                if self.tokenized_corpus and self.doc_registry:
-                    self.bm25 = self._build_index(self.tokenized_corpus)
+                # 旧格式或缺索引字节按无索引处理：上层据空索引/版本不符触发重建。
+                if state.get("format") != _PERSIST_FORMAT:
+                    raise ValueError("unsupported bm25 persist format")
+                registry = state.get("doc_registry", [])
+                index_bytes = state.get("index_bytes")
+                if registry and index_bytes:
+                    self.bm25 = _rust_core.Bm25Index.from_bytes(index_bytes)
+                    self.doc_registry = registry
             except Exception:
-                self.bm25, self.doc_registry, self.tokenized_corpus = None, [], []
+                self.bm25, self.doc_registry = None, []
 
     # 分词 tokenize 相关逻辑。
     def _tokenize(self, text: str) -> List[str]:
@@ -111,30 +112,36 @@ class BM25Retriever(BaseRetriever):
         }
 
     # 处理 persist 相关逻辑。
-    def _persist(self, registry, corpus) -> None:
-        # 原子写：先写临时 pickle 再 os.replace，进程中断不会留下半截文件。
+    def _persist(self, registry, index) -> None:
+        # 原子写：先写临时 pickle 再 os.replace，进程中断不会留下半截文件。 索引以 Rust 序列化字节存储，规避对 List[List[str]] 语料的 pickle 大列表开销。
         tmp_path = f"{self.db_path}.tmp"
         with open(tmp_path, "wb") as f:
-            pickle.dump({"doc_registry": registry, "tokenized_corpus": corpus}, f)
+            pickle.dump(
+                {
+                    "format": _PERSIST_FORMAT,
+                    "doc_registry": registry,
+                    "index_bytes": index.to_bytes(),
+                },
+                f,
+            )
         os.replace(tmp_path, self.db_path)
 
     # 处理 swap in 相关逻辑。
-    def _swap_in(self, registry, corpus) -> None:
+    def _swap_in(self, registry, index) -> None:
         # 先落盘再切内存：持久化失败时内存与磁盘不会错位（内存仍是旧的一致状态）。
-        new_bm25 = self._build_index(corpus) if corpus else None
-        if corpus:
-            self._persist(registry, corpus)
+        if registry and index is not None:
+            self._persist(registry, index)
         else:
+            registry, index = [], None
             try:
                 if os.path.exists(self.db_path):
                     os.remove(self.db_path)
             except Exception:
                 pass
-        # 再在局部建好 Bm25Index 后加锁原子替换三元组：并发 search 永远看到 index 与 registry 匹配的快照。
+        # 加锁原子替换二元组：并发 search 永远看到 index 与 registry 匹配的快照。
         with self._lock:
-            self.bm25 = new_bm25
+            self.bm25 = index
             self.doc_registry = registry
-            self.tokenized_corpus = corpus
 
     # 写入索引 index 相关逻辑。
     def index(self, chunks: List[RetrievedDoc]) -> None:
@@ -142,25 +149,32 @@ class BM25Retriever(BaseRetriever):
         if not chunks:
             return
         registry = [self._clean_doc(c) for c in chunks]
-        corpus = [self._tokenize(c["text"]) for c in chunks]
-        self._swap_in(registry, corpus)
+        corpus = tokenize_corpus([c["text"] for c in chunks])
+        self._swap_in(registry, _rust_core.Bm25Index(corpus))
 
     # 增量写入 upsert documents 相关逻辑。
     def upsert_documents(self, new_chunks: List[RetrievedDoc], removed_sources) -> None:
-        # 增量：保留未变文档的语料，丢弃删/改文档（按文件名），追加新 chunk，重建 Bm25Index。 BM25 分数依赖全局 IDF/avgdl，故仍整体重建 Bm25Index，但跳过未变文档的重新分词。
+        # 增量：保留未变文档（按文件名过滤），追加新 chunk，整体重建 Bm25Index。 BM25 分数依赖全局 IDF/avgdl 故必须整体重建，但未变文档的分词由 Rust 侧 corpus 复用，新 chunk 批量分词，均不回 Python 逐条切词。
         drop = {str(s) for s in removed_sources if s}
         with self._lock:
-            current = list(zip(self.doc_registry, self.tokenized_corpus))
-        keep_registry, keep_corpus = [], []
-        for doc, tokens in current:
-            if doc["meta"]["source"] in drop:
-                continue
-            keep_registry.append(doc)
-            keep_corpus.append(tokens)
-        for c in new_chunks:
-            keep_registry.append(self._clean_doc(c))
-            keep_corpus.append(self._tokenize(c["text"]))
-        self._swap_in(keep_registry, keep_corpus)
+            registry = self.doc_registry
+            base = self.bm25
+        keep_indices = [
+            i for i, doc in enumerate(registry) if doc["meta"]["source"] not in drop
+        ]
+        new_registry = [registry[i] for i in keep_indices]
+        new_registry.extend(self._clean_doc(c) for c in new_chunks)
+        new_tokens = tokenize_corpus([c["text"] for c in new_chunks])
+
+        if not new_registry:
+            self._swap_in([], None)
+            return
+        if base is not None:
+            new_index = base.rebuild_from_kept(keep_indices, new_tokens)
+        else:
+            # 旧索引为空（首次增量或自愈后）：直接从新 chunk 分词构建。
+            new_index = _rust_core.Bm25Index(new_tokens)
+        self._swap_in(new_registry, new_index)
 
     # 处理 export registry 相关逻辑。
     def export_registry(self) -> List[RetrievedDoc]:

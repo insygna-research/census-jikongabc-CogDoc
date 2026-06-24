@@ -1,4 +1,5 @@
 use jieba_rs::Jieba;
+use rayon::prelude::*;
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -38,4 +39,12 @@ pub fn tokenize_mixed_text_core(text: &str) -> Vec<String> {
     }
 
     tokens
+}
+
+// 整批分词时按 rayon 并行，单次跨界摊薄入库阶段的逐 chunk 调用开销。
+pub fn tokenize_corpus_core(texts: Vec<String>) -> Vec<Vec<String>> {
+    texts
+        .par_iter()
+        .map(|text| tokenize_mixed_text_core(text))
+        .collect()
 }
