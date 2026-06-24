@@ -38,11 +38,12 @@ cogdoc = "cogdoc.cli:main"
 cogdoc-debug = "cogdoc.debug:main"
 
 [project.optional-dependencies]
-# 开发：原生扩展构建 + 测试 + BM25 对齐参照（原 requirements-dev.txt）。
+# 开发：原生扩展构建 + 测试 + BM25/分词对齐参照（原 requirements-dev.txt）。
 dev = [
     "maturin==1.14.0",
     "pytest==9.1.0",
     "rank-bm25==0.2.2",
+    "snowballstemmer==2.2.0",
 ]
 # 前端瘦客户端（原 requirements-frontend.txt），与后端解耦，可单独安装。
 frontend = [

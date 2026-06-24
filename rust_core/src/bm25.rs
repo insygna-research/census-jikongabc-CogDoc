@@ -96,8 +96,7 @@ impl Bm25Index {
 
     // 序列化为字节，供 Python 端落盘；规避对 List[List[str]] 的 pickle 大列表开销。
     fn to_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        let data =
-            bincode::serialize(self).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let data = bincode::serialize(self).map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(PyBytes::new(py, &data))
     }
 

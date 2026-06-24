@@ -8,10 +8,10 @@ from cogdoc.tools.device import required_cuda_free_bytes, resolve_device
 class Embedder:
     # 单例模型，整个程序只加载一次
     _model = None
-    MODEL_NAME = "BAAI/bge-small-zh-v1.5"
+    MODEL_NAME = "BAAI/bge-m3"
     # 固定到 HF commit SHA：分支会移动（远端更新权重后契约不变但模型已变），SHA 才能真正钉死权重版本。 升级权重必须改此 SHA，连带 EMBEDDING_CONTRACT_VERSION 变化使旧向量失效、强制全量重建。
-    MODEL_REVISION = "7999e1d3359715c523056ef9478215996d62a620"
-    EMBEDDING_DIM = 512  # 输出维度，编码后强校验
+    MODEL_REVISION = "5617a9f61b028005a4858fdac845db406aefb181"
+    EMBEDDING_DIM = 1024  # bge-m3 dense 输出维度，编码后强校验
     NORMALIZE = True  # 归一化方式，影响距离度量，变更即不可复用旧向量
 
     # 嵌入兼容契约：模型名/revision/维度/归一化任一变化都使旧向量不可复用，强制全量重建。
@@ -19,7 +19,7 @@ class Embedder:
         f"{MODEL_NAME}@{MODEL_REVISION}|dim={EMBEDDING_DIM}|norm={NORMALIZE}"
     )
 
-    # bge-small-zh-v1.5 权重约 0.4G + 批量活化余量，空闲低于此值回落 CPU，避免 CUDA OOM。
+    # bge-m3 权重约 2.2G + 批量活化余量，空闲低于此值回落 CPU，避免 CUDA OOM。
     REQUIRED_CUDA_FREE_BYTES = required_cuda_free_bytes("EMBEDDER_MIN_CUDA_FREE_MB")
 
     device = "cpu"  # 实际设备在首次加载时按空闲显存动态判定，默认安全回落 CPU

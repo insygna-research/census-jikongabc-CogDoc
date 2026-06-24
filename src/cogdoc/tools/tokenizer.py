@@ -7,17 +7,39 @@ from cogdoc.tools.rust_core_loader import ensure_rust_core
 _rust_core = ensure_rust_core("tokenize_mixed_text_native", "tokenize_corpus_native")
 
 # 分词规则变化时 bump：进入增量复用门控，避免新旧文档混用不同分词的语料。
-TOKENIZER_VERSION = "jieba_mixed_native_v1"
+TOKENIZER_VERSION = "jieba_mixed_native_v2"
+
+# 英文停用词表，必须与 rust_core 端逐词一致（Elasticsearch _english_ 默认表）。
+_EN_STOPWORDS = frozenset(
+    {
+        "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "if", "in", "into",
+        "is", "it", "no", "not", "of", "on", "or", "such", "that", "the", "their", "then",
+        "there", "these", "they", "this", "to", "was", "will", "with",
+    }
+)
 
 
 # 分词 tokenize mixed text python 相关逻辑。
 def _tokenize_mixed_text_python(text: str) -> List[str]:
     # 纯 Python 参照实现，仅供分词对齐测试比对；运行链路统一走 native。
+    import snowballstemmer
+
+    stemmer = snowballstemmer.stemmer("english")
     text = text.lower()
     tokens = []
 
-    english_words = re.findall(r"[a-z0-9_\-\.]+", text)
-    tokens.extend([word for word in english_words if len(word) > 1])
+    for word in re.findall(r"[a-z0-9_\-\.]+", text):
+        if len(word) <= 1:
+            continue
+        # 纯字母英文词去停用词后词干化；含数字/下划线/连字符的标识符、版本号原样保留。
+        if word.isalpha():
+            if word in _EN_STOPWORDS:
+                continue
+            stemmed = stemmer.stemWord(word)
+            if len(stemmed) > 1:
+                tokens.append(stemmed)
+        else:
+            tokens.append(word)
 
     chinese_pure = re.sub(r"[a-z0-9_\-\.]+", " ", text)
     import jieba

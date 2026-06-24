@@ -18,9 +18,22 @@ def test_tokenize_mixed_text_keeps_word_level_chinese_tokens():
 def test_tokenize_mixed_text_keeps_latin_tokens():
     tokens = tokenize_mixed_text("BGE-reranker v2.5 chunk_id")
 
+    # 含连字符/数字/下划线的标识符、版本号原样保留，不被词干化破坏。
     assert "bge-reranker" in tokens
     assert "v2.5" in tokens
     assert "chunk_id" in tokens
+
+
+def test_tokenize_english_stems_and_drops_stopwords():
+    tokens = tokenize_mixed_text("The models are retrieving documents")
+
+    # 停用词被剔除。
+    assert "the" not in tokens
+    assert "are" not in tokens
+    # 纯字母词被 Snowball 词干化归一。
+    assert "model" in tokens
+    assert "retriev" in tokens
+    assert "document" in tokens
 
 
 # jieba 仅作 native 分词的对齐参照，其 import pkg_resources 的弃用告警与运行链路无关。
@@ -36,6 +49,10 @@ def test_tokenize_mixed_text_keeps_latin_tokens():
         "RRF融合 BM25与向量召回 top_k=9 的排序稳定性",
         "知识库 检索 warmup",
         "大语言模型在中文信息抽取与命名实体识别上的表现",
+        "Retrieval Augmented Generation models for the documents",
+        "These rankings compare retrieved chunks and their citations",
+        "running runner runs studies studied organization",
+        "混合检索 hybrid retrieval 把 BM25 and vector results 融合",
         "",
         "   ",
     ],
