@@ -15,6 +15,11 @@ class Generator:
     _clients = {}
 
     @classmethod
+    def clear_clients(cls) -> None:
+        # 改了 LLM 配置后清缓存：客户端键不含 api_key，只改 key 时不清会一直用旧客户端。
+        cls._clients.clear()
+
+    @classmethod
     def _get_client(
         cls, is_local: bool = False, custom_model_name: str = None
     ) -> ChatOpenAI:

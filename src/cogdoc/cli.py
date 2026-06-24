@@ -46,6 +46,29 @@ FORCED_MODE_PATTERN = re.compile(
     rf"^/({'|'.join(re.escape(task) for task in FORCED_TASK_TYPES)})(?:\s+(.*))?$",
     re.I,
 )
+
+# Tab 补全的命令与 /kb 子命令候选。
+COMPLETION_COMMANDS = [
+    "/kb",
+    "/inbox",
+    "/add",
+    "/docs",
+    "/rm",
+    "/new",
+    "/chats",
+    "/open",
+    "/rmchat",
+    "/local",
+    "/cloud",
+    "/config",
+    "/qa",
+    "/summary",
+    "/compare",
+    "/help",
+    "exit",
+    "quit",
+]
+KB_SUBCOMMANDS = ["new", "use", "rm", "list"]
 rust_core = None
 
 
@@ -81,6 +104,12 @@ def safe_print_on_interrupt(message: str) -> None:
         print(message)
     finally:
         signal.signal(signal.SIGINT, previous_handler)
+
+
+# 脱敏 mask key 相关逻辑。
+def _mask_key(key: str) -> str:
+    # 提示当前 key 时只露头尾，避免整串明文回显到终端。
+    return f"{key[:3]}***{key[-4:]}" if len(key) > 7 else "***"
 
 
 # 预热 warm kb 相关逻辑。
@@ -122,7 +151,8 @@ HELP_TEXT = """\
     /open <对话ID>         打开/恢复历史对话（支持 ID 前缀）
     /rmchat <对话ID>       删除一个对话（需确认）
   模式与强制意图
-    /local  /cloud         切换本地 Ollama / 云端 API
+    /local  /cloud         切换本地 Ollama / 云端 API（云端缺 key 会提示配置）
+    /config                配置云端 Base URL / 模型 / API Key（写入 .env）
     /qa <问题>             强制问答
     /summary <文件名>      强制总结指定文档
     /compare <A> <B> ...   强制对比多篇文档（≥2，本地模式限 2）
@@ -140,10 +170,12 @@ class Console:
         settings = get_settings()
         self.registry = KnowledgeBaseRegistry()
         self.sessions = SqliteSessionStore(settings.state_db_path)
-        self.inbox_dir = settings.cogdoc_doc_dir
+        # 用绝对路径，提示与列表里一眼看清 PDF 该放哪。
+        self.inbox_dir = os.path.abspath(settings.cogdoc_doc_dir)
         self.active_kb: str | None = None
         self.active_session_id: str | None = None
         self.is_local = True
+        self._completion_matches: list[str] = []
         os.makedirs(self.inbox_dir, exist_ok=True)
 
     # ---- 工具 ----
@@ -408,6 +440,35 @@ class Console:
             self.active_session_id = None
         print(f"🗑️ 已删除对话 {sid[:8]}。")
 
+    # ---- 云端配置 ----
+
+    # 配置 configure cloud 相关逻辑。
+    def _configure_cloud(self, first_time: bool) -> bool:
+        # 写入 .env 并即时生效；返回云端是否可用（有 key）。
+        from cogdoc.config.llm_config import apply_llm_config
+
+        settings = get_settings()
+        if first_time:
+            print("⚠️ 还没有配置云端 API Key，无法使用云端模式。现在配置（回车保留当前值）：")
+        else:
+            print("✏️ 修改云端模型配置（回车保留当前值）：")
+        base = input(f"  云端 Base URL [{settings.llm_base_url}]: ").strip()
+        model = input(f"  云端模型名 [{settings.llm_model_name}]: ").strip()
+        cur_key = settings.llm_api_key
+        key_hint = _mask_key(cur_key) if cur_key else "未设置"
+        key = input(f"  云端 API Key [{key_hint}]: ").strip()
+        final_key = key or cur_key
+        if not final_key:
+            print("❌ 未提供 API Key，云端模式不可用。")
+            return False
+        apply_llm_config(
+            api_key=final_key,
+            base_url=base or settings.llm_base_url,
+            model=model or settings.llm_model_name,
+        )
+        print("✅ 云端配置已写入 .env 并即时生效。")
+        return True
+
     # ---- 问答 ----
 
     # 输出 print answer 相关逻辑。
@@ -467,6 +528,61 @@ class Console:
                 ],
             )
 
+    # ---- Tab 补全 ----
+
+    # 列出 doc names 相关逻辑。
+    def _doc_names(self) -> list[str]:
+        if self.active_kb is None:
+            return []
+        return [d.get("name", "") for d in _kb_documents(self.active_kb)]
+
+    # 列出 session prefixes 相关逻辑。
+    def _session_prefixes(self) -> list[str]:
+        if self.active_kb is None:
+            return []
+        return [s["session_id"][:8] for s in self.sessions.list_sessions(self.active_kb)]
+
+    # 计算 completion candidates 相关逻辑。
+    def _completion_candidates(self, tokens: list[str]) -> list[str]:
+        # tokens 是光标前已完成的词；为空说明正在补第一个词，给出全部命令。
+        if not tokens:
+            return COMPLETION_COMMANDS
+        cmd = tokens[0].lower()
+        if cmd == "/kb":
+            if len(tokens) == 1:
+                return KB_SUBCOMMANDS
+            if len(tokens) == 2 and tokens[1].lower() in ("use", "rm"):
+                return [r["kb_id"] for r in self.registry.list()]
+            return []
+        if cmd == "/add":
+            return self._inbox_pdfs() if len(tokens) == 1 else []
+        if cmd in ("/rm", "/summary"):
+            return self._doc_names() if len(tokens) == 1 else []
+        if cmd == "/compare":
+            return self._doc_names()
+        if cmd in ("/open", "/rmchat"):
+            return self._session_prefixes() if len(tokens) == 1 else []
+        return []
+
+    # 处理 complete 相关逻辑。
+    def complete(self, text: str, state: int) -> str | None:
+        # readline 对同一补全会按 state 递增回调，state==0 时重算候选并缓存。
+        try:
+            if state == 0:
+                tokens = readline.get_line_buffer()[: readline.get_begidx()].split()
+                self._completion_matches = [
+                    c
+                    for c in self._completion_candidates(tokens)
+                    if c and c.startswith(text)
+                ]
+            return (
+                self._completion_matches[state]
+                if state < len(self._completion_matches)
+                else None
+            )
+        except Exception:
+            return None
+
     # ---- 分发 ----
 
     # 处理 dispatch 相关逻辑。
@@ -486,8 +602,15 @@ class Console:
             print("🔄 已切换到：本地 Ollama 模式。")
             return True
         if low == "/cloud":
+            if not get_settings().llm_api_key and not self._configure_cloud(
+                first_time=True
+            ):
+                return True
             self.is_local = False
             print("🔄 已切换到：云端 API 模式。")
+            return True
+        if low == "/config":
+            self._configure_cloud(first_time=False)
             return True
         if low == "/inbox":
             self.cmd_inbox()
@@ -541,6 +664,21 @@ class Console:
         return True
 
 
+# 配置 setup completion 相关逻辑。
+def _setup_completion(console: "Console") -> None:
+    # 无 readline（如 Windows 原生）则静默跳过，不影响主流程。
+    if readline is None:
+        return
+    # 仅以空白为分隔符，使补全词保留前导 / 与中文文件名（默认分隔符会切碎它们）。
+    readline.set_completer_delims(" \t\n")
+    readline.set_completer(console.complete)
+    # macOS 自带的是 libedit，绑定语法与 GNU readline 不同。
+    if "libedit" in (getattr(readline, "__doc__", "") or ""):
+        readline.parse_and_bind("bind ^I rl_complete")
+    else:
+        readline.parse_and_bind("tab: complete")
+
+
 # 处理 main 相关逻辑。
 def main():
     configure_logging()
@@ -578,6 +716,7 @@ def main():
         print(f"⚠️ 预热阶段失败，稍后提问时仍会尝试按需加载: {e}")
 
     console = Console()
+    _setup_completion(console)
 
     print("=" * 60)
     print("🚀 CogDoc 控制台 | 多知识库 + 多对话 | 输入 /help 查看命令")
