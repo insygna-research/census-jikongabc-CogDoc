@@ -127,18 +127,31 @@ Streamlit 前端只是 FastAPI 服务上的瘦客户端——你也可以直接�
 ## 架构
 
 ```text
-user question
-  -> intent_router (qa | summary | compare | unknown)
-  -> QA subgraph
-       rewrite_node          QueryRewriteAgent: 1–3 条关键词查询
-    -> verify_rewrite_node   RewriteVerifyAgent: cosine 漂移过滤
-    -> retrieve_node         HybridRetriever: 每条 query 走 Vector + native BM25，Rust RRF 融合
-    -> rerank_node           BGEReranker: cross-encoder 取 top_n
-    -> generate_node         Generator: 带 [source:Pn] 标签的受约束回答
-    -> citation_node         CitationValidatorAgent: Rust 校验 + Python critique
-       (generate <-> citation 循环至 max_iteration_count，否则 END)
-  -> Summary 子图            document_loader -> section_planner -> section_summary -> global_summary
-  -> Compare 子图            document_loader -> document_profile -> compare_table -> citation
+┌──────────────────────── 前端 ────────────────────────┐
+│   CLI 控制台（斜杠命令）        Streamlit 网页端        │
+└──────────┬───────────────────────────────┬───────────┘
+           │ 进程内调用                      │ HTTP + SSE
+           │                       ┌─────────▼─────────┐
+           │                       │   FastAPI 服务    │──► SQLite
+           │                       │  会话·任务·反馈    │   (历史/任务/反馈)
+           │                       └─────────┬─────────┘
+           ▼  用户问题                       ▼
+┌────────────────────── LangGraph 工作流 ──────────────────────┐
+│  intent_router ──► qa | summary | compare | unknown          │
+│                                                              │
+│  QA：      改写 ─► 校验 ─► 检索 ─► 精排 ─► 生成              │
+│                                          ▲          │        │
+│                                   引用校验 └─────────┘        │
+│                                   (自愈循环 ≤ N)             │
+│  Summary： 选文档 ─► 规划章节 ─► 逐节摘要 ─► 全局整合         │
+│  Compare： 选文档 ─► 建 profile ─► 对比表 ─► 引用校验         │
+└──────────┬───────────────────────────────────┬──────────────┘
+           │ 混合检索                            │ native 调用
+┌──────────▼─────────────┐          ┌────────────▼───────────────┐
+│  Chroma（向量）         │          │  Rust 核心（PyO3 + maturin）│
+│  BM25 分词语料          │ ◄──────► │  分词 · BM25 · RRF ·        │
+│  PDF 经 PyMuPDF 解析    │          │  SHA-256 · 引用校验         │
+└─────────────────────────┘          └─────────────────────────────┘
 ```
 
 Summary 为单个点名文档生成固定章节结构化摘要；Compare 为每篇文档在固定维度上建 profile，再按维度渲染带引用的 Markdown 对比块。两者都从 chunk 元数据确定性地绑定 `[source:Pn]` 引用，并跑与 QA 同一套 `validate_citations_native` 校验——任何子图都不豁免。

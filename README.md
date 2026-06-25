@@ -127,18 +127,31 @@ If `LLM_API_KEY`-style API keys are configured, requests are authenticated and r
 ## Architecture
 
 ```text
-user question
-  -> intent_router (qa | summary | compare | unknown)
-  -> QA subgraph
-       rewrite_node          QueryRewriteAgent: 1–3 keyword queries
-    -> verify_rewrite_node   RewriteVerifyAgent: cosine drift filter
-    -> retrieve_node         HybridRetriever: Vector + native BM25 per query, Rust RRF fuse
-    -> rerank_node           BGEReranker: cross-encoder top_n
-    -> generate_node         Generator: grounded answer with [source:Pn] tags
-    -> citation_node         CitationValidatorAgent: Rust checker + Python critique
-       (loop generate <-> citation up to max_iteration_count, else END)
-  -> Summary subgraph        document_loader -> section_planner -> section_summary -> global_summary
-  -> Compare subgraph        document_loader -> document_profile -> compare_table -> citation
+┌──────────────────────── Front ends ────────────────────────┐
+│   CLI console (slash commands)        Streamlit web UI       │
+└───────────┬───────────────────────────────────┬─────────────┘
+            │ in-process                          │ HTTP + SSE
+            │                            ┌────────▼─────────┐
+            │                            │  FastAPI service │──► SQLite
+            │                            │ sessions·jobs·fb │   (history/jobs/feedback)
+            │                            └────────┬─────────┘
+            ▼  user question                      ▼
+┌────────────────────── LangGraph workflow ──────────────────────┐
+│  intent_router ──► qa | summary | compare | unknown             │
+│                                                                 │
+│  QA:       rewrite ─► verify ─► retrieve ─► rerank ─► generate  │
+│                                                  ▲          │   │
+│                                          citation └─────────┘   │
+│                                          (self-heal loop ≤ N)    │
+│  Summary:  loader ─► plan ─► section ─► global                  │
+│  Compare:  loader ─► profile ─► table ─► citation               │
+└───────────┬─────────────────────────────────────┬──────────────┘
+            │ hybrid retrieval                     │ native kernels
+┌───────────▼────────────┐            ┌────────────▼───────────────┐
+│  Chroma (vectors)      │            │  Rust core (PyO3 + maturin) │
+│  BM25 tokenized corpus │ ◄────────► │  tokenize · BM25 · RRF ·    │
+│  PDFs via PyMuPDF      │            │  SHA-256 · citation check   │
+└────────────────────────┘            └─────────────────────────────┘
 ```
 
 Summary builds a fixed-section structured summary of one named document; Compare builds a per-document profile across fixed dimensions and renders cited Markdown comparison blocks grouped by dimension. Both bind `[source:Pn]` citations deterministically from chunk metadata and run the same `validate_citations_native` checker as QA — no subgraph is exempt.
