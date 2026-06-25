@@ -11,14 +11,20 @@ A local RAG knowledge-base console for individuals and teams, built on **LangGra
 ## Features
 
 - **Grounded QA with verified citations** — generation is constrained to retrieved document blocks; fabricated file/page tags are caught by a Rust validator and re-generated in a self-heal loop.
+
 - **Structured single-document summary** — fixed sections, deterministic citations bound from chunk metadata.
+
 - **Multi-document comparison** — per-document profiles across fixed dimensions, rendered as cited dimension-by-dimension blocks.
+
 - **Hybrid retrieval, native scoring** — Vector (Chroma + multilingual BGE-M3) and BM25 recall fused by a Rust RRF kernel; tokenization and BM25 are native — Chinese via `jieba-rs`, English lowercased + Snowball-stemmed + stopword-filtered, so both languages retrieve well.
+
 - **Content-addressed incremental cache** — a per-file SHA-256 manifest plus a versioned chunk-identity contract: unchanged files reuse the existing index, and only a changed PDF or chunking scheme triggers an incremental rebuild.
+
 - **Multiple knowledge bases · multiple conversations · persistent memory** — each KB runs many parallel conversations; history is persisted to SQLite (long-term memory) and survives refresh/restart for replay. Every question carries a recent window of the dialogue (short-term memory, last 12 messages by default) for multi-turn coreference, and only citation-validated answers enter memory so wrong answers never poison later turns.
+
 - **Two front ends** — a slash-command CLI console and a Streamlit web UI over a FastAPI backend with streaming, history, citations, and feedback.
 
-> The screenshots below are placeholders — add real images under `docs/images/` to fill them in.
+  
 
 1. **Web chat (Streamlit).** Pick a knowledge base, ask in natural language, watch the answer stream, then inspect the citation sources and evidence snippets and leave 👍/👎 feedback.
 
