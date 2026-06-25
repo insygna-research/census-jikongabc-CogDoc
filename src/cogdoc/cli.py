@@ -253,6 +253,8 @@ class Console:
             delete_kb_index_transactional(kb_id)
             mark_kb_deleted(kb_id)
             self.registry.delete(kb_id)
+            # 连带清掉该库的会话历史，否则同名新库复用 doc_id 会捡到旧对话。
+            self.sessions.clear_kb(kb_id)
 
     # 处理 cmd kb 相关逻辑。
     def cmd_kb(self, sub: str, name: str) -> None:

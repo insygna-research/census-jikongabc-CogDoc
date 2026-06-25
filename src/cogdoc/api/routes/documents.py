@@ -1,9 +1,7 @@
 import asyncio
 import os
-
 from fastapi import APIRouter, File, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
-
 from cogdoc.api.ingest import KBExistsError
 from cogdoc.api.schemas import (
     Document,
@@ -35,15 +33,20 @@ def _create_kb(kb_id, registry):
 
 
 # 删除 delete kb 相关逻辑。
-def _delete_kb(kb_id, registry, index_jobs):
+def _delete_kb(kb_id, registry, index_jobs, session_store=None):
     # registry 删除与落 tombstone 必须与 create 在同一把锁内原子完成。
-    with kb_write_lock(kb_id):
-        delete_kb_index_transactional(kb_id)  # 内部同一把锁，可重入
-        # 先持久化 deleted，再删 registry。后者失败时 KB 记录仍在、读写被 tombstone 拦住， DELETE 可重试；反过来会出现 registry 已消失但 tombstone 未落、无法重试的半删除态。
-        mark_kb_deleted(kb_id)
-        registry.delete(kb_id)
-    # 释放 executor 槽位，允许 KB 重建时创建新 executor，防止 256 上限耗尽。
-    index_jobs.release_executor(kb_id)
+    try:
+        with kb_write_lock(kb_id):
+            delete_kb_index_transactional(kb_id)  # 内部同一把锁，可重入
+            # 先持久化 deleted，再删 registry。后者失败时 KB 记录仍在、读写被 tombstone 拦住， DELETE 可重试；反过来会出现 registry 已消失但 tombstone 未落、无法重试的半删除态。
+            mark_kb_deleted(kb_id)
+            registry.delete(kb_id)
+            # 连带清掉该库的会话历史，否则同名新库复用 kb_id 会捡到旧对话。
+            if session_store is not None:
+                session_store.clear_kb(kb_id)
+    finally:
+        # 释放 executor 槽位，允许 KB 重建时创建新 executor，防止 256 上限耗尽。
+        index_jobs.release_executor(kb_id)
 
 
 _PDF_MAGIC = b"%PDF"
@@ -140,6 +143,7 @@ async def delete_knowledge_base(kb_id: str, request: Request):
             kb_id,
             registry,
             index_jobs,
+            request.app.state.session_store,
         )
     except KBCleanupError:
         # 清理不完整：registry 与 manifest 均保留，返回可重试错误而非误报删除成功。

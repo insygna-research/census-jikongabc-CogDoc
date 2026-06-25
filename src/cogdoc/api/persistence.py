@@ -149,6 +149,16 @@ class SqliteSessionStore:
 
             _execute_write_with_retry(_do)
 
+    # 删库时连带清掉该 KB 下所有会话，避免同名新库复用 doc_id 后捡到旧历史。
+    def clear_kb(self, doc_id: str) -> None:
+        with self._lock:
+
+            def _do():
+                self._conn.execute("DELETE FROM sessions WHERE doc_id=?", (doc_id,))
+                self._conn.commit()
+
+            _execute_write_with_retry(_do)
+
     # 列出 list sessions 相关逻辑。
     def list_sessions(self, doc_id: str) -> list[dict[str, Any]]:
         # 列出某库下的会话，title 取展示历史里首条用户消息，按最近活跃排序。

@@ -64,6 +64,12 @@ class SessionStore:
         with self._lock:
             self._entries.pop((doc_id, session_id), None)
 
+    def clear_kb(self, doc_id: str) -> None:
+        # 删库时连带清掉该 KB 下所有会话，避免同名新库复用 doc_id 后捡到旧历史。
+        with self._lock:
+            for key in [k for k in self._entries if k[0] == doc_id]:
+                self._entries.pop(key, None)
+
     def list_sessions(self, doc_id: str) -> list[dict[str, Any]]:
         # 列出某库下的会话，title 取展示历史里首条用户消息，按最近活跃排序。
         with self._lock:
