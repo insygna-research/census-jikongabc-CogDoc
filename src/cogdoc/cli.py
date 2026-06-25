@@ -680,6 +680,17 @@ def _setup_completion(console: "Console") -> None:
 
 
 # 处理 main 相关逻辑。
+# 启动横幅：纯静态 ASCII（ansi_shadow 字体），不引入运行时依赖。
+BANNER = r"""
+ ██████╗ ██████╗  ██████╗ ██████╗  ██████╗  ██████╗
+██╔════╝██╔═══██╗██╔════╝ ██╔══██╗██╔═══██╗██╔════╝
+██║     ██║   ██║██║  ███╗██║  ██║██║   ██║██║
+██║     ██║   ██║██║   ██║██║  ██║██║   ██║██║
+╚██████╗╚██████╔╝╚██████╔╝██████╔╝╚██████╔╝╚██████╗
+ ╚═════╝ ╚═════╝  ╚═════╝ ╚═════╝  ╚═════╝  ╚═════╝
+"""
+
+
 def main():
     configure_logging()
 
@@ -718,6 +729,7 @@ def main():
     console = Console()
     _setup_completion(console)
 
+    print(BANNER)
     print("=" * 60)
     print("🚀 CogDoc 控制台 | 多知识库 + 多对话 | 输入 /help 查看命令")
     print(f"📥 收件箱目录: {console.inbox_dir}（把 PDF 放进来，再 /add 入库）")

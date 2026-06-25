@@ -337,8 +337,34 @@ def _next_id() -> int:
     return st.session_state.msg_seq
 
 
+def _hide_default_chrome() -> None:
+    # 隐藏 Streamlit 右上角默认工具条（Deploy / 菜单 / 状态）与页脚，只留自家品牌。
+    st.markdown(
+        """
+        <style>
+        [data-testid="stToolbar"] {display: none;}
+        [data-testid="stDecoration"] {display: none;}
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _brand_header() -> None:
+    # 主区顶部品牌标题，替代被隐藏的默认头。
+    st.markdown(
+        "<h2 style='margin:0 0 0.1rem 0;'>🧠 CogDoc</h2>"
+        "<p style='color:#888;margin:0 0 0.6rem 0;'>面向个人 / 企业的本地 RAG 知识库控制台</p>",
+        unsafe_allow_html=True,
+    )
+
+
 def main() -> None:
     _init_state()
+    _hide_default_chrome()
+    _brand_header()
     _sidebar()
     _chat_area()
 
