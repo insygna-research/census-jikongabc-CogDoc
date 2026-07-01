@@ -5,25 +5,33 @@ from cogdoc.tools.reranker import BGEReranker
 
 @pytest.fixture(autouse=True)
 def restore_reranker_state():
+    # 每个测试前后恢复 reranker 单例状态。
     saved_device = BGEReranker.device
     saved_model = BGEReranker._model
     saved_tokenizer = BGEReranker._tokenizer
+    saved_required_cuda_free_bytes = BGEReranker.REQUIRED_CUDA_FREE_BYTES
+    BGEReranker.REQUIRED_CUDA_FREE_BYTES = 2800 * 1024 * 1024
     yield
     BGEReranker.device = saved_device
     BGEReranker._model = saved_model
     BGEReranker._tokenizer = saved_tokenizer
+    BGEReranker.REQUIRED_CUDA_FREE_BYTES = saved_required_cuda_free_bytes
 
 
 class _FakeModel:
+    # 模拟支持设备迁移的重排模型。
     def to(self, dev):
+        # 记录模型被迁移到的目标设备。
         self.device = dev
         return self
 
     def eval(self):
+        # 模拟模型进入推理模式。
         return self
 
 
 def _stub_model_loading(monkeypatch):
+    # 替换模型加载流程，避免测试下载真实权重。
     monkeypatch.setattr(
         reranker.AutoTokenizer, "from_pretrained", lambda name: object()
     )

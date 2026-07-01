@@ -74,10 +74,14 @@ class Generator:
             source = meta.get("source", "未知文件")
             page = meta.get("page", 1)
             chunk_id = meta.get("chunk_id", meta.get("chunk_index", 0))
+            chunk_context = str(meta.get("context", "") or "").strip()
+            body = doc["text"].strip()
+            if chunk_context:
+                body = f"定位上下文：\n{chunk_context}\n\n正文：\n{body}"
 
             block = (
                 f'<Document source="{source}" page="{page}" chunk_id="{chunk_id}">\n'
-                f"{doc['text'].strip()}\n"
+                f"{body}\n"
                 f"</Document>"
             )
             context_blocks.append(block)

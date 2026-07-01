@@ -1,7 +1,7 @@
 import pytest
 from cogdoc.tools.embedder import Embedder
 from cogdoc.tools.retriever.bm25_retriever import BM25Retriever
-from cogdoc.tools.retriever.vector_retriever import VectorRetriever
+from cogdoc.tools.retriever.vector_retriever import VectorRetriever, _meta_from_stored
 
 
 # 封装 _DummyBM25 的状态与行为。
@@ -69,3 +69,24 @@ def test_vector_search_rejects_legacy_docs_without_chunk_id(monkeypatch):
 
     with pytest.raises(RuntimeError, match="missing stable chunk_id"):
         retriever.search("legacy", top_k=1)
+
+
+# 验证 retriever metadata preserves chunk context。
+def test_retriever_metadata_preserves_chunk_context():
+    # 定位上下文属于 chunk 契约的一部分，BM25 registry 与向量元数据都必须保留。
+    meta = {
+        "chunk_id": "chunk:1",
+        "source_sha256": "sha",
+        "local_chunk_index": 0,
+        "chunk_index": 3,
+        "source": "paper.pdf",
+        "page": 1,
+        "page_start": 1,
+        "page_end": 2,
+        "origin": "vector",
+        "context": "前文：背景\n后文：结论",
+    }
+    doc = {"text": "正文", "meta": meta}
+
+    assert BM25Retriever._clean_doc(doc)["meta"]["context"] == meta["context"]
+    assert _meta_from_stored(meta)["context"] == meta["context"]

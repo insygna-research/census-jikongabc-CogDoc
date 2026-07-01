@@ -1,14 +1,16 @@
 DEFAULT_CHUNK_CHAR_SIZE = 600
 DEFAULT_CHUNK_CHAR_OVERLAP = 60
 MIN_CHUNK_CHARS = 30
+DEFAULT_CHUNK_CONTEXT_CHARS = 160
 
-# 切块边界逻辑变化时必须同步更新版本；纳入文件名后 bump 到 v2。
-CHUNK_IDENTITY_BASE_VERSION = "source_sha256_name_page_span_local_v2"
+# 切块边界逻辑变化时必须同步更新版本；语义边界 + 上下文元数据后 bump 到 v3。
+CHUNK_IDENTITY_BASE_VERSION = "source_sha256_name_page_span_local_v3_semantic"
 CHUNK_IDENTITY_VERSION = (
     f"{CHUNK_IDENTITY_BASE_VERSION}"
     f"_cs{DEFAULT_CHUNK_CHAR_SIZE}"
     f"_ov{DEFAULT_CHUNK_CHAR_OVERLAP}"
     f"_min{MIN_CHUNK_CHARS}"
+    f"_ctx{DEFAULT_CHUNK_CONTEXT_CHARS}"
 )
 
 

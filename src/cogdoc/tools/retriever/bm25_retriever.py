@@ -96,19 +96,22 @@ class BM25Retriever(BaseRetriever):
     def _clean_doc(c: RetrievedDoc) -> RetrievedDoc:
         # 只留 chunk 身份元数据，去掉检索期临时字段。
         meta = c["meta"]
+        cleaned_meta = {
+            "chunk_id": str(meta["chunk_id"]),
+            "source_sha256": str(meta["source_sha256"]),
+            "local_chunk_index": int(meta["local_chunk_index"]),
+            "chunk_index": int(meta["chunk_index"]),
+            "source": str(meta["source"]),
+            "page": int(meta["page"]),
+            "page_start": int(meta["page_start"]),
+            "page_end": int(meta["page_end"]),
+            "origin": str(meta.get("origin", "file")),
+        }
+        if meta.get("context"):
+            cleaned_meta["context"] = str(meta["context"])
         return {
             "text": c["text"],
-            "meta": {
-                "chunk_id": str(meta["chunk_id"]),
-                "source_sha256": str(meta["source_sha256"]),
-                "local_chunk_index": int(meta["local_chunk_index"]),
-                "chunk_index": int(meta["chunk_index"]),
-                "source": str(meta["source"]),
-                "page": int(meta["page"]),
-                "page_start": int(meta["page_start"]),
-                "page_end": int(meta["page_end"]),
-                "origin": str(meta.get("origin", "file")),
-            },
+            "meta": cleaned_meta,
         }
 
     # 处理 persist 相关逻辑。
@@ -221,20 +224,23 @@ class BM25Retriever(BaseRetriever):
             page_end = int(meta_data["page_end"])
             local_chunk_index = int(meta_data["local_chunk_index"])
 
+            meta = {
+                "chunk_id": str(chunk_id),
+                "source_sha256": source_sha256,
+                "local_chunk_index": local_chunk_index,
+                "chunk_index": int(meta_data["chunk_index"]),
+                "source": str(meta_data["source"]),
+                "page": int(meta_data["page"]),
+                "page_start": page_start,
+                "page_end": page_end,
+                "origin": str(meta_data["origin"]),
+            }
+            if meta_data.get("context"):
+                meta["context"] = str(meta_data["context"])
             retrieved_docs.append(
                 {
                     "text": doc_copy["text"],
-                    "meta": {
-                        "chunk_id": str(chunk_id),
-                        "source_sha256": source_sha256,
-                        "local_chunk_index": local_chunk_index,
-                        "chunk_index": int(meta_data["chunk_index"]),
-                        "source": str(meta_data["source"]),
-                        "page": int(meta_data["page"]),
-                        "page_start": page_start,
-                        "page_end": page_end,
-                        "origin": str(meta_data["origin"]),
-                    },
+                    "meta": meta,
                     "retrieval": {"bm25_score": float(score), "search_channel": "bm25"},
                 }
             )

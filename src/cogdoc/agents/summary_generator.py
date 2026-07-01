@@ -37,6 +37,7 @@ def run_section_cells(tasks: List, worker: Callable, is_local: bool) -> List:
 
 
 def tokenize_for_section(text: str) -> set[str]:
+    # 把章节选择文本转成去重 token 集合。
     return set(tokenize_mixed_text(text))
 
 
@@ -79,9 +80,13 @@ def format_summary_context(docs: List[RetrievedDoc]) -> str:
         source = meta.get("source", "未知文件")
         page = meta.get("page", 1)
         chunk_id = meta.get("chunk_id", meta.get("chunk_index", 0))
+        chunk_context = str(meta.get("context", "") or "").strip()
+        body = doc["text"].strip()
+        if chunk_context:
+            body = f"定位上下文：\n{chunk_context}\n\n正文：\n{body}"
         blocks.append(
             f'<Document source="{source}" page="{page}" chunk_id="{chunk_id}">\n'
-            f"{doc['text'].strip()}\n"
+            f"{body}\n"
             f"</Document>"
         )
     return "\n\n".join(blocks)
@@ -145,6 +150,7 @@ def all_contents_no_evidence(contents: Iterable[str]) -> bool:
 
 
 def build_summary_evidence(docs: List[RetrievedDoc]) -> List[Evidence]:
+    # 将参与生成的 chunk 转成前端展示 evidence。
     return [
         Evidence(
             chunk_id=doc.get("meta", {}).get("chunk_id", ""),
@@ -211,6 +217,7 @@ def collect_section_evidence(
     results: List[SummarySectionResult],
     fallback_docs: List[RetrievedDoc],
 ) -> List[Evidence]:
+    # 汇总各章节 evidence，必要时回退到全文 chunk。
     return collect_evidence_items(
         (result.get("evidence", []) for result in results),
         fallback_docs,
@@ -219,6 +226,7 @@ def collect_section_evidence(
 
 
 def append_citation_warning(answer: str, critique: str, unit_label: str) -> str:
+    # 在答案末尾追加引用校验警告。
     return (
         f"{answer}\n\n"
         f"{CITATION_WARNING_HEADING}\n"
@@ -228,6 +236,7 @@ def append_citation_warning(answer: str, critique: str, unit_label: str) -> str:
 
 
 def _summary_messages(source: str, plan: SummarySectionPlan, query: str, context: str):
+    # 构造首次章节摘要调用的消息。
     return [
         SystemMessage(
             content=(
@@ -267,6 +276,7 @@ def _summary_messages(source: str, plan: SummarySectionPlan, query: str, context
 def _summary_retry_messages(
     source: str, plan: SummarySectionPlan, query: str, context: str
 ):
+    # 构造本地模型无依据误判后的重试消息。
     return [
         SystemMessage(
             content=(
@@ -326,8 +336,10 @@ def generate_section_cell(
 
 
 class SectionSummaryAgent:
+    # 负责按章节生成单文档摘要。
     @staticmethod
     def summarize_sections(state: dict) -> dict:
+        # 生成所有章节摘要并保持章节顺序。
         docs: List[RetrievedDoc] = state.get("summary_docs", [])
         plans: List[SummarySectionPlan] = state.get("summary_section_plans", [])
         query = state.get("query", "")
@@ -341,6 +353,7 @@ class SectionSummaryAgent:
         doc_tokens = [(doc, tokenize_for_section(doc["text"])) for doc in docs]
 
         def build_section_result(plan: SummarySectionPlan) -> SummarySectionResult:
+            # 生成单个章节结果。
             content, evidence = generate_section_cell(
                 llm,
                 source,
@@ -364,8 +377,10 @@ class SectionSummaryAgent:
 
 
 class GlobalSummaryAgent:
+    # 负责合并章节摘要并执行最终引用校验。
     @staticmethod
     def build_final_summary(state: dict) -> dict:
+        # 组装最终摘要答案和审计字段。
         source = state.get("summary_source", "")
         docs: List[RetrievedDoc] = state.get("summary_docs", [])
         results: List[SummarySectionResult] = state.get("summary_section_results", [])

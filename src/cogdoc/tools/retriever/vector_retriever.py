@@ -101,19 +101,20 @@ class VectorRetriever(BaseRetriever):
             chunk_id = str(meta["chunk_id"])
             ids.append(chunk_id)
             texts.append(c["text"])
-            metadatas.append(
-                {
-                    "chunk_id": chunk_id,
-                    "source_sha256": meta["source_sha256"],
-                    "local_chunk_index": meta["local_chunk_index"],
-                    "chunk_index": meta["chunk_index"],
-                    "source": meta["source"],
-                    "page": meta["page"],
-                    "page_start": meta["page_start"],
-                    "page_end": meta["page_end"],
-                    "origin": meta.get("origin", "file"),
-                }
-            )
+            stored_meta = {
+                "chunk_id": chunk_id,
+                "source_sha256": meta["source_sha256"],
+                "local_chunk_index": meta["local_chunk_index"],
+                "chunk_index": meta["chunk_index"],
+                "source": meta["source"],
+                "page": meta["page"],
+                "page_start": meta["page_start"],
+                "page_end": meta["page_end"],
+                "origin": meta.get("origin", "file"),
+            }
+            if meta.get("context"):
+                stored_meta["context"] = str(meta["context"])
+            metadatas.append(stored_meta)
         return ids, metadatas, texts
 
     # 增量写入 upsert chunks 相关逻辑。
@@ -189,7 +190,7 @@ def _meta_from_stored(meta_data: dict) -> dict:
         raise RuntimeError(
             "Vector index is missing stable chunk_id metadata; rebuild the index."
         )
-    return {
+    restored = {
         "chunk_id": str(chunk_id),
         "source_sha256": str(meta_data.get("source_sha256", "")),
         "local_chunk_index": int(meta_data["local_chunk_index"]),
@@ -200,3 +201,6 @@ def _meta_from_stored(meta_data: dict) -> dict:
         "page_end": int(meta_data["page_end"]),
         "origin": str(meta_data["origin"]),
     }
+    if meta_data.get("context"):
+        restored["context"] = str(meta_data["context"])
+    return restored

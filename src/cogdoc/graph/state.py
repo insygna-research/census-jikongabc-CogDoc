@@ -25,6 +25,7 @@ class DocMeta(TypedDict):
     page_end: int
     score: float
     origin: str
+    context: NotRequired[str]
 
 
 class RetrievalMetrics(TypedDict, total=False):
@@ -45,12 +46,14 @@ class RetrievedDoc(TypedDict):
 
 
 class ChatMessage(TypedDict):
+    # ChatMessage 保存会话历史中的单条消息。
     role: str
     content: str
     timestamp: Optional[str]
 
 
 class AgentStepTrace(TypedDict):
+    # AgentStepTrace 保存图节点的输入输出摘要。
     step_name: str
     input_summary: str
     output_summary: str
