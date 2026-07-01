@@ -165,16 +165,16 @@ Driven by `build_kb_index_transactional` whenever a KB's files change (`/add`, `
 1. **Scan** — `scan_pdf_manifest_native` (Rust) hashes every PDF with rayon-parallel, 1 MiB-buffered SHA-256 and returns `{doc_id, documents: [{name, size, sha256}]}`, sorted by filename.
 2. **Compare** — `manifests_match` reuses the index only if `doc_id`, `chunk_identity_version`, and every `{name, sha256}` match the saved manifest; any mismatch forces a rebuild.
 3. **Parse** — `smart_parse` (PyMuPDF) extracts page text, reflows two-column layouts by block center-x, and flags likely scanned pages (`is_ocr_fallback`). No OCR is performed; flagged pages contribute no text.
-4. **Chunk** — `chunk_paper` slides a 600-char / 60-overlap window (30-char min) over the page stream, maps each chunk to its page span via `bisect`, and assigns a stable `chunk_id`.
+4. **Chunk** — `chunk_paper` keeps each chunk under 600 chars with 60-char overlap (30-char min), preferring paragraph, sentence/semicolon, newline, and whitespace boundaries before falling back to a fixed window for very long unbroken text. Each chunk stores up to 160 chars of surrounding context, maps back to its page span via `bisect`, and receives a stable `chunk_id`.
 5. **Index** — chunks land in Chroma (vector) and a pickled tokenized corpus; on load the native `Bm25Index` is rebuilt from that corpus. `save_index_manifest` persists the manifest. Tokenization uses `tokenize_mixed_text_native` (`jieba-rs` for Chinese, Snowball stemming + stopword removal for English).
 
 **Chunk identity contract:**
 
 ```
-chunk_id = sha256:{source_sha256}:p{page_start}-p{page_end}:c{local_chunk_index}
+chunk_id = sha256:{source_sha256}:src:{source_name}:p{page_start}-p{page_end}:c{local_chunk_index}
 ```
 
-`chunk_id` is the single stable identity key across chunker, index, retriever, RRF, and evidence — dedup and fusion never rely on array position. It is versioned (`chunk_identity_version = source_sha256_page_span_local_v1_cs600_ov60_min30`); changing chunk boundaries must bump `CHUNK_IDENTITY_BASE_VERSION` so stale indexes rebuild instead of mixing schemes.
+`chunk_id` is the single stable identity key across chunker, index, retriever, RRF, and evidence — dedup and fusion never rely on array position. It is versioned (`chunk_identity_version = source_sha256_name_page_span_local_v3_semantic_cs600_ov60_min30_ctx160`); changing chunk boundaries must bump `CHUNK_IDENTITY_BASE_VERSION` so stale indexes rebuild instead of mixing schemes.
 
 ## Query Pipeline
 
