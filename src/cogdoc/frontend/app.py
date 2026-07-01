@@ -23,6 +23,9 @@ def _init_state() -> None:
     st.session_state.setdefault("messages", [])
     st.session_state.setdefault("msg_seq", 0)
     st.session_state.setdefault("restored_for", None)
+    st.session_state.setdefault("answering", False)
+    st.session_state.setdefault("pending_prompt", None)
+    st.session_state.setdefault("pending_mode", None)
     # 本会话内已知的对话 id（按 kb），与后端列表合并，保证空/新对话也留得住、点得到。
     st.session_state.setdefault("known_sessions", {})
 
@@ -269,7 +272,14 @@ def _chat_area() -> None:
     if kb_id:
         _restore_history(kb_id)
     st.subheader(f"对话 · {kb_id or '未选择知识库'}")
-    mode = st.radio("模式", ["auto", "qa", "summary", "compare"], horizontal=True)
+    answering = bool(st.session_state.answering)
+    mode = st.radio(
+        "模式",
+        ["auto", "qa", "summary", "compare"],
+        horizontal=True,
+        key="chat_mode",
+        disabled=answering,
+    )
 
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
@@ -279,37 +289,54 @@ def _chat_area() -> None:
                     msg["final"], key=msg["id"], query=msg.get("query", "")
                 )
 
-    prompt = st.chat_input("问点什么…", disabled=not kb_id)
-    if not prompt:
-        return
+    prompt = st.chat_input("问点什么…", disabled=not kb_id or answering)
+    if prompt:
+        st.session_state.messages.append(
+            {"role": "user", "content": prompt, "id": _next_id()}
+        )
+        st.session_state.pending_prompt = prompt
+        st.session_state.pending_mode = mode
+        st.session_state.answering = True
+        st.rerun()
 
-    st.session_state.messages.append(
-        {"role": "user", "content": prompt, "id": _next_id()}
-    )
-    with st.chat_message("user"):
-        st.markdown(prompt)
+    pending_prompt = st.session_state.get("pending_prompt")
+    if not pending_prompt:
+        return
+    pending_mode = st.session_state.get("pending_mode") or mode
 
     with st.chat_message("assistant"):
         box = st.empty()
+        stage_box = st.empty()
         answer, final, error = "", None, None
         try:
             for event, data in _client().stream_chat(
                 kb_id,
-                prompt,
-                mode=mode,
+                pending_prompt,
+                mode=pending_mode,
                 session_id=st.session_state.session_id,
                 is_local=st.session_state.is_local,
             ):
                 if event == "token":
                     answer += data.get("content", "")
                     box.markdown(answer + "▌")
+                elif event == "start":
+                    stage_box.caption("正在启动请求…")
+                elif event == "node":
+                    stage = data.get("stage", "")
+                    if stage:
+                        stage_box.caption(f"正在处理：{stage}")
                 elif event == "final":
                     final = data
                 elif event == "error":
                     error = data
         except Exception as exc:
             error = {"message": str(exc)}
+        finally:
+            st.session_state.pending_prompt = None
+            st.session_state.pending_mode = None
+            st.session_state.answering = False
 
+        stage_box.empty()
         if error:
             box.error(
                 f"[{error.get('error_code', 'ERROR')}] {error.get('message', '')}"
@@ -319,17 +346,18 @@ def _chat_area() -> None:
             answer = (final or {}).get("answer", answer)
             box.markdown(answer or "（无答案）")
             if final:
-                _render_evidence(final, key=str(_next_id()), query=prompt)
+                _render_evidence(final, key=str(_next_id()), query=pending_prompt)
 
     st.session_state.messages.append(
         {
             "role": "assistant",
             "content": answer,
             "final": final,
-            "query": prompt,
+            "query": pending_prompt,
             "id": _next_id(),
         }
     )
+    st.rerun()
 
 
 def _next_id() -> int:
