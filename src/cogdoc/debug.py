@@ -25,6 +25,7 @@ from cogdoc.service.ingest_service import (
     drain_purge_queue,
     stamp_index_build_version,
 )
+from cogdoc.service.kb_state import KBState
 from cogdoc.service.mutation_journal import shared_mutation_journal
 from cogdoc.service.process_lock import (
     acquire_single_instance_lock,
@@ -323,6 +324,40 @@ def _resolve_source_dir(kb_id: str) -> str:
     return get_settings().cogdoc_doc_dir
 
 
+# 列出知识库 pdf 相关逻辑。
+def _list_kb_pdfs(kb_id: str, source_dir: str) -> list[str]:
+    # 优先读已提交 state/manifest，索引未就绪时回退扫描源目录。
+    active = KBState(kb_id).active()
+    docs = (
+        active.get("documents", [])
+        if active is not None
+        else load_index_manifest(kb_id).get("documents", [])
+    )
+    names = [str(doc.get("name", "")) for doc in docs if doc.get("name")]
+    if names:
+        return sorted(names)
+    if not os.path.isdir(source_dir):
+        return []
+    return sorted(
+        name
+        for name in os.listdir(source_dir)
+        if name.lower().endswith(".pdf")
+        and os.path.isfile(os.path.join(source_dir, name))
+    )
+
+
+# 打印知识库 pdf 相关逻辑。
+def print_kb_pdfs(kb_id: str, source_dir: str) -> None:
+    # 展示当前 debug 知识库内的 PDF 文件名。
+    pdfs = _list_kb_pdfs(kb_id, source_dir)
+    if not pdfs:
+        print("（当前知识库还没有 PDF。）")
+        return
+    print(f"📄 知识库 【{kb_id}】 PDF:")
+    for name in pdfs:
+        print(f"   • {name}")
+
+
 # 处理 main 相关逻辑。
 def main():
     parser = argparse.ArgumentParser(
@@ -394,6 +429,7 @@ def main():
     print("       · /qa <问题>            强制问答")
     print("       · /summary <文件名>     强制总结指定文档")
     print("       · /compare <文件A> <文件B> ...  强制对比多篇文档（≥2，本地模式限 2）")
+    print("       · /ls                  查看当前知识库 PDF")
     print("   - 输入 '/local' / '/cloud' 切换运行模式")
     print("   - 输入 'exit' 或 'quit' 退出")
     print("=" * 60)
@@ -421,6 +457,10 @@ def main():
             elif user_input.lower() == "/cloud":
                 is_local = False
                 print("🔄 控制面配置已成功切换到：云端 API 模式。")
+                continue
+
+            elif user_input.lower() == "/ls":
+                print_kb_pdfs(TARGET_DOC_ID, TARGET_DOC_DIR)
                 continue
 
             forced_task, cleaned_query = parse_forced_mode(user_input)

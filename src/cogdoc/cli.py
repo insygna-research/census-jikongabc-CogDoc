@@ -53,6 +53,7 @@ COMPLETION_COMMANDS = [
     "/inbox",
     "/add",
     "/docs",
+    "/ls",
     "/rm",
     "/new",
     "/chats",
@@ -143,7 +144,7 @@ HELP_TEXT = """\
     /inbox                 列出 your_documents 收件箱里的 PDF
     /add <文件名.pdf>      把收件箱里的 PDF 加入当前库并重建索引
     /add                   把收件箱里所有尚未入库的 PDF 一次性加入
-    /docs                  列出当前库内文档
+    /docs /ls              列出当前库内文档
     /rm  <文件名.pdf>      从当前库移除文档并重建索引
   对话（针对当前知识库，历史持久化）
     /new                   开启一个新对话
@@ -617,7 +618,7 @@ class Console:
         if low == "/inbox":
             self.cmd_inbox()
             return True
-        if low == "/docs":
+        if low in ("/docs", "/ls"):
             self.cmd_docs()
             return True
         if low == "/new":
