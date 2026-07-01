@@ -9,6 +9,7 @@ from cogdoc.tools.document_loader import list_sources, load_source_chunks
 from cogdoc.tools.tokenizer import tokenize_mixed_text, tokenize_corpus
 from cogdoc.tools.rust_core_loader import ensure_rust_core
 from cogdoc.tools.retriever.base_retriever import BaseRetriever
+from cogdoc.tools.retriever.retrieval_text import retrieval_text
 
 
 # BM25 计算与索引序列化均下放 rust_core，持久化只存 chunk 注册表 + 原生索引字节。
@@ -152,7 +153,7 @@ class BM25Retriever(BaseRetriever):
         if not chunks:
             return
         registry = [self._clean_doc(c) for c in chunks]
-        corpus = tokenize_corpus([c["text"] for c in chunks])
+        corpus = tokenize_corpus([retrieval_text(c) for c in chunks])
         self._swap_in(registry, _rust_core.Bm25Index(corpus))
 
     # 增量写入 upsert documents 相关逻辑。
@@ -167,7 +168,7 @@ class BM25Retriever(BaseRetriever):
         ]
         new_registry = [registry[i] for i in keep_indices]
         new_registry.extend(self._clean_doc(c) for c in new_chunks)
-        new_tokens = tokenize_corpus([c["text"] for c in new_chunks])
+        new_tokens = tokenize_corpus([retrieval_text(c) for c in new_chunks])
 
         if not new_registry:
             self._swap_in([], None)

@@ -4,6 +4,7 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
 
+# 合并图状态中的列表字段。
 def merge_lists(old_list: Optional[Any], new_list: Optional[Any]) -> List[Any]:
     # 空列表表示显式清空历史。
     if new_list is not None and len(new_list) == 0:
@@ -36,6 +37,7 @@ class RetrievalMetrics(TypedDict, total=False):
     rerank_score: float
     search_channel: str
     rewrite_query: str
+    parent_chunk_id: str
 
 
 class RetrievedDoc(TypedDict):

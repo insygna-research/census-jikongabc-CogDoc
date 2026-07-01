@@ -1,10 +1,11 @@
 import copy
+import logging
 from collections import OrderedDict
 from threading import RLock
 from langchain_core.messages import SystemMessage
 from langgraph.graph import StateGraph, START, END
 from cogdoc.config.settings import get_settings
-from cogdoc.graph.state import GraphState, Evidence
+from cogdoc.graph.state import GraphState, Evidence, RetrievedDoc
 from cogdoc.observability.logger import log_event
 from cogdoc.service.kb_lifecycle import LIFECYCLE_ACTIVE, shared_lifecycle_store
 from cogdoc.service.kb_readers import kb_read_lease
@@ -21,6 +22,9 @@ from cogdoc.agents.qa_generator import Generator
 from cogdoc.agents.query_rewriter import QueryRewriteAgent
 from cogdoc.agents.rewrite_verifier import RewriteVerifyAgent
 from cogdoc.agents.citation_validator import CitationValidatorAgent
+
+
+NEIGHBOR_CONTEXT_RADIUS = 1
 
 
 # 封装 RetrieverFactory 的状态与行为。
@@ -133,6 +137,100 @@ def verify_rewrite_node(state: GraphState) -> dict:
     return RewriteVerifyAgent.verify_rewrites(state)
 
 
+# 定位命中文本块在源文档文本块序列中的位置。
+def _find_source_chunk_index(
+    source_chunks: list[RetrievedDoc], target_doc: RetrievedDoc
+) -> int:
+    target_meta = target_doc.get("meta", {})
+    target_id = str(target_meta.get("chunk_id", "") or "")
+    if target_id:
+        for idx, doc in enumerate(source_chunks):
+            if str(doc.get("meta", {}).get("chunk_id", "") or "") == target_id:
+                return idx
+
+    target_local = target_meta.get("local_chunk_index")
+    if target_local is None:
+        return -1
+    for idx, doc in enumerate(source_chunks):
+        if doc.get("meta", {}).get("local_chunk_index") == target_local:
+            return idx
+    return -1
+
+
+# 复制相邻文本块并标记上下文来源。
+def _copy_neighbor_doc(doc: RetrievedDoc, parent_chunk_id: str) -> RetrievedDoc:
+    copied = copy.deepcopy(doc)
+    retrieval = copied.setdefault("retrieval", {})
+    retrieval["search_channel"] = "neighbor"
+    retrieval["parent_chunk_id"] = parent_chunk_id
+    return copied
+
+
+# 生成缺失文本块标识时的临时去重键。
+def _missing_chunk_key(expanded: "OrderedDict[str, RetrievedDoc]") -> str:
+    return f"__missing_chunk_id_{len(expanded)}"
+
+
+# 为重排命中文本块补充前后相邻文本块，降低答案缺上下文的概率。
+def _expand_with_neighbor_chunks(
+    doc_id: str, reranked_docs: list[RetrievedDoc], state: GraphState | None = None
+) -> list[RetrievedDoc]:
+    if not reranked_docs:
+        return []
+
+    expanded: "OrderedDict[str, RetrievedDoc]" = OrderedDict()
+    source_cache: dict[str, list[RetrievedDoc]] = {}
+    try:
+        with kb_read_lease(doc_id):
+            engine = RetrieverFactory.get_engine(doc_id)
+            for doc in reranked_docs:
+                meta = doc.get("meta", {})
+                source = str(meta.get("source", "") or "")
+                parent_chunk_id = str(meta.get("chunk_id", "") or "")
+                if not source or not parent_chunk_id:
+                    expanded[parent_chunk_id or _missing_chunk_key(expanded)] = (
+                        copy.deepcopy(doc)
+                    )
+                    continue
+
+                if source not in source_cache:
+                    source_cache[source] = engine.load_source_chunks(source)
+                source_chunks = source_cache[source]
+                hit_idx = _find_source_chunk_index(source_chunks, doc)
+                if hit_idx < 0:
+                    expanded[parent_chunk_id or _missing_chunk_key(expanded)] = (
+                        copy.deepcopy(doc)
+                    )
+                    continue
+
+                start = max(0, hit_idx - NEIGHBOR_CONTEXT_RADIUS)
+                end = min(len(source_chunks), hit_idx + NEIGHBOR_CONTEXT_RADIUS + 1)
+                for idx in range(start, end):
+                    neighbor = source_chunks[idx]
+                    neighbor_id = str(
+                        neighbor.get("meta", {}).get("chunk_id", "") or ""
+                    )
+                    if not neighbor_id:
+                        continue
+                    if neighbor_id == parent_chunk_id:
+                        expanded[neighbor_id] = copy.deepcopy(doc)
+                    elif neighbor_id not in expanded:
+                        expanded[neighbor_id] = _copy_neighbor_doc(
+                            neighbor, parent_chunk_id
+                        )
+    except Exception as exc:
+        log_event(
+            "qa",
+            "qa_neighbor_expand_failed",
+            state,
+            level=logging.WARNING,
+            error_class=type(exc).__name__,
+        )
+        return reranked_docs
+
+    return list(expanded.values())
+
+
 # 处理 retrieve node 相关逻辑。
 def retrieve_node(state: GraphState) -> dict:
     original_query = state.get("query", "")
@@ -180,6 +278,7 @@ def retrieve_node(state: GraphState) -> dict:
 def rerank_node(state: GraphState) -> dict:
     query = state.get("query", "")
     docs = state.get("retrieved_docs", [])
+    doc_id = state.get("doc_id", "default")
     is_local = state.get("is_local", False)
 
     target_device = "cpu" if is_local else BGEReranker.default_device()
@@ -188,15 +287,18 @@ def rerank_node(state: GraphState) -> dict:
     reranked_docs = BGEReranker.rerank(
         query=query, docs=docs, top_n=get_settings().qa_rerank_top_n
     )
+    # 下游沿用重排结果字段名，实际内容已包含相邻上下文扩展。
+    expanded_docs = _expand_with_neighbor_chunks(doc_id, reranked_docs, state)
     log_event(
         "qa",
         "qa_rerank",
         state,
         candidate_count=len(docs),
         reranked_count=len(reranked_docs),
+        expanded_count=len(expanded_docs),
         device=target_device,
     )
-    return {"reranked_docs": reranked_docs}
+    return {"reranked_docs": expanded_docs}
 
 
 # 处理 generate node 相关逻辑。

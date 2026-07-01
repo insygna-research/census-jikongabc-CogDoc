@@ -5,6 +5,7 @@ from cogdoc.config.settings import get_settings
 from cogdoc.graph.state import RetrievedDoc
 from cogdoc.tools.embedder import Embedder
 from cogdoc.tools.retriever.base_retriever import BaseRetriever
+from cogdoc.tools.retriever.retrieval_text import retrieval_text
 
 
 # 封装 EmbeddingModelMismatchError 的状态与行为。
@@ -120,7 +121,7 @@ class VectorRetriever(BaseRetriever):
     # 增量写入 upsert chunks 相关逻辑。
     def _upsert_chunks(self, chunks: List[RetrievedDoc]) -> None:
         # 此路重新计算 embedding；跨代复用旧向量请走 add_with_embeddings 避免重算。
-        embeddings = Embedder.embed_documents([c["text"] for c in chunks])
+        embeddings = Embedder.embed_documents([retrieval_text(c) for c in chunks])
         ids, metadatas, texts = self._materialize(chunks)
         self.collection.upsert(
             ids=ids, embeddings=embeddings, documents=texts, metadatas=metadatas
