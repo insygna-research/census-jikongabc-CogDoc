@@ -1,5 +1,5 @@
 import json
-from cogdoc.tools.eval.quality_metrics import compare_baseline, run_eval
+from cogdoc.tools.eval.quality_metrics import audit_coverage, compare_baseline, run_eval
 
 
 # 构造测试用文档。
@@ -130,3 +130,17 @@ def test_quality_baseline_treats_missing_gated_metric_as_regression(tmp_path):
     }
 
     assert compare_baseline(report, baseline) == 1
+
+
+# 验证 quality coverage audit reports missing dimensions 场景。
+def test_quality_coverage_audit_reports_missing_dimensions():
+    coverage = audit_coverage(
+        [
+            {"case_type": "router", "layer": "easy"},
+            {"case_type": "citation", "layer": "hard"},
+        ]
+    )
+
+    assert coverage["missing_case_types"] == ["faithfulness"]
+    assert coverage["missing_layers"] == ["no-answer", "compare", "multi-turn"]
+    assert coverage["is_coverage_complete"] is False

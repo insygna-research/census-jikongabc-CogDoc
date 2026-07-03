@@ -10,7 +10,7 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 from cogdoc.config.settings import get_settings
-from cogdoc.tools.eval.quality_metrics import compare_baseline, run_eval
+from cogdoc.tools.eval.quality_metrics import audit_coverage, compare_baseline, run_eval
 
 
 # 返回项目根目录路径。
@@ -78,12 +78,31 @@ def print_report(report: dict) -> None:
     print()
 
 
+# 输出覆盖审计结果。
+def print_coverage(coverage: dict) -> None:
+    print("\n覆盖审计:")
+    print(f"  case_types={coverage['case_types']}")
+    print(f"  layers={coverage['layers']}")
+    if coverage["missing_case_types"]:
+        print(f"  缺少 case_type: {coverage['missing_case_types']}")
+    if coverage["missing_layers"]:
+        print(f"  缺少 layer: {coverage['missing_layers']}")
+    if coverage["is_coverage_complete"]:
+        print("  覆盖完整")
+    print()
+
+
 # 启动入口。
 def main() -> int:
     parser = argparse.ArgumentParser(description="离线质量评测 harness")
     parser.add_argument("--eval-set", type=Path, default=None, help="质量评测 JSONL")
     parser.add_argument("--json", type=Path, default=None, help="把报告写入 JSON 文件")
     parser.add_argument("--baseline", type=Path, default=None, help="与基线 JSON 对比")
+    parser.add_argument(
+        "--check-coverage",
+        action="store_true",
+        help="检查评测集是否覆盖必要 case_type 和推荐 layer",
+    )
     args = parser.parse_args()
 
     eval_set = args.eval_set or resolve_default_eval_set()
@@ -92,8 +111,12 @@ def main() -> int:
         print(f"评测集为空: {eval_set}")
         return 1
 
+    coverage = audit_coverage(items)
     report = run_eval(items)
     print_report(report)
+    if args.check_coverage:
+        report["coverage"] = coverage
+        print_coverage(coverage)
 
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
@@ -103,7 +126,12 @@ def main() -> int:
         print(f"报告已写入 {args.json}")
 
     if args.baseline:
-        return compare_baseline(report, args.baseline)
+        baseline_status = compare_baseline(report, args.baseline)
+        if args.check_coverage and not coverage["is_coverage_complete"]:
+            return 1
+        return baseline_status
+    if args.check_coverage and not coverage["is_coverage_complete"]:
+        return 1
     return 0
 
 

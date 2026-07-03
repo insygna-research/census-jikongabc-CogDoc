@@ -7,6 +7,8 @@ from cogdoc.agents.router import classify_intent_by_rule
 
 
 BASELINE_GATED_METRICS = ("router_rule_accuracy", "citation_accuracy")
+REQUIRED_CASE_TYPES = ("router", "citation", "faithfulness")
+RECOMMENDED_LAYERS = ("easy", "hard", "no-answer", "compare", "multi-turn")
 
 
 # 计算结果。
@@ -139,6 +141,23 @@ def run_eval(items: List[dict]) -> dict:
         "by_case_type": summary["by_case_type"],
         "by_layer": summary["by_layer"],
         "rows": rows,
+    }
+
+
+# 审计评测集覆盖面。
+def audit_coverage(items: List[dict]) -> dict:
+    case_types = {str(item.get("case_type", "")) for item in items}
+    layers = {str(item.get("layer", "unspecified")) for item in items}
+    missing_case_types = [
+        case_type for case_type in REQUIRED_CASE_TYPES if case_type not in case_types
+    ]
+    missing_layers = [layer for layer in RECOMMENDED_LAYERS if layer not in layers]
+    return {
+        "case_types": sorted(case_types),
+        "layers": sorted(layers),
+        "missing_case_types": missing_case_types,
+        "missing_layers": missing_layers,
+        "is_coverage_complete": not missing_case_types and not missing_layers,
     }
 
 

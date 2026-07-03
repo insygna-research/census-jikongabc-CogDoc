@@ -1,6 +1,8 @@
 from statistics import mean
 from typing import Dict, List, Sequence
 
+RECOMMENDED_RETRIEVAL_LAYERS = ("single-source", "multi-source", "no-answer")
+
 
 # 计算atk。
 def recall_at_k(
@@ -55,3 +57,28 @@ def aggregate(per_query_metrics: List[Dict[str, float]]) -> Dict[str, float]:
         return {}
     keys = per_query_metrics[0].keys()
     return {key: mean(metrics[key] for metrics in per_query_metrics) for key in keys}
+
+
+# 推断检索评测样本层级。
+def infer_retrieval_layer(item: dict) -> str:
+    expected = item.get("expected_sources", [])
+    if not expected:
+        return "no-answer"
+    if len(set(expected)) > 1:
+        return "multi-source"
+    return "single-source"
+
+
+# 审计检索评测集覆盖面。
+def audit_coverage(items: List[dict]) -> dict:
+    layers = {
+        str(item.get("layer") or infer_retrieval_layer(item)) for item in items
+    }
+    missing_layers = [
+        layer for layer in RECOMMENDED_RETRIEVAL_LAYERS if layer not in layers
+    ]
+    return {
+        "layers": sorted(layers),
+        "missing_layers": missing_layers,
+        "is_coverage_complete": not missing_layers,
+    }

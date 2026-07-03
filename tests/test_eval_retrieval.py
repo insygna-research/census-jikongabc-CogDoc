@@ -1,7 +1,9 @@
 from cogdoc.tools.eval.retrieval_metrics import (
     aggregate,
+    audit_coverage,
     evaluate_query,
     hit_at_k,
+    infer_retrieval_layer,
     recall_at_k,
     reciprocal_rank,
 )
@@ -59,3 +61,26 @@ def test_aggregate_means_each_metric():
 # 验证 aggregate empty is empty 场景。
 def test_aggregate_empty_is_empty():
     assert aggregate([]) == {}
+
+
+# 验证 infer retrieval layer from expected sources 场景。
+def test_infer_retrieval_layer_from_expected_sources():
+    assert infer_retrieval_layer({"expected_sources": ["a.pdf"]}) == "single-source"
+    assert (
+        infer_retrieval_layer({"expected_sources": ["a.pdf", "b.pdf"]})
+        == "multi-source"
+    )
+    assert infer_retrieval_layer({"expected_sources": []}) == "no-answer"
+
+
+# 验证 retrieval coverage audit reports missing layers 场景。
+def test_retrieval_coverage_audit_reports_missing_layers():
+    coverage = audit_coverage(
+        [
+            {"expected_sources": ["a.pdf"]},
+            {"expected_sources": ["a.pdf", "b.pdf"]},
+        ]
+    )
+
+    assert coverage["missing_layers"] == ["no-answer"]
+    assert coverage["is_coverage_complete"] is False

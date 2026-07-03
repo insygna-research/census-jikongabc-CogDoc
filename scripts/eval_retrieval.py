@@ -10,8 +10,11 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 from cogdoc.config.settings import get_settings
-from cogdoc.graph.subgraphs.qa import RetrieverFactory
-from cogdoc.tools.eval.retrieval_metrics import aggregate, evaluate_query
+from cogdoc.tools.eval.retrieval_metrics import (
+    aggregate,
+    audit_coverage,
+    evaluate_query,
+)
 
 
 # 返回项目根目录路径。
@@ -50,6 +53,8 @@ def load_eval_set(path: Path) -> List[dict]:
 
 # 检索 sources。
 def retrieve_sources(query: str, doc_id: str, top_k: int, rerank: bool) -> List[str]:
+    from cogdoc.graph.subgraphs.qa import RetrieverFactory
+
     engine = RetrieverFactory.get_engine(doc_id)
     docs = engine.search(query=query, top_k=top_k)
     if rerank and docs:
@@ -108,6 +113,17 @@ def print_report(report: dict) -> None:
     print()
 
 
+# 输出覆盖审计结果。
+def print_coverage(coverage: dict) -> None:
+    print("\n覆盖审计:")
+    print(f"  layers={coverage['layers']}")
+    if coverage["missing_layers"]:
+        print(f"  缺少 layer: {coverage['missing_layers']}")
+    if coverage["is_coverage_complete"]:
+        print("  覆盖完整")
+    print()
+
+
 # 生成对比 baseline。
 def compare_baseline(report: dict, baseline_path: Path) -> int:
     baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
@@ -157,7 +173,19 @@ def main() -> int:
         default=None,
         help="与基线 JSON 报告对比，回退则退出码非零",
     )
+    parser.add_argument(
+        "--check-coverage",
+        action="store_true",
+        help="检查评测集是否覆盖单源、多源和无答案层级",
+    )
+    parser.add_argument(
+        "--coverage-only",
+        action="store_true",
+        help="只检查评测集覆盖面，不执行真实检索",
+    )
     args = parser.parse_args()
+    if args.coverage_only and (args.json or args.baseline):
+        parser.error("--coverage-only 不能与 --json 或 --baseline 同时使用")
 
     eval_set = args.eval_set or resolve_default_eval_set()
     items = load_eval_set(eval_set)
@@ -165,8 +193,16 @@ def main() -> int:
         print(f"评测集为空: {eval_set}")
         return 1
 
+    coverage = audit_coverage(items)
+    if args.coverage_only:
+        print_coverage(coverage)
+        return 0 if coverage["is_coverage_complete"] else 1
+
     report = run_eval(items, sorted(args.k), args.rerank)
     print_report(report)
+    if args.check_coverage:
+        report["coverage"] = coverage
+        print_coverage(coverage)
 
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
@@ -176,7 +212,12 @@ def main() -> int:
         print(f"报告已写入 {args.json}")
 
     if args.baseline:
-        return compare_baseline(report, args.baseline)
+        baseline_status = compare_baseline(report, args.baseline)
+        if args.check_coverage and not coverage["is_coverage_complete"]:
+            return 1
+        return baseline_status
+    if args.check_coverage and not coverage["is_coverage_complete"]:
+        return 1
     return 0
 
 
