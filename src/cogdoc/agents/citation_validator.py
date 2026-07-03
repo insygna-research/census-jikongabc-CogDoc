@@ -6,7 +6,9 @@ from cogdoc.tools.rust_core_loader import ensure_rust_core
 rust_core = ensure_rust_core("validate_citations_native")
 
 
+# 定义 CitationValidatorAgent 数据结构。
 class CitationValidatorAgent:
+    # 校验 citations。
     @staticmethod
     def validate_citations(
         answer: str, valid_docs: List[Dict[str, Any]]

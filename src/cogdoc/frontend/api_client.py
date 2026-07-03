@@ -6,6 +6,7 @@ import httpx
 DEFAULT_TIMEOUT = 180.0
 
 
+# 完成 iterSSE事件列表 处理。
 def iter_sse_events(lines: Iterable[str]) -> Iterator[tuple[str, dict]]:
     # 把 SSE 行流解析成 (event_name, data)；空行结束一帧，非 JSON data 跳过。
     event_name = "message"
@@ -23,6 +24,7 @@ def iter_sse_events(lines: Iterable[str]) -> Iterator[tuple[str, dict]]:
                 continue
 
 
+# 交付层瘦客户端：只打 /v1，不碰后端智能逻辑。
 class CogDocClient:
     # 交付层瘦客户端：只打 /v1，不碰后端智能逻辑。
     def __init__(
@@ -37,9 +39,11 @@ class CogDocClient:
         key = api_key if api_key is not None else os.getenv("COGDOC_API_KEY", "")
         self._headers = {"Authorization": f"Bearer {key}"} if key else {}
 
+    # 拼接结果。
     def _url(self, path: str) -> str:
         return f"{self.base_url}{path}"
 
+    # 列出 knowledge bases。
     def list_knowledge_bases(self) -> list[dict]:
         return httpx.get(
             self._url("/v1/knowledge-bases"),
@@ -47,6 +51,7 @@ class CogDocClient:
             headers=self._headers,
         ).json()
 
+    # 创建 knowledge base。
     def create_knowledge_base(self, kb_id: str) -> httpx.Response:
         return httpx.post(
             self._url("/v1/knowledge-bases"),
@@ -55,6 +60,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
+    # 删除 knowledge base。
     def delete_knowledge_base(self, kb_id: str) -> httpx.Response:
         return httpx.delete(
             self._url(f"/v1/knowledge-bases/{kb_id}"),
@@ -62,6 +68,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
+    # 列出 documents。
     def list_documents(self, kb_id: str) -> httpx.Response:
         return httpx.get(
             self._url(f"/v1/knowledge-bases/{kb_id}/documents"),
@@ -69,6 +76,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
+    # 完成 上传document 处理。
     def upload_document(
         self, kb_id: str, filename: str, content: bytes
     ) -> httpx.Response:
@@ -80,6 +88,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
+    # 删除 document。
     def delete_document(self, kb_id: str, name: str) -> httpx.Response:
         return httpx.delete(
             self._url(f"/v1/knowledge-bases/{kb_id}/documents/{name}"),
@@ -87,6 +96,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
+    # 获取 job。
     def get_job(self, job_id: str) -> httpx.Response:
         return httpx.get(
             self._url(f"/v1/index-jobs/{job_id}"),
@@ -94,6 +104,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
+    # 获取 session history。
     def get_session_history(self, session_id: str, kb_id: str) -> httpx.Response:
         return httpx.get(
             self._url(f"/v1/sessions/{session_id}/history"),
@@ -102,6 +113,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
+    # 列出 sessions。
     def list_sessions(self, kb_id: str) -> httpx.Response:
         return httpx.get(
             self._url("/v1/sessions"),
@@ -110,6 +122,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
+    # 删除 session。
     def delete_session(self, session_id: str, kb_id: str) -> httpx.Response:
         return httpx.delete(
             self._url(f"/v1/sessions/{session_id}"),
@@ -118,6 +131,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
+    # 提交 feedback。
     def submit_feedback(
         self,
         trace_id: str,
@@ -140,6 +154,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
+    # 完成 chat请求体 处理。
     def _chat_payload(
         self, kb_id: str, query: str, mode: str, session_id: str | None, is_local: bool
     ) -> dict:
@@ -148,6 +163,7 @@ class CogDocClient:
             payload["session_id"] = session_id
         return payload
 
+    # 流式返回chat。
     def stream_chat(
         self,
         kb_id: str,

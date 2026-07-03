@@ -7,7 +7,7 @@ from threading import RLock
 from typing import Any
 
 
-# 处理 connect 相关逻辑。
+# 建立连接结果。
 def _connect(db_path: str) -> sqlite3.Connection:
     # 单连接跨线程复用：WAL 提升并发读写、busy_timeout 等锁而非立刻报错；外层用 RLock 串行化。 isolation_level=None 走 autocommit：每条 DML 立即提交，绝不留悬挂写事务长期占住 WAL 写锁 （否则 session/job 两条连接里任一处漏 commit 都会无限期堵死另一条连接的写，busy_timeout 也救不了）。
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
@@ -22,7 +22,7 @@ def _connect(db_path: str) -> sqlite3.Connection:
     return conn
 
 
-# 处理 execute write with retry 相关逻辑。
+# 执行写入withretry。
 def _execute_write_with_retry(fn, attempts: int = 3) -> None:
     # busy_timeout 兜底之外再加少量退避重试。总耗时上界（5s busy_timeout × 3 + 退避）约十几秒， 远小于客户端 180s，绝不能把重试堆到接近客户端超时（那会表现为"一直转、最终失败"）。
     delay = 0.1
@@ -37,7 +37,7 @@ def _execute_write_with_retry(fn, attempts: int = 3) -> None:
             delay = min(delay * 2, 0.5)
 
 
-# 封装 SqliteSessionStore 的状态与行为。
+# SessionStore 的落盘版：接口与内存版一致，但 updated_at 用墙钟，重启后 TTL 仍有效。
 class SqliteSessionStore:
     # SessionStore 的落盘版：接口与内存版一致，但 updated_at 用墙钟，重启后 TTL 仍有效。
     def __init__(
@@ -57,7 +57,7 @@ class SqliteSessionStore:
         )
         self._conn.commit()
 
-    # 处理 record 相关逻辑。
+    # 记录结果。
     def record(
         self,
         doc_id: str,
@@ -79,7 +79,7 @@ class SqliteSessionStore:
             memory.extend(memory_messages or [])
             display.extend(display_messages or [])
 
-            # 处理 do 相关逻辑。
+            # 执行内部回调。
             def _do():
                 self._conn.execute(
                     "INSERT INTO sessions (doc_id, session_id, memory, display, updated_at) "
@@ -100,17 +100,17 @@ class SqliteSessionStore:
 
             _execute_write_with_retry(_do)
 
-    # 获取 get history 相关逻辑。
+    # 返回历史记录。
     def get_history(self, doc_id: str, session_id: str | None) -> list[dict[str, Any]]:
         # 图输入：只取门控后的记忆回合。
         return self._read(doc_id, session_id, "memory")
 
-    # 获取 get display 相关逻辑。
+    # 返回展示记录。
     def get_display(self, doc_id: str, session_id: str | None) -> list[dict[str, Any]]:
         # 前端展示：取完整对话。
         return self._read(doc_id, session_id, "display")
 
-    # 读取 read 相关逻辑。
+    # 读取结果。
     def _read(self, doc_id: str, session_id: str | None, column: str) -> list:
         if not session_id:
             return []
@@ -133,13 +133,13 @@ class SqliteSessionStore:
                 pass
             return json.loads(row[0])
 
-    # 清理 clear 相关逻辑。
+    # 清理。
     def clear(self, doc_id: str, session_id: str | None) -> None:
         # 删除某会话的全部历史。
         if not session_id:
             return
         with self._lock:
-            # 处理 do 相关逻辑。
+            # 执行内部回调。
             def _do():
                 self._conn.execute(
                     "DELETE FROM sessions WHERE doc_id=? AND session_id=?",
@@ -153,13 +153,14 @@ class SqliteSessionStore:
     def clear_kb(self, doc_id: str) -> None:
         with self._lock:
 
+            # 执行内部回调。
             def _do():
                 self._conn.execute("DELETE FROM sessions WHERE doc_id=?", (doc_id,))
                 self._conn.commit()
 
             _execute_write_with_retry(_do)
 
-    # 列出 list sessions 相关逻辑。
+    # 列出 sessions。
     def list_sessions(self, doc_id: str) -> list[dict[str, Any]]:
         # 列出某库下的会话，title 取展示历史里首条用户消息，按最近活跃排序。
         with self._lock:
@@ -185,7 +186,7 @@ class SqliteSessionStore:
                 )
             return sessions
 
-    # 清理 purge expired locked 相关逻辑。
+    # 清理 expired locked。
     def _purge_expired_locked(self) -> None:
         if self.ttl_seconds <= 0:
             return
@@ -194,7 +195,7 @@ class SqliteSessionStore:
             (time.time() - self.ttl_seconds,),
         )
 
-    # 淘汰 evict overflow locked 相关逻辑。
+    # 淘汰溢出记录locked。
     def _evict_overflow_locked(self) -> None:
         # 超出上限按最旧活跃淘汰，和内存版语义一致。
         count = self._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
@@ -212,7 +213,7 @@ class SqliteSessionStore:
 _NON_TERMINAL_STATUS = ("pending", "running")
 
 
-# 封装 SqliteJobStore 的状态与行为。
+# 入库任务记录的落盘版：整条 record 存 JSON，status 单列出来便于孤儿协调。
 class SqliteJobStore:
     # 入库任务记录的落盘版：整条 record 存 JSON，status 单列出来便于孤儿协调。
     def __init__(self, db_path: str, reconcile_on_init: bool = True):
@@ -226,10 +227,10 @@ class SqliteJobStore:
         if reconcile_on_init:
             self.reconcile_orphans()
 
-    # 创建 create 相关逻辑。
+    # 创建。
     def create(self, record: dict) -> None:
         with self._lock:
-            # 处理 do 相关逻辑。
+            # 执行内部回调。
             def _do():
                 self._conn.execute(
                     "INSERT INTO index_jobs (job_id, status, data) VALUES (?, ?, ?)",
@@ -243,7 +244,7 @@ class SqliteJobStore:
 
             _execute_write_with_retry(_do)
 
-    # 更新 update 相关逻辑。
+    # 更新结果。
     def update(self, job_id: str, **fields: Any) -> None:
         # 读改写整条记录，status 列同步更新。
         with self._lock:
@@ -252,7 +253,7 @@ class SqliteJobStore:
                 return
             record.update(fields)
 
-            # 处理 do 相关逻辑。
+            # 执行内部回调。
             def _do():
                 self._conn.execute(
                     "UPDATE index_jobs SET status=?, data=? WHERE job_id=?",
@@ -262,19 +263,19 @@ class SqliteJobStore:
 
             _execute_write_with_retry(_do)
 
-    # 获取 get 相关逻辑。
+    # 返回结果。
     def get(self, job_id: str) -> dict | None:
         with self._lock:
             return self._get_locked(job_id)
 
-    # 获取 get locked 相关逻辑。
+    # 返回locked。
     def _get_locked(self, job_id: str) -> dict | None:
         row = self._conn.execute(
             "SELECT data FROM index_jobs WHERE job_id=?", (job_id,)
         ).fetchone()
         return json.loads(row[0]) if row else None
 
-    # 协调 reconcile orphans 相关逻辑。
+    # 协调孤儿任务。
     def reconcile_orphans(self) -> None:
         # 启动时把上次进程残留的 pending/running 任务标记为失败：线程不可能复活。
         with self._lock:
@@ -325,31 +326,31 @@ class SqliteJobStore:
                     )
 
 
-# 封装 InMemoryJobStore 的状态与行为。
+# IndexJobManager 默认记录存储：纯内存 dict，保持原有非持久行为，便于测试隔离。
 class InMemoryJobStore:
     # IndexJobManager 默认记录存储：纯内存 dict，保持原有非持久行为，便于测试隔离。
     def __init__(self):
         self._lock = RLock()
         self._jobs: dict[str, dict] = {}
 
-    # 创建 create 相关逻辑。
+    # 创建。
     def create(self, record: dict) -> None:
         with self._lock:
             self._jobs[record["job_id"]] = dict(record)
 
-    # 更新 update 相关逻辑。
+    # 更新结果。
     def update(self, job_id: str, **fields: Any) -> None:
         with self._lock:
             if job_id in self._jobs:
                 self._jobs[job_id].update(fields)
 
-    # 获取 get 相关逻辑。
+    # 返回结果。
     def get(self, job_id: str) -> dict | None:
         with self._lock:
             record = self._jobs.get(job_id)
             return dict(record) if record else None
 
-    # 协调 reconcile orphans 相关逻辑。
+    # 协调孤儿任务。
     def reconcile_orphans(self) -> None:
         # 内存版启动即空，无孤儿可协调。
         return

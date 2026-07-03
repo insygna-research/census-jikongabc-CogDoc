@@ -10,27 +10,36 @@ from cogdoc.graph.subgraphs.summary import (
 )
 
 
+# 定义 FakeMessage 数据结构。
 class FakeMessage:
+    # 初始化 FakeMessage 实例。
     def __init__(self, content):
         self.content = content
 
 
+# 定义 FakeSummaryLLM 数据结构。
 class FakeSummaryLLM:
+    # 返回支持结构化输出的测试替身。
     def with_structured_output(self, schema):
         return FakeStructuredRouter(schema)
 
+    # 调用测试替身并返回预设结果。
     def invoke(self, messages):
         return FakeMessage("该章节内容来自文档。")
 
 
+# 定义 FakeStructuredRouter 数据结构。
 class FakeStructuredRouter:
+    # 初始化 FakeStructuredRouter 实例。
     def __init__(self, schema):
         self.schema = schema
 
+    # 调用测试替身并返回预设结果。
     def invoke(self, messages):
         return self.schema(task_type="summary", reason="用户要求总结文档")
 
 
+# 构造测试用文档。
 def _doc(source: str, page: int, local_chunk_index: int) -> dict:
     return {
         "text": f"{source} p{page} c{local_chunk_index}",
@@ -48,17 +57,22 @@ def _doc(source: str, page: int, local_chunk_index: int) -> dict:
     }
 
 
+# 定义 FakeEngine 数据结构。
 class FakeEngine:
+    # 初始化 FakeEngine 实例。
     def __init__(self, docs):
         self.docs = docs
 
+    # 列出 sources。
     def list_sources(self):
         return sorted({doc["meta"]["source"] for doc in self.docs})
 
+    # 加载 source chunks。
     def load_source_chunks(self, source):
         return [doc for doc in self.docs if doc["meta"]["source"] == source]
 
 
+# 验证 document loader selects named source 场景。
 def test_document_loader_selects_named_source(monkeypatch):
     engine = FakeEngine([_doc("a.pdf", 1, 0), _doc("b.pdf", 1, 0)])
     monkeypatch.setattr(summary.RetrieverFactory, "get_engine", lambda doc_id: engine)
@@ -70,6 +84,7 @@ def test_document_loader_selects_named_source(monkeypatch):
     assert result["steps_trace"][0]["step_name"] == "summary_document_loader"
 
 
+# 验证 document loader returns actionable message when ambiguous 场景。
 def test_document_loader_returns_actionable_message_when_ambiguous(monkeypatch):
     engine = FakeEngine([_doc("a.pdf", 1, 0), _doc("b.pdf", 1, 0)])
     monkeypatch.setattr(summary.RetrieverFactory, "get_engine", lambda doc_id: engine)
@@ -82,6 +97,7 @@ def test_document_loader_returns_actionable_message_when_ambiguous(monkeypatch):
     assert document_loader_check(result) == "__end__"
 
 
+# 验证 document loader resolves referential source 场景。
 def test_document_loader_resolves_referential_source(monkeypatch):
     engine = FakeEngine([_doc("a.pdf", 1, 0), _doc("b.pdf", 1, 0)])
     monkeypatch.setattr(summary.RetrieverFactory, "get_engine", lambda doc_id: engine)
@@ -104,10 +120,12 @@ def test_document_loader_resolves_referential_source(monkeypatch):
     assert result["steps_trace"][0]["step_name"] == "summary_source_resolution"
 
 
+# 验证 document loader skips resolution without history 场景。
 def test_document_loader_skips_resolution_without_history(monkeypatch):
     engine = FakeEngine([_doc("a.pdf", 1, 0), _doc("b.pdf", 1, 0)])
     monkeypatch.setattr(summary.RetrieverFactory, "get_engine", lambda doc_id: engine)
 
+    # 记录失败结果。
     def fail(*args, **kwargs):
         raise AssertionError("无历史时不应触发指代消解")
 
@@ -119,6 +137,7 @@ def test_document_loader_skips_resolution_without_history(monkeypatch):
     assert "可直接说出文件名" in result["answer"]
 
 
+# 验证 document loader check continues when docs exist 场景。
 def test_document_loader_check_continues_when_docs_exist():
     assert (
         document_loader_check({"summary_docs": [_doc("a.pdf", 1, 0)]})
@@ -126,6 +145,7 @@ def test_document_loader_check_continues_when_docs_exist():
     )
 
 
+# 验证 section planner node delegates to agent 场景。
 def test_section_planner_node_delegates_to_agent():
     result = section_planner_node({"query": "总结 a.pdf"})
 
@@ -138,8 +158,11 @@ def test_section_planner_node_delegates_to_agent():
     ]
 
 
+# 验证 section summary node generates each planned section 场景。
 def test_section_summary_node_generates_each_planned_section(monkeypatch):
+    # 定义 FakeLLM 数据结构。
     class FakeLLM:
+        # 调用测试替身并返回预设结果。
         def invoke(self, messages):
             return FakeMessage("该章节内容来自文档。[a.pdf:P1]")
 
@@ -172,11 +195,15 @@ def test_section_summary_node_generates_each_planned_section(monkeypatch):
     )
 
 
+# 验证 section summary node retries local no evidence 场景。
 def test_section_summary_node_retries_local_no_evidence(monkeypatch):
+    # 定义 FakeLLM 数据结构。
     class FakeLLM:
+        # 初始化 FakeLLM 实例。
         def __init__(self):
             self.calls = 0
 
+        # 调用测试替身并返回预设结果。
         def invoke(self, messages):
             self.calls += 1
             if self.calls == 1:
@@ -210,8 +237,11 @@ def test_section_summary_node_retries_local_no_evidence(monkeypatch):
     )
 
 
+# 验证 section summary node limits local context 场景。
 def test_section_summary_node_limits_local_context(monkeypatch):
+    # 定义 FakeLLM 数据结构。
     class FakeLLM:
+        # 调用测试替身并返回预设结果。
         def invoke(self, messages):
             return FakeMessage("这是本地摘要。")
 
@@ -239,8 +269,11 @@ def test_section_summary_node_limits_local_context(monkeypatch):
     )
 
 
+# 验证 section summary node uses six chunks for large local documents 场景。
 def test_section_summary_node_uses_six_chunks_for_large_local_documents(monkeypatch):
+    # 定义 FakeLLM 数据结构。
     class FakeLLM:
+        # 调用测试替身并返回预设结果。
         def invoke(self, messages):
             return FakeMessage("这是本地摘要。")
 
@@ -264,8 +297,11 @@ def test_section_summary_node_uses_six_chunks_for_large_local_documents(monkeypa
     assert [item["page"] for item in section["evidence"]] == [1, 2, 3, 4, 5, 6]
 
 
+# 验证 section summary node keeps small local documents intact 场景。
 def test_section_summary_node_keeps_small_local_documents_intact(monkeypatch):
+    # 定义 FakeLLM 数据结构。
     class FakeLLM:
+        # 调用测试替身并返回预设结果。
         def invoke(self, messages):
             return FakeMessage("这是本地摘要。")
 
@@ -289,6 +325,7 @@ def test_section_summary_node_keeps_small_local_documents_intact(monkeypatch):
     assert [item["page"] for item in section["evidence"]] == [1, 2, 3, 4, 5, 6, 7, 8]
 
 
+# 验证 global summary node builds validated answer 场景。
 def test_global_summary_node_builds_validated_answer():
     result = global_summary_node(
         {
@@ -311,6 +348,7 @@ def test_global_summary_node_builds_validated_answer():
     assert result["evidence"][0]["chunk_id"] == "chunk:a.pdf:0"
 
 
+# 验证 global summary node dedupes section evidence 场景。
 def test_global_summary_node_dedupes_section_evidence():
     first_doc = _doc("a.pdf", 1, 0)
     second_doc = _doc("a.pdf", 2, 1)
@@ -350,6 +388,7 @@ def test_global_summary_node_dedupes_section_evidence():
     assert [item["chunk_id"] for item in result["evidence"]] == ["chunk:a.pdf:1"]
 
 
+# 验证 global summary node blocks invalid citation 场景。
 def test_global_summary_node_blocks_invalid_citation():
     result = global_summary_node(
         {
@@ -370,6 +409,7 @@ def test_global_summary_node_blocks_invalid_citation():
     assert "页码错误" in result["critique"]
 
 
+# 验证 global summary node flags substantive uncited section 场景。
 def test_global_summary_node_flags_substantive_uncited_section():
     result = global_summary_node(
         {
@@ -390,6 +430,7 @@ def test_global_summary_node_flags_substantive_uncited_section():
     assert result["critique"]
 
 
+# 验证 global summary node accepts all no evidence sections 场景。
 def test_global_summary_node_accepts_all_no_evidence_sections():
     result = global_summary_node(
         {
@@ -411,6 +452,7 @@ def test_global_summary_node_accepts_all_no_evidence_sections():
     assert result["critique"] == ""
 
 
+# 验证 workflow routes to summary subgraph smoke 场景。
 def test_workflow_routes_to_summary_subgraph_smoke(monkeypatch):
     engine = FakeEngine([_doc("a.pdf", 1, 0), _doc("b.pdf", 1, 0)])
     monkeypatch.setattr(summary.RetrieverFactory, "get_engine", lambda doc_id: engine)

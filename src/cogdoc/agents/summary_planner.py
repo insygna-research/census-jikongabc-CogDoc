@@ -31,7 +31,9 @@ DEFAULT_SUMMARY_SECTIONS: List[SummarySectionPlan] = [
 ]
 
 
+# 定义 SectionPlannerAgent 数据结构。
 class SectionPlannerAgent:
+    # 完成 计划章节列表 处理。
     @staticmethod
     def plan_sections(state: dict) -> dict:
         # Summary MVP 先使用稳定固定章节，避免规划阶段引入幻觉。

@@ -37,6 +37,7 @@ _ERROR_RESPONSES = {
 }
 
 
+# 完成 chat 处理。
 @router.post("/chat", response_model=ChatResponse, responses=_ERROR_RESPONSES)
 async def chat(request_body: ChatRequest, request: Request, response: Response):
     # 同步问答：offload 跑图 → 写会话 → 映射结构化响应；服务层异常转稳定错误码。
@@ -96,6 +97,7 @@ async def chat(request_body: ChatRequest, request: Request, response: Response):
     return chat_response
 
 
+# 列出 sessions。
 @router.get("/sessions", response_model=SessionListResponse)
 async def list_sessions(request: Request, doc_id: str = Query(default="")):
     # 列出某库下的全部对话，供前端多对话列表。
@@ -104,6 +106,7 @@ async def list_sessions(request: Request, doc_id: str = Query(default="")):
     return SessionListResponse(doc_id=kb_id, sessions=sessions)
 
 
+# 完成 会话历史记录 处理。
 @router.get("/sessions/{session_id}/history", response_model=SessionHistoryResponse)
 async def session_history(
     session_id: str, request: Request, doc_id: str = Query(default="")
@@ -116,6 +119,7 @@ async def session_history(
     )
 
 
+# 删除 session。
 @router.delete("/sessions/{session_id}", status_code=204)
 async def delete_session(
     session_id: str, request: Request, doc_id: str = Query(default="")
@@ -138,10 +142,12 @@ _SSE_PROGRESS_TYPES = {
 _STREAM_DONE = object()
 
 
+# 封装SSE 帧。
 def _sse_frame(event_name: str, data: dict) -> str:
     return f"event: {event_name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+# 转换toSSE 帧。
 def _event_to_frame(
     event: ChatEvent, *, doc_id: str, session_id: str | None
 ) -> str | None:
@@ -183,6 +189,7 @@ def _event_to_frame(
     return None
 
 
+# 完成 chat流式响应 处理。
 @router.post("/chat/stream", responses=_ERROR_RESPONSES)
 async def chat_stream(request_body: ChatRequest, request: Request):
     # SSE 流式问答：worker 线程跑事件流 → 队列桥到事件循环 → 逐帧输出。
@@ -195,6 +202,7 @@ async def chat_stream(request_body: ChatRequest, request: Request):
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
 
+    # 生产结果。
     def produce() -> None:
         # 同步事件流跑在有界线程池里，逐事件回投到事件循环的队列。
         try:
@@ -223,6 +231,7 @@ async def chat_stream(request_body: ChatRequest, request: Request):
 
     request.app.state.offload_executor.submit(produce)
 
+    # 转换来源。
     async def event_source():
         final_result: ChatResult | None = None
         while True:

@@ -6,11 +6,13 @@ from cogdoc.api.session_store import SessionStore
 from cogdoc.service.chat_service import ChatEvent, ChatResult, ChatServiceError
 
 
+# 声明异步测试使用的后端。
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
 
 
+# 发送chat。
 async def _post_chat(app, payload: dict):
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
@@ -20,6 +22,7 @@ async def _post_chat(app, payload: dict):
             return await client.post("/v1/chat", json=payload)
 
 
+# 构造测试结果。
 def _result(answer: str, trace_id: str, messages=None) -> ChatResult:
     return ChatResult(
         answer=answer,
@@ -48,6 +51,7 @@ def _result(answer: str, trace_id: str, messages=None) -> ChatResult:
     )
 
 
+# 验证 chat endpoint maps response and trace header 场景。
 @pytest.mark.anyio
 async def test_chat_endpoint_maps_response_and_trace_header(monkeypatch):
     import cogdoc.api.app as app_module
@@ -55,6 +59,7 @@ async def test_chat_endpoint_maps_response_and_trace_header(monkeypatch):
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
     calls = []
 
+    # 构造运行器。
     def fake_runner(doc_id, query, is_local, chat_history, forced_task):
         calls.append(
             {
@@ -99,6 +104,7 @@ async def test_chat_endpoint_maps_response_and_trace_header(monkeypatch):
     ]
 
 
+# 验证 chat endpoint reuses session history 场景。
 @pytest.mark.anyio
 async def test_chat_endpoint_reuses_session_history(monkeypatch):
     import cogdoc.api.app as app_module
@@ -106,6 +112,7 @@ async def test_chat_endpoint_reuses_session_history(monkeypatch):
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
     history_lengths = []
 
+    # 构造运行器。
     def fake_runner(doc_id, query, is_local, chat_history, forced_task):
         history_lengths.append(len(chat_history))
         return _result(f"history={len(chat_history)}", f"trace-{len(history_lengths)}")
@@ -132,12 +139,14 @@ async def test_chat_endpoint_reuses_session_history(monkeypatch):
     assert second.json()["answer"] == "history=2"
 
 
+# 验证 session history endpoint returns stored turns 场景。
 @pytest.mark.anyio
 async def test_session_history_endpoint_returns_stored_turns(monkeypatch):
     import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
 
+    # 构造运行器。
     def fake_runner(doc_id, query, is_local, chat_history, forced_task):
         return _result("答案", "trace-h")
 
@@ -167,12 +176,14 @@ async def test_session_history_endpoint_returns_stored_turns(monkeypatch):
     assert empty.json()["messages"] == []
 
 
+# 验证 list and delete sessions 场景。
 @pytest.mark.anyio
 async def test_list_and_delete_sessions(monkeypatch):
     import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
 
+    # 构造运行器。
     def fake_runner(doc_id, query, is_local, chat_history, forced_task):
         return _result(
             "答案",
@@ -207,6 +218,7 @@ async def test_list_and_delete_sessions(monkeypatch):
     assert {s["session_id"] for s in after.json()["sessions"]} == {"s2"}
 
 
+# 验证 chat endpoint offloads runner 场景。
 @pytest.mark.anyio
 async def test_chat_endpoint_offloads_runner(monkeypatch):
     import cogdoc.api.app as app_module
@@ -215,6 +227,7 @@ async def test_chat_endpoint_offloads_runner(monkeypatch):
     caller_thread_id = threading.get_ident()
     runner_thread_ids = []
 
+    # 构造运行器。
     def fake_runner(doc_id, query, is_local, chat_history, forced_task):
         runner_thread_ids.append(threading.get_ident())
         return _result("答案", "trace-offload")
@@ -228,6 +241,7 @@ async def test_chat_endpoint_offloads_runner(monkeypatch):
     assert runner_thread_ids[0] != caller_thread_id
 
 
+# 验证 chat stream emits sse frames and writes session 场景。
 @pytest.mark.anyio
 async def test_chat_stream_emits_sse_frames_and_writes_session(monkeypatch):
     import cogdoc.api.app as app_module
@@ -235,6 +249,7 @@ async def test_chat_stream_emits_sse_frames_and_writes_session(monkeypatch):
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
     result = _result("最终答案", "trace-sse")
 
+    # 构造流式响应。
     def fake_stream(doc_id, query, is_local, chat_history, forced_task):
         yield ChatEvent("request_started", {"trace_id": "trace-sse", "doc_id": doc_id})
         yield ChatEvent("token", {"content": "最终"})
@@ -265,12 +280,14 @@ async def test_chat_stream_emits_sse_frames_and_writes_session(monkeypatch):
     assert store.get_history("kb", "s1") == result.chat_messages
 
 
+# 验证 chat stream maps error event and skips session 场景。
 @pytest.mark.anyio
 async def test_chat_stream_maps_error_event_and_skips_session(monkeypatch):
     import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
 
+    # 构造流式响应。
     def fake_stream(doc_id, query, is_local, chat_history, forced_task):
         yield ChatEvent("request_started", {"trace_id": "trace-err", "doc_id": doc_id})
         yield ChatEvent(
@@ -302,6 +319,7 @@ async def test_chat_stream_maps_error_event_and_skips_session(monkeypatch):
     assert store.get_history("kb", "s1") == []
 
 
+# 验证 session store uses doc id in key and evicts oldest 场景。
 def test_session_store_uses_doc_id_in_key_and_evicts_oldest():
     store = SessionStore(max_sessions=1, ttl_seconds=3600)
     store.record("kb-a", "s1", [{"role": "user", "content": "a"}], [])
@@ -311,6 +329,7 @@ def test_session_store_uses_doc_id_in_key_and_evicts_oldest():
     assert store.get_history("kb-b", "s1") == [{"role": "user", "content": "b"}]
 
 
+# 验证 session store purges expired history 场景。
 def test_session_store_purges_expired_history():
     store = SessionStore(max_sessions=10, ttl_seconds=1)
     store.record("kb", "s1", [{"role": "user", "content": "a"}], [])
@@ -319,12 +338,14 @@ def test_session_store_purges_expired_history():
     assert store.get_history("kb", "s1") == []
 
 
+# 验证 chat endpoint maps runtime error to stable error code 场景。
 @pytest.mark.anyio
 async def test_chat_endpoint_maps_runtime_error_to_stable_error_code(monkeypatch):
     import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
 
+    # 构造或驱动 失败路径运行器 测试场景。
     def failing_runner(doc_id, query, is_local, chat_history, forced_task):
         raise ChatServiceError(
             stage="runtime",
@@ -351,12 +372,14 @@ async def test_chat_endpoint_maps_runtime_error_to_stable_error_code(monkeypatch
     assert "Traceback" not in payload["message"]
 
 
+# 验证 chat endpoint maps stream stage to interrupted 场景。
 @pytest.mark.anyio
 async def test_chat_endpoint_maps_stream_stage_to_interrupted(monkeypatch):
     import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
 
+    # 构造或驱动 失败路径运行器 测试场景。
     def failing_runner(doc_id, query, is_local, chat_history, forced_task):
         raise ChatServiceError(
             stage="stream",
@@ -373,10 +396,13 @@ async def test_chat_endpoint_maps_stream_stage_to_interrupted(monkeypatch):
     assert response.json()["error_code"] == "STREAM_INTERRUPTED"
 
 
+# 验证 run chat sync raises typed error when no final 场景。
 def test_run_chat_sync_raises_typed_error_when_no_final(monkeypatch):
     from cogdoc.service import chat_service
 
+    # 定义 CrashingApp 数据结构。
     class CrashingApp:
+        # 流式返回结果。
         def stream(self, *args, **kwargs):
             raise RuntimeError("graph 调度崩溃")
 

@@ -14,6 +14,7 @@ UNKNOWN_RESPONSE = (
 )
 
 
+# 路由 by task。
 def route_by_task(
     state: GraphState,
 ) -> Literal["qa_subgraph", "summary_subgraph", "compare_subgraph", "unknown_node"]:
@@ -30,6 +31,7 @@ def route_by_task(
         return "unknown_node"
 
 
+# 完成 未知意图node 处理。
 def unknown_node(state: GraphState) -> dict:
     answer = UNKNOWN_RESPONSE
     return {"answer": answer, "messages": [AIMessage(content=answer)]}

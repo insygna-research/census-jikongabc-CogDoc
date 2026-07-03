@@ -13,6 +13,7 @@ from cogdoc.tools.rust_core_loader import REQUIRED_NATIVE_SYMBOLS, ensure_rust_c
 REQUIRED_SYMBOLS = REQUIRED_NATIVE_SYMBOLS
 
 
+# 启动入口。
 def main() -> int:
     try:
         rust_core = ensure_rust_core(*REQUIRED_SYMBOLS)

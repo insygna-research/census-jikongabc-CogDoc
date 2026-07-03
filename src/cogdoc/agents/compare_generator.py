@@ -10,6 +10,7 @@ from cogdoc.agents.summary_generator import (
 from cogdoc.graph.state import CompareDimensionPlan, DocumentProfile, RetrievedDoc
 
 
+# 完成 画像查询表 处理。
 def _profile_lookup(profiles: List[DocumentProfile]) -> Dict[Tuple[str, str], str]:
     # 展平成 (文档, 维度) 索引，输出阶段按用户点名顺序取值。
     lookup = {}
@@ -20,6 +21,7 @@ def _profile_lookup(profiles: List[DocumentProfile]) -> Dict[Tuple[str, str], st
     return lookup
 
 
+# 合并对比文档列表。
 def _union_compare_docs(
     docs_by_source: Dict[str, List[RetrievedDoc]], sources: List[str]
 ) -> List[RetrievedDoc]:
@@ -30,6 +32,7 @@ def _union_compare_docs(
     return docs
 
 
+# 格式化 compare blocks。
 def _format_compare_blocks(
     sources: List[str],
     dimensions: List[CompareDimensionPlan],
@@ -51,7 +54,9 @@ def _format_compare_blocks(
     return "\n".join(lines)
 
 
+# 定义 CompareGeneratorAgent 数据结构。
 class CompareGeneratorAgent:
+    # 构建 compare answer。
     @staticmethod
     def build_compare_answer(state: dict) -> dict:
         sources: List[str] = state.get("compare_sources", [])
@@ -125,6 +130,7 @@ class CompareGeneratorAgent:
             "steps_trace": steps_trace,
         }
 
+    # 生成 conclusion。
     @staticmethod
     def _generate_conclusion(state: dict, table_answer: str) -> str:
         # 结论只能复用已带引用的对比块，生成后还会单独过引用校验。
@@ -152,6 +158,7 @@ class CompareGeneratorAgent:
         ]
         return llm.invoke(messages).content.strip()
 
+    # 校验 compare answer。
     @staticmethod
     def validate_compare_answer(state: dict) -> dict:
         # 结论单独校验，避免表格引用掩盖无引用结论。

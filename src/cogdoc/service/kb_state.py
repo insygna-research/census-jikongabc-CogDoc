@@ -25,21 +25,20 @@ _VALID_STATUS = {
 DEFAULT_INFLIGHT_LEASE_SECONDS = 3600
 
 
-# 封装 StaleGenerationError 的状态与行为。
+# 切换时 epoch 已变（KB 被删/被取代）：该 staging 必须丢弃，绝不回写在线索引。
 class StaleGenerationError(Exception):
-    # 切换时 epoch 已变（KB 被删/被取代）：该 staging 必须丢弃，绝不回写在线索引。
     pass
 
 
-# 创建 new generation id 相关逻辑。
+# 新建索引代id。
 def new_generation_id() -> str:
     # 短 id，进 chroma collection 名（col-{kb_id}-{gen} 有 60 字符上限）。
     return f"g{uuid.uuid4().hex[:12]}"
 
 
-# 封装 KBState 的状态与行为。
+# 每 KB 一份 state.json：事务化索引的提交指针；每次操作都先从磁盘重载， 多个实例不会丢更新（叠加外部 KB 写锁串行化）；epoch 存在 KB 目录外的 EpochStore。
 class KBState:
-    # 每 KB 一份 state.json：事务化索引的提交指针。每次操作都先从磁盘重载， 多个实例不会丢更新（叠加外部 KB 写锁串行化）。epoch 存在 KB 目录外的 EpochStore。
+    # 每 KB 一份 state.json：事务化索引的提交指针；每次操作都先从磁盘重载， 多个实例不会丢更新（叠加外部 KB 写锁串行化）；epoch 存在 KB 目录外的 EpochStore。
     def __init__(
         self,
         kb_id: str,
@@ -51,7 +50,7 @@ class KBState:
         self._epochs = epochs or shared_epoch_store()
         self._lock = RLock()
 
-    # 加载 load 相关逻辑。
+    # 加载。
     def _load(self) -> dict:
         # 语法损坏退回初始态；合法但结构/不变量损坏的也清洗： 未知 status 的 generation 丢弃，active 必须指向一个 ready generation 否则置空。
         try:
@@ -76,7 +75,7 @@ class KBState:
 
         return {"kb_id": self.kb_id, "active_generation": active, "generations": gens}
 
-    # 保存 save 相关逻辑。
+    # 保存。
     def _save(self, data: dict) -> None:
         os.makedirs(os.path.dirname(self._path), exist_ok=True)
         tmp_path = f"{self._path}.tmp"
@@ -91,7 +90,7 @@ class KBState:
     def epoch(self) -> int:
         return self._epochs.current(self.kb_id)
 
-    # 递增 bump epoch 相关逻辑。
+    # 递增 epoch。
     def bump_epoch(self) -> int:
         return self._epochs.bump(self.kb_id)
 
@@ -120,7 +119,7 @@ class KBState:
             self._save(data)
             return gen_id
 
-    # 标记 mark ready 相关逻辑。
+    # 标记ready。
     def mark_ready(
         self, gen_id: str, expected_count: int, documents: list[dict]
     ) -> None:
@@ -147,7 +146,7 @@ class KBState:
             gen["documents"] = copy.deepcopy(documents)
             self._save(data)
 
-    # 标记 mark failed 相关逻辑。
+    # 标记failed。
     def mark_failed(self, gen_id: str) -> None:
         # building|ready → failed；active 永不允许被标记失败。 ready 态允许失败：switch_active 抛 StaleGenerationError 后需要丢弃已 ready 的 staging。
         with self._lock:
@@ -164,7 +163,7 @@ class KBState:
             gen["status"] = GENERATION_FAILED
             self._save(data)
 
-    # 处理 switch active 相关逻辑。
+    # 切换活跃代。
     def switch_active(self, gen_id: str) -> str | None:
         # 事务提交点：generation 必须 ready，且 base_epoch 仍等于当前 epoch（同一锁内校验）。 旧 active 标记 superseded 后即可被精确回收；返回旧 active id 供调用方清理。 注意：epoch 锁与 state 锁是两套，调用方必须持 kb_write_lock(kb_id) 才构成真正的提交原子区。
         with self._lock:
@@ -197,18 +196,18 @@ class KBState:
             gen = data["generations"].get(active) if active else None
             return copy.deepcopy(gen) if gen else None
 
-    # 获取 get 相关逻辑。
+    # 返回结果。
     def get(self, gen_id: str) -> dict | None:
         with self._lock:
             gen = self._load()["generations"].get(gen_id)
             return copy.deepcopy(gen) if gen else None
 
-    # 处理 generation ids 相关逻辑。
+    # 完成 索引代ids 处理。
     def generation_ids(self) -> list[str]:
         with self._lock:
             return list(self._load()["generations"].keys())
 
-    # 移除 remove generation 相关逻辑。
+    # 移除索引代。
     def remove_generation(self, gen_id: str) -> None:
         with self._lock:
             data = self._load()
@@ -217,7 +216,7 @@ class KBState:
             data["generations"].pop(gen_id, None)
             self._save(data)
 
-    # 处理 stale generation ids 相关逻辑。
+    # 完成 stale索引代ids 处理。
     def stale_generation_ids(
         self, lease_seconds: float = DEFAULT_INFLIGHT_LEASE_SECONDS
     ) -> list[str]:
@@ -243,7 +242,7 @@ class KBState:
             return stale
 
 
-# 处理 valid generation 相关逻辑。
+# 完成 合法性索引代 处理。
 def _valid_generation(gid: object, gen: object) -> bool:
     if not isinstance(gid, str) or not isinstance(gen, dict):
         return False

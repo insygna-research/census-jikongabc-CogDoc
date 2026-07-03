@@ -5,11 +5,13 @@ from cogdoc.api.app import create_app
 from cogdoc.api.feedback_store import FeedbackStore
 
 
+# 声明异步测试使用的后端。
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
 
 
+# 构造应用。
 def _make_app(tmp_path, monkeypatch):
     import cogdoc.api.app as app_module
 
@@ -21,6 +23,7 @@ def _make_app(tmp_path, monkeypatch):
     return create_app(feedback_store=store), tmp_path
 
 
+# 发送结果。
 async def _post(app, payload):
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
@@ -30,12 +33,14 @@ async def _post(app, payload):
             return await client.post("/v1/feedback", json=payload)
 
 
+# 读取 jsonl。
 def _read_jsonl(path):
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
+# 验证 thumbs up recorded not bad case 场景。
 @pytest.mark.anyio
 async def test_thumbs_up_recorded_not_bad_case(tmp_path, monkeypatch):
     app, root = _make_app(tmp_path, monkeypatch)
@@ -53,6 +58,7 @@ async def test_thumbs_up_recorded_not_bad_case(tmp_path, monkeypatch):
     assert _read_jsonl(root / "bad_cases.jsonl") == []
 
 
+# 验证 thumbs down lands in bad cases 场景。
 @pytest.mark.anyio
 async def test_thumbs_down_lands_in_bad_cases(tmp_path, monkeypatch):
     app, root = _make_app(tmp_path, monkeypatch)
@@ -75,6 +81,7 @@ async def test_thumbs_down_lands_in_bad_cases(tmp_path, monkeypatch):
     assert len(_read_jsonl(root / "feedback.jsonl")) == 1
 
 
+# 验证 feedback rejects invalid payload 场景。
 @pytest.mark.anyio
 async def test_feedback_rejects_invalid_payload(tmp_path, monkeypatch):
     app, _ = _make_app(tmp_path, monkeypatch)

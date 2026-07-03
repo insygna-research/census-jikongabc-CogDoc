@@ -2,7 +2,7 @@ import sys
 import pytest
 
 
-# 处理 reset retriever engine cache 相关逻辑。
+# 重置检索器检索引擎缓存。
 @pytest.fixture(autouse=True)
 def _reset_retriever_engine_cache():
     # 防止进程级引擎缓存在测试间留脏；仅在用过检索栈时清，不强行拉起重依赖。
@@ -14,7 +14,7 @@ def _reset_retriever_engine_cache():
             factory._engines.clear()
 
 
-# 处理 isolate epoch store 相关逻辑。
+# 隔离epoch存储。
 @pytest.fixture(autouse=True)
 def _isolate_epoch_store(tmp_path, monkeypatch):
     # 全局 epoch / lifecycle / journal / purge 单例隔离到每个测试 tmp，避免污染仓库或跨测试串状态。

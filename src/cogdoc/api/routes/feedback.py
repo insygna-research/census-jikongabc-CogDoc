@@ -4,6 +4,7 @@ from cogdoc.api.schemas import FeedbackRequest, FeedbackResponse
 router = APIRouter(prefix="/v1", tags=["feedback"])
 
 
+# 提交 feedback。
 @router.post("/feedback", status_code=201)
 async def submit_feedback(body: FeedbackRequest, request: Request):
     # controller 只落盘，不做评判；坏样本归集逻辑在 store 里。

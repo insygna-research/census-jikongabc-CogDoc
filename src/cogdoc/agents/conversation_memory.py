@@ -12,6 +12,7 @@ ROLE_LABELS = {
 }
 
 
+# 格式化 recent chat history。
 def format_recent_chat_history(
     chat_history: Sequence[Mapping[str, Any]] | None,
     limit: int = CHAT_HISTORY_MESSAGE_LIMIT,
@@ -37,12 +38,14 @@ def format_recent_chat_history(
     return "\n".join(lines)
 
 
+# 读取内容。
 def _message_content(message: Any) -> str:
     if isinstance(message, Mapping):
         return str(message.get("content", "")).strip()
     return str(getattr(message, "content", "")).strip()
 
 
+# 完成 提取流程final回答 处理。
 def extract_final_answer(task_type: str, output: Mapping[str, Any]) -> str:
     answer = str(output.get("answer", "") or "").strip()
     if task_type == "compare" and not answer:
@@ -52,6 +55,7 @@ def extract_final_answer(task_type: str, output: Mapping[str, Any]) -> str:
     return answer
 
 
+# 清理 answer for memory。
 def clean_answer_for_memory(answer: str) -> str:
     marker_index = answer.find(CITATION_WARNING_HEADING)
     if marker_index >= 0:
@@ -59,6 +63,7 @@ def clean_answer_for_memory(answer: str) -> str:
     return answer.strip()
 
 
+# 完成 提取流程chatturn 处理。
 def extract_chat_turn(
     task_type: str,
     output: Mapping[str, Any],

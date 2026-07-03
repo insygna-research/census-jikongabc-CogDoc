@@ -14,7 +14,7 @@ LIFECYCLE_DELETED = "deleted"
 _VALID = {LIFECYCLE_ACTIVE, LIFECYCLE_DELETING, LIFECYCLE_DELETED}
 
 
-# 封装 LifecycleStore 的状态与行为。
+# KB 生命周期标记，存在 KB 目录之外（lifecycle.json），删库不随目录消失，重建同名 KB 才显式切回 active。
 class LifecycleStore:
     # KB 生命周期标记，存在 KB 目录之外（lifecycle.json），删库不随目录消失，重建同名 KB 才显式切回 active。
     def __init__(self, path: str | None = None):
@@ -22,7 +22,7 @@ class LifecycleStore:
         self._degraded_path = f"{self._path}.degraded"  # 持久全局 fail-closed 标记
         self._lock = Lock()
 
-    # 加载 load 相关逻辑。
+    # 加载。
     def _load(self) -> dict:
         # 文件不存在=全新系统，正常返回空表（各 KB 默认 active）。仅结构合法的 dict 才采纳。
         try:
@@ -36,7 +36,7 @@ class LifecycleStore:
             raise json.JSONDecodeError("lifecycle 结构或状态值损坏", "", 0)
         return data
 
-    # 加载 load or corrupt 相关逻辑。
+    # 加载 or corrupt。
     def _load_or_corrupt(self) -> tuple:
         # 返回 (data, corrupt)。文件损坏（语法或结构）时 corrupt=True。
         try:
@@ -44,7 +44,7 @@ class LifecycleStore:
         except json.JSONDecodeError:
             return {}, True
 
-    # 保存 save 相关逻辑。
+    # 保存。
     def _save(self, data: dict) -> None:
         os.makedirs(os.path.dirname(self._path), exist_ok=True)
         tmp_path = f"{self._path}.tmp"
@@ -52,11 +52,11 @@ class LifecycleStore:
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(tmp_path, self._path)
 
-    # 处理 degraded 相关逻辑。
+    # 完成 降级状态 处理。
     def _degraded(self) -> bool:
         return os.path.exists(self._degraded_path)
 
-    # 处理 status 相关逻辑。
+    # 返回状态结果。
     def status(self, kb_id: str) -> str:
         # 无记录视为 active：兼容历史 KB。一旦损坏过（degraded 标记常驻），全局 fail-closed 返回 deleting， 直到运维从 .corrupt 备份恢复 lifecycle.json 并删除 .degraded 标记，杜绝其他 tombstone 丢失后误放读。
         with self._lock:
@@ -70,7 +70,7 @@ class LifecycleStore:
                 return LIFECYCLE_ACTIVE
             return value if value in _VALID else LIFECYCLE_DELETING
 
-    # 设置 set 相关逻辑。
+    # 设置结果。
     def set(self, kb_id: str, status: str) -> None:
         if status not in _VALID:
             raise ValueError(f"invalid lifecycle status: {status}")
@@ -88,7 +88,7 @@ class LifecycleStore:
             data[kb_id] = status
             self._save(data)
 
-    # 标记 mark degraded 相关逻辑。
+    # 标记降级状态。
     def _mark_degraded(self) -> None:
         try:
             with open(self._degraded_path, "w", encoding="utf-8") as f:
@@ -96,7 +96,7 @@ class LifecycleStore:
         except OSError:
             pass
 
-    # 隔离 quarantine corrupt 相关逻辑。
+    # 隔离损坏文件。
     def _quarantine_corrupt(self) -> None:
         # 把损坏文件改名留存供人工恢复，并记 error 让 tombstone 丢失可观测。
         try:
@@ -115,7 +115,7 @@ _shared: LifecycleStore | None = None
 _shared_lock = Lock()
 
 
-# 处理 shared lifecycle store 相关逻辑。
+# 完成 shared生命周期状态存储 处理。
 def shared_lifecycle_store() -> LifecycleStore:
     # 进程内共享单例；双重检查锁防并发重复构造。
     global _shared

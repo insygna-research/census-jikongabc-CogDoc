@@ -4,6 +4,7 @@ from cogdoc.api.ingest import IndexJobManager
 from cogdoc.api.persistence import SqliteJobStore, SqliteSessionStore
 
 
+# 验证 session survives new store instance 场景。
 def test_session_survives_new_store_instance(tmp_path):
     db = str(tmp_path / "state.db")
     store = SqliteSessionStore(db)
@@ -26,6 +27,7 @@ def test_session_survives_new_store_instance(tmp_path):
     assert sessions[0]["message_count"] == 2
 
 
+# 验证 session record appends across turns 场景。
 def test_session_record_appends_across_turns(tmp_path):
     store = SqliteSessionStore(str(tmp_path / "state.db"))
     store.record(
@@ -43,6 +45,7 @@ def test_session_record_appends_across_turns(tmp_path):
     assert len(store.get_history("kb", "s1")) == 2
 
 
+# 验证 session doc id isolates and clear 场景。
 def test_session_doc_id_isolates_and_clear(tmp_path):
     store = SqliteSessionStore(str(tmp_path / "state.db"))
     store.record("kb1", "s", [], [{"role": "user", "content": "x"}])
@@ -53,6 +56,7 @@ def test_session_doc_id_isolates_and_clear(tmp_path):
     assert len(store.list_sessions("kb2")) == 1
 
 
+# 验证 session purges expired 场景。
 def test_session_purges_expired(tmp_path):
     store = SqliteSessionStore(str(tmp_path / "state.db"), ttl_seconds=1)
     store.record("kb", "s", [], [{"role": "user", "content": "x"}])
@@ -61,6 +65,7 @@ def test_session_purges_expired(tmp_path):
     assert store.list_sessions("kb") == []
 
 
+# 验证 session evicts oldest over capacity 场景。
 def test_session_evicts_oldest_over_capacity(tmp_path):
     store = SqliteSessionStore(str(tmp_path / "state.db"), max_sessions=1)
     store.record("kb", "old", [], [{"role": "user", "content": "old"}])
@@ -70,10 +75,12 @@ def test_session_evicts_oldest_over_capacity(tmp_path):
     assert ids == ["new"]
 
 
+# 模拟成功ingest。
 def _ok_ingest(kb_id, source_dir):
     return SimpleNamespace(document_count=2, chunk_count=7)
 
 
+# 等待结果。
 def _wait(manager, job_id, timeout=2.0):
     deadline = time.time() + timeout
     while time.time() < deadline and manager.get(job_id)["status"] in (
@@ -84,6 +91,7 @@ def _wait(manager, job_id, timeout=2.0):
     return manager.get(job_id)
 
 
+# 验证 job record survives new manager 场景。
 def test_job_record_survives_new_manager(tmp_path):
     db = str(tmp_path / "state.db")
     manager = IndexJobManager(
@@ -101,6 +109,7 @@ def test_job_record_survives_new_manager(tmp_path):
     assert reopened.get(job_id)["status"] == "succeeded"
 
 
+# 验证 reconcile marks orphaned running job failed 场景。
 def test_reconcile_marks_orphaned_running_job_failed(tmp_path):
     db = str(tmp_path / "state.db")
     store = SqliteJobStore(db)
@@ -116,6 +125,7 @@ def test_reconcile_marks_orphaned_running_job_failed(tmp_path):
     assert rec["message"] == "服务重启，任务中断"
 
 
+# 验证 get missing job returns none 场景。
 def test_get_missing_job_returns_none(tmp_path):
     store = SqliteJobStore(str(tmp_path / "state.db"))
     assert store.get("nope") is None

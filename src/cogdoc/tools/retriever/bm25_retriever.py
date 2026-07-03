@@ -19,7 +19,7 @@ _rust_core = ensure_rust_core("Bm25Index")
 _PERSIST_FORMAT = "bm25_index_bytes_v1"
 
 
-# 封装 BM25Retriever 的状态与行为。
+# 初始化实例状态。
 class BM25Retriever(BaseRetriever):
     # 初始化实例状态。
     def __init__(self, collection_id: str, persist_directory: str = None):
@@ -31,7 +31,7 @@ class BM25Retriever(BaseRetriever):
         self._lock = RLock()
         self._init_collection()
 
-    # 处理 init collection 相关逻辑。
+    # 完成 initcollection 处理。
     def _init_collection(self) -> None:
         self.bm25 = None
         self.doc_registry: List[RetrievedDoc] = []
@@ -51,35 +51,35 @@ class BM25Retriever(BaseRetriever):
             except Exception:
                 self.bm25, self.doc_registry = None, []
 
-    # 分词 tokenize 相关逻辑。
+    # 分词结果。
     def _tokenize(self, text: str) -> List[str]:
         return tokenize_mixed_text(text)
 
-    # 预热 warm up 相关逻辑。
+    # 完成 预热流程预热流程 处理。
     def warm_up(self) -> None:
         self._tokenize("知识库 检索 warmup")
 
-    # 检查是否存在 exists 相关逻辑。
+    # 检查存在性。
     def exists(self) -> bool:
         return self.bm25 is not None and len(self.doc_registry) > 0
 
-    # 统计 count 相关逻辑。
+    # 统计数量。
     def count(self) -> int:
         return len(self.doc_registry)
 
-    # 切分 chunk ids 相关逻辑。
+    # 切分 ids。
     def chunk_ids(self) -> set:
         # 一致性校验用：registry 内全部 chunk_id。
         return {str(d["meta"]["chunk_id"]) for d in self.doc_registry}
 
-    # 获取最大 max chunk index 相关逻辑。
+    # 完成 max分块索引 处理。
     def max_chunk_index(self) -> int:
         # 增量续号用：现存最大展示编号，空索引返回 -1。
         return max(
             (int(d["meta"]["chunk_index"]) for d in self.doc_registry), default=-1
         )
 
-    # 清理 clear 相关逻辑。
+    # 清理。
     def clear(self) -> None:
         # 容忍「文件本就不存在」，但清理后必须确为空；删除失败会让 _init 重载旧数据，借此识破。
         try:
@@ -92,7 +92,7 @@ class BM25Retriever(BaseRetriever):
             if self.doc_registry:
                 raise RuntimeError("bm25 index was not cleared")
 
-    # 处理 clean doc 相关逻辑。
+    # 清理 doc。
     @staticmethod
     def _clean_doc(c: RetrievedDoc) -> RetrievedDoc:
         # 只留 chunk 身份元数据，去掉检索期临时字段。
@@ -115,7 +115,7 @@ class BM25Retriever(BaseRetriever):
             "meta": cleaned_meta,
         }
 
-    # 处理 persist 相关逻辑。
+    # 持久化结果。
     def _persist(self, registry, index) -> None:
         # 原子写：先写临时 pickle 再 os.replace，进程中断不会留下半截文件。 索引以 Rust 序列化字节存储，规避对 List[List[str]] 语料的 pickle 大列表开销。
         tmp_path = f"{self.db_path}.tmp"
@@ -130,7 +130,7 @@ class BM25Retriever(BaseRetriever):
             )
         os.replace(tmp_path, self.db_path)
 
-    # 处理 swap in 相关逻辑。
+    # 切换in。
     def _swap_in(self, registry, index) -> None:
         # 先落盘再切内存：持久化失败时内存与磁盘不会错位（内存仍是旧的一致状态）。
         if registry and index is not None:
@@ -147,7 +147,7 @@ class BM25Retriever(BaseRetriever):
             self.bm25 = index
             self.doc_registry = registry
 
-    # 写入索引 index 相关逻辑。
+    # 写入索引。
     def index(self, chunks: List[RetrievedDoc]) -> None:
         # 全量重建：在局部构建后原子替换。增量入库走 upsert_documents。
         if not chunks:
@@ -156,7 +156,7 @@ class BM25Retriever(BaseRetriever):
         corpus = tokenize_corpus([retrieval_text(c) for c in chunks])
         self._swap_in(registry, _rust_core.Bm25Index(corpus))
 
-    # 增量写入 upsert documents 相关逻辑。
+    # 增量写入documents。
     def upsert_documents(self, new_chunks: List[RetrievedDoc], removed_sources) -> None:
         # 增量：保留未变文档（按文件名过滤），追加新 chunk，整体重建 Bm25Index。 BM25 分数依赖全局 IDF/avgdl 故必须整体重建，但未变文档的分词由 Rust 侧 corpus 复用，新 chunk 批量分词，均不回 Python 逐条切词。
         drop = {str(s) for s in removed_sources if s}
@@ -180,21 +180,21 @@ class BM25Retriever(BaseRetriever):
             new_index = _rust_core.Bm25Index(new_tokens)
         self._swap_in(new_registry, new_index)
 
-    # 处理 export registry 相关逻辑。
+    # 导出 registry。
     def export_registry(self) -> List[RetrievedDoc]:
         # 跨代复用权威：返回 registry 深拷贝作文本/metadata 真值来源，向量按 chunk_id 关联。
         with self._lock:
             return copy.deepcopy(self.doc_registry)
 
-    # 列出 list sources 相关逻辑。
+    # 列出 sources。
     def list_sources(self) -> List[str]:
         return list_sources(self.doc_registry)
 
-    # 加载 load source chunks 相关逻辑。
+    # 加载 source chunks。
     def load_source_chunks(self, source: str) -> List[RetrievedDoc]:
         return load_source_chunks(self.doc_registry, source)
 
-    # 检索 search 相关逻辑。
+    # 检索。
     def search(self, query: str, top_k: int = 3) -> List[RetrievedDoc]:
         # 一致快照：bm25 与 registry 必须取自同一次原子替换，否则下标会错配到新 registry。
         with self._lock:

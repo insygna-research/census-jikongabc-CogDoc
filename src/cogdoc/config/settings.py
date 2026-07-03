@@ -8,9 +8,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
-# 封装 Settings 的状态与行为。
+# 项目路径。
 class Settings(BaseSettings):
-    # 项目路径。
     cogdoc_doc_dir: str = Field(
         default="your_documents", validation_alias="COGDOC_DOC_DIR"
     )
@@ -114,87 +113,87 @@ class Settings(BaseSettings):
         populate_by_name=True,
     )
 
-    # 处理 data dir 相关逻辑。
+    # 完成 data目录 处理。
     @property
     def data_dir(self) -> Path:
         return Path(self.cogdoc_data_dir)
 
-    # 处理 chroma persist dir 相关逻辑。
+    # 完成 chroma持久化流程目录 处理。
     @property
     def chroma_persist_dir(self) -> str:
         return str(self.data_dir / "chroma_db")
 
-    # 处理 bm25 persist dir 相关逻辑。
+    # 完成 bm25持久化流程目录 处理。
     @property
     def bm25_persist_dir(self) -> str:
         return str(self.data_dir / "bm25_db")
 
-    # 处理 manifest dir 相关逻辑。
+    # 构造目录。
     @property
     def manifest_dir(self) -> str:
         return str(self.data_dir / "manifests")
 
-    # 处理 kb root 相关逻辑。
+    # 完成 知识库根目录 处理。
     @property
     def kb_root(self) -> str:
         return str(self.data_dir / "kb")
 
-    # 处理 kb registry path 相关逻辑。
+    # 完成 知识库注册表路径 处理。
     @property
     def kb_registry_path(self) -> str:
         return str(self.data_dir / "kb" / "registry.json")
 
-    # 处理 kb source dir 相关逻辑。
+    # 完成 知识库来源目录 处理。
     def kb_source_dir(self, kb_id: str) -> str:
         # 每个知识库一个源 PDF 目录；上传落在这里，构建时硬链接快照到 generation 工作区。
         return str(self.data_dir / "kb" / kb_id / "sources")
 
-    # 处理 kb state path 相关逻辑。
+    # 完成 知识库状态路径 处理。
     def kb_state_path(self, kb_id: str) -> str:
         # 事务化索引的提交指针：active_generation/epoch/generations 表，与每文档 manifest 分离。
         return str(self.data_dir / "kb" / kb_id / "state.json")
 
-    # 处理 kb generation dir 相关逻辑。
+    # 完成 知识库索引代目录 处理。
     def kb_generation_dir(self, kb_id: str, generation_id: str) -> str:
         # 单个 generation 的工作区：源文件硬链接快照 + 该代 manifest 等内部产物。
         return str(self.data_dir / "kb" / kb_id / "generations" / generation_id)
 
-    # 处理 kb collection id 相关逻辑。
+    # 完成 知识库collectionid 处理。
     def kb_collection_id(self, kb_id: str, gen_id: str) -> str:
         # Chroma/BM25 集合 ID：sha256(kb_id)[:8]-{gen_id}，固定 22 字符，不受 kb_id 长度影响。
         import hashlib
 
         return f"{hashlib.sha256(kb_id.encode()).hexdigest()[:8]}-{gen_id}"
 
-    # 处理 api key set 相关逻辑。
+    # 完成 API密钥set 处理。
     @property
     def api_key_set(self) -> set[str]:
         # 解析逗号分隔的 key 列表，去空白与空项；空集合表示鉴权关闭。
         return {k.strip() for k in self.cogdoc_api_keys.split(",") if k.strip()}
 
-    # 处理 state db path 相关逻辑。
+    # 完成 状态db路径 处理。
     @property
     def state_db_path(self) -> str:
         # 会话与入库任务的 SQLite 落盘，进程重启不丢对话与任务状态。
         return str(self.data_dir / "state.db")
 
-    # 处理 feedback log path 相关逻辑。
+    # 完成 反馈log路径 处理。
     @property
     def feedback_log_path(self) -> str:
         return str(self.data_dir / "feedback" / "feedback.jsonl")
 
-    # 处理 bad cases path 相关逻辑。
+    # 完成 坏样本用例列表路径 处理。
     @property
     def bad_cases_path(self) -> str:
         # 点踩/纠错自动归集到此，喂离线质量评测 harness。
         return str(self.data_dir / "feedback" / "bad_cases.jsonl")
 
-    # 处理 project root 相关逻辑。
+    # 返回根目录。
     @property
     def project_root(self) -> Path:
         return PROJECT_ROOT
 
-    # 处理 cuda min free bytes 相关逻辑。
+    # 完成 CUDAminfreebytes 处理。
     def cuda_min_free_bytes(self, setting_name: str) -> int:
         mb_by_name = {
             "EMBEDDER_MIN_CUDA_FREE_MB": self.embedder_min_cuda_free_mb,
@@ -205,7 +204,7 @@ class Settings(BaseSettings):
         return int(mb_by_name[setting_name]) * 1024 * 1024
 
 
-# 获取 get settings 相关逻辑。
+# 返回设置。
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()

@@ -10,12 +10,12 @@ from cogdoc.observability.logger import log_event
 # 删库的外部资源（Chroma 集合 / BM25 pkl）清理是跨进程持久任务：写在 KB 目录外的 purge_queue.json， 删库瞬间入队并带 not_before（grace period），sweeper / 启动时反复重试，进程中途退出也不丢，避免孤儿索引。
 
 
-# 封装 PurgeQueueCorruptError 的状态与行为。
+# 表示 PurgeQueueCorruptError 异常。
 class PurgeQueueCorruptError(RuntimeError):
     pass
 
 
-# 封装 PurgeQueue 的状态与行为。
+# 初始化实例状态。
 class PurgeQueue:
     # 初始化实例状态。
     def __init__(self, path: str | None = None):
@@ -23,7 +23,7 @@ class PurgeQueue:
         self._degraded_path = f"{self._path}.degraded"
         self._lock = Lock()
 
-    # 加载 load 相关逻辑。
+    # 加载。
     def _load(self) -> list:
         # 文件不存在=空队列；损坏交由 _load_or_corrupt 处理，不在此静默吞掉。
         try:
@@ -35,14 +35,14 @@ class PurgeQueue:
         except FileNotFoundError:
             return []
 
-    # 加载 load or corrupt 相关逻辑。
+    # 加载 or corrupt。
     def _load_or_corrupt(self) -> tuple:
         try:
             return self._load(), False
         except json.JSONDecodeError:
             return [], True
 
-    # 隔离 quarantine corrupt 相关逻辑。
+    # 隔离损坏文件。
     def _quarantine_corrupt(self) -> None:
         # 损坏队列改名留存供人工恢复，记 error；不静默丢弃待清理的 Chroma/BM25 记录。
         try:
@@ -56,7 +56,7 @@ class PurgeQueue:
             pass
         log_event("purge", "purge_queue_corrupt_quarantined", {}, level=logging.ERROR)
 
-    # 保存 save 相关逻辑。
+    # 保存。
     def _save(self, items: list) -> None:
         os.makedirs(os.path.dirname(self._path), exist_ok=True)
         tmp_path = f"{self._path}.tmp"
@@ -64,7 +64,7 @@ class PurgeQueue:
             json.dump(items, f, ensure_ascii=False)
         os.replace(tmp_path, self._path)
 
-    # 加载 load safe 相关逻辑。
+    # 加载 safe。
     def _load_safe(self) -> list:
         # 损坏即隔离并拒绝继续，避免用空队列覆盖后让外部索引永久失去追踪。
         if os.path.exists(self._degraded_path):
@@ -79,7 +79,7 @@ class PurgeQueue:
             )
         return items
 
-    # 添加 add 相关逻辑。
+    # 添加。
     def add(self, kb_id: str, gen_id: str, not_before: float) -> None:
         with self._lock:
             items = self._load_safe()
@@ -89,14 +89,14 @@ class PurgeQueue:
                 )
                 self._save(items)
 
-    # 处理 due 相关逻辑。
+    # 筛选结果。
     def due(self, now: float | None = None) -> list:
         # 返回已过 grace period、可立即清理的条目。
         now = now if now is not None else time.time()
         with self._lock:
             return [dict(i) for i in self._load_safe() if i.get("not_before", 0) <= now]
 
-    # 移除 remove 相关逻辑。
+    # 移除结果。
     def remove(self, kb_id: str, gen_id: str) -> None:
         with self._lock:
             items = self._load_safe()
@@ -111,7 +111,7 @@ _shared: PurgeQueue | None = None
 _shared_lock = Lock()
 
 
-# 处理 shared purge queue 相关逻辑。
+# 完成 shared清理任务队列 处理。
 def shared_purge_queue() -> PurgeQueue:
     # 进程内共享单例；双重检查锁防并发重复构造。
     global _shared
@@ -122,7 +122,7 @@ def shared_purge_queue() -> PurgeQueue:
     return _shared
 
 
-# 处理 valid item 相关逻辑。
+# 完成 合法性条目 处理。
 def _valid_item(item) -> bool:
     not_before = item.get("not_before") if isinstance(item, dict) else None
     return (

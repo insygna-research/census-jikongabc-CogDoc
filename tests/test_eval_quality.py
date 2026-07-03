@@ -2,6 +2,7 @@ import json
 from cogdoc.tools.eval.quality_metrics import compare_baseline, run_eval
 
 
+# 构造测试用文档。
 def _doc(source: str = "a.pdf", page: int = 1) -> dict:
     return {
         "text": "报名要求。",
@@ -19,6 +20,7 @@ def _doc(source: str = "a.pdf", page: int = 1) -> dict:
     }
 
 
+# 验证 quality eval reports router citation and faithfulness 场景。
 def test_quality_eval_reports_router_citation_and_faithfulness():
     report = run_eval(
         [
@@ -55,6 +57,7 @@ def test_quality_eval_reports_router_citation_and_faithfulness():
     assert report["by_layer"]["hard"]["count"] == 1
 
 
+# 验证 quality eval catches invalid citation 场景。
 def test_quality_eval_catches_invalid_citation():
     report = run_eval(
         [
@@ -73,6 +76,7 @@ def test_quality_eval_catches_invalid_citation():
     assert row["metrics"]["citation_accuracy"] == 1.0
 
 
+# 验证 quality baseline compare returns nonzero on regression 场景。
 def test_quality_baseline_compare_returns_nonzero_on_regression(tmp_path):
     baseline = tmp_path / "baseline.json"
     baseline.write_text(
@@ -98,6 +102,7 @@ def test_quality_baseline_compare_returns_nonzero_on_regression(tmp_path):
     assert compare_baseline(report, baseline) == 1
 
 
+# 验证 quality baseline ignores manual faithfulness regression 场景。
 def test_quality_baseline_ignores_manual_faithfulness_regression(tmp_path):
     baseline = tmp_path / "baseline.json"
     baseline.write_text(
@@ -112,6 +117,7 @@ def test_quality_baseline_ignores_manual_faithfulness_regression(tmp_path):
     assert compare_baseline(report, baseline) == 0
 
 
+# 验证 quality baseline treats missing gated metric as regression 场景。
 def test_quality_baseline_treats_missing_gated_metric_as_regression(tmp_path):
     baseline = tmp_path / "baseline.json"
     baseline.write_text(

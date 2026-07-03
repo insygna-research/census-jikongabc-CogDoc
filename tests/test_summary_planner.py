@@ -1,6 +1,7 @@
 from cogdoc.agents.summary_planner import SectionPlannerAgent
 
 
+# 验证 default summary sections are stable 场景。
 def test_default_summary_sections_are_stable():
     # Summary MVP 默认输出固定结构化章节。
     result = SectionPlannerAgent.plan_sections({"query": "总结这篇文档"})
@@ -16,6 +17,7 @@ def test_default_summary_sections_are_stable():
     assert result["steps_trace"][0]["step_name"] == "summary_section_planner"
 
 
+# 验证 custom summary sections override defaults 场景。
 def test_custom_summary_sections_override_defaults():
     # 调用方可显式传入章节标题。
     result = SectionPlannerAgent.plan_sections(
@@ -34,6 +36,7 @@ def test_custom_summary_sections_override_defaults():
     ]
 
 
+# 验证 empty custom sections fall back to defaults 场景。
 def test_empty_custom_sections_fall_back_to_defaults():
     # 空自定义章节不应产生空规划。
     result = SectionPlannerAgent.plan_sections({"summary_section_titles": ["", "  "]})

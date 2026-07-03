@@ -12,32 +12,43 @@ from cogdoc.graph.subgraphs.compare import (
 )
 
 
+# 定义 FakeMessage 数据结构。
 class FakeMessage:
+    # 初始化 FakeMessage 实例。
     def __init__(self, content):
         self.content = content
 
 
+# 定义 FakeCompareLLM 数据结构。
 class FakeCompareLLM:
+    # 返回支持结构化输出的测试替身。
     def with_structured_output(self, schema):
         return FakeStructuredRouter(schema)
 
+    # 调用测试替身并返回预设结果。
     def invoke(self, messages):
         return FakeMessage("该维度内容来自文档。")
 
 
+# 定义 FakeNoEvidenceLLM 数据结构。
 class FakeNoEvidenceLLM:
+    # 调用测试替身并返回预设结果。
     def invoke(self, messages):
         return FakeMessage("文档中未明确说明。")
 
 
+# 定义 FakeStructuredRouter 数据结构。
 class FakeStructuredRouter:
+    # 初始化 FakeStructuredRouter 实例。
     def __init__(self, schema):
         self.schema = schema
 
+    # 调用测试替身并返回预设结果。
     def invoke(self, messages):
         return self.schema(task_type="compare", reason="用户要求对比文档")
 
 
+# 构造测试用文档。
 def _doc(source: str, page: int, local_chunk_index: int) -> dict:
     return {
         "text": f"{source} p{page} c{local_chunk_index}",
@@ -55,17 +66,22 @@ def _doc(source: str, page: int, local_chunk_index: int) -> dict:
     }
 
 
+# 定义 FakeEngine 数据结构。
 class FakeEngine:
+    # 初始化 FakeEngine 实例。
     def __init__(self, docs):
         self.docs = docs
 
+    # 列出 sources。
     def list_sources(self):
         return sorted({doc["meta"]["source"] for doc in self.docs})
 
+    # 加载 source chunks。
     def load_source_chunks(self, source):
         return [doc for doc in self.docs if doc["meta"]["source"] == source]
 
 
+# 构造测试用对比维度。
 def _dimensions():
     return [
         {"dimension_id": "method", "title": "方法", "instruction": "概括方法"},
@@ -73,6 +89,7 @@ def _dimensions():
     ]
 
 
+# 验证 document loader selects named compare sources 场景。
 def test_document_loader_selects_named_compare_sources(monkeypatch):
     engine = FakeEngine([_doc("a.pdf", 1, 0), _doc("b.pdf", 1, 0), _doc("c.pdf", 1, 0)])
     monkeypatch.setattr(compare.RetrieverFactory, "get_engine", lambda doc_id: engine)
@@ -84,6 +101,7 @@ def test_document_loader_selects_named_compare_sources(monkeypatch):
     assert result["steps_trace"][0]["step_name"] == "compare_document_loader"
 
 
+# 验证 document loader resolves referential sources 场景。
 def test_document_loader_resolves_referential_sources(monkeypatch):
     engine = FakeEngine([_doc("a.pdf", 1, 0), _doc("b.pdf", 1, 0)])
     monkeypatch.setattr(compare.RetrieverFactory, "get_engine", lambda doc_id: engine)
@@ -106,10 +124,12 @@ def test_document_loader_resolves_referential_sources(monkeypatch):
     assert result["steps_trace"][0]["step_name"] == "compare_source_resolution"
 
 
+# 验证 document loader skips resolution without history 场景。
 def test_document_loader_skips_resolution_without_history(monkeypatch):
     engine = FakeEngine([_doc("a.pdf", 1, 0), _doc("b.pdf", 1, 0)])
     monkeypatch.setattr(compare.RetrieverFactory, "get_engine", lambda doc_id: engine)
 
+    # 记录失败结果。
     def fail(*args, **kwargs):
         raise AssertionError("无历史时不应触发指代消解")
 
@@ -122,10 +142,12 @@ def test_document_loader_skips_resolution_without_history(monkeypatch):
     assert document_loader_check(result) == "__end__"
 
 
+# 验证 document loader explicit match skips resolution 场景。
 def test_document_loader_explicit_match_skips_resolution(monkeypatch):
     engine = FakeEngine([_doc("a.pdf", 1, 0), _doc("b.pdf", 1, 0)])
     monkeypatch.setattr(compare.RetrieverFactory, "get_engine", lambda doc_id: engine)
 
+    # 记录失败结果。
     def fail(*args, **kwargs):
         raise AssertionError("显式点名已足够时不应触发指代消解")
 
@@ -144,6 +166,7 @@ def test_document_loader_explicit_match_skips_resolution(monkeypatch):
     assert result["compare_sources"] == ["a.pdf", "b.pdf"]
 
 
+# 验证 document loader requires at least two named sources 场景。
 def test_document_loader_requires_at_least_two_named_sources(monkeypatch):
     engine = FakeEngine([_doc("a.pdf", 1, 0), _doc("b.pdf", 1, 0)])
     monkeypatch.setattr(compare.RetrieverFactory, "get_engine", lambda doc_id: engine)
@@ -156,6 +179,7 @@ def test_document_loader_requires_at_least_two_named_sources(monkeypatch):
     assert document_loader_check(result) == "__end__"
 
 
+# 验证 document loader limits local compare sources 场景。
 def test_document_loader_limits_local_compare_sources(monkeypatch):
     engine = FakeEngine([_doc("a.pdf", 1, 0), _doc("b.pdf", 1, 0), _doc("c.pdf", 1, 0)])
     monkeypatch.setattr(compare.RetrieverFactory, "get_engine", lambda doc_id: engine)
@@ -169,6 +193,7 @@ def test_document_loader_limits_local_compare_sources(monkeypatch):
     assert document_loader_check(result) == "__end__"
 
 
+# 验证 document loader uses limited local dimensions 场景。
 def test_document_loader_uses_limited_local_dimensions(monkeypatch):
     engine = FakeEngine([_doc("a.pdf", 1, 0), _doc("b.pdf", 2, 0)])
     monkeypatch.setattr(compare.RetrieverFactory, "get_engine", lambda doc_id: engine)
@@ -185,6 +210,7 @@ def test_document_loader_uses_limited_local_dimensions(monkeypatch):
     ]
 
 
+# 验证 document profile node generates cells with evidence 场景。
 def test_document_profile_node_generates_cells_with_evidence(monkeypatch):
     monkeypatch.setattr(
         compare_profile.Generator,
@@ -225,6 +251,7 @@ def test_document_profile_node_generates_cells_with_evidence(monkeypatch):
     )
 
 
+# 验证 document profile node keeps no evidence cells empty 场景。
 def test_document_profile_node_keeps_no_evidence_cells_empty(monkeypatch):
     monkeypatch.setattr(
         compare_profile.Generator,
@@ -248,7 +275,9 @@ def test_document_profile_node_keeps_no_evidence_cells_empty(monkeypatch):
     assert result["document_profiles"][0]["cells"][0]["evidence"] == []
 
 
+# 验证 document profile node returns actionable message on llm error 场景。
 def test_document_profile_node_returns_actionable_message_on_llm_error(monkeypatch):
+    # 抛出内存错误。
     def raise_memory_error(is_local=False):
         raise RuntimeError("model requires more system memory")
 
@@ -273,6 +302,7 @@ def test_document_profile_node_returns_actionable_message_on_llm_error(monkeypat
     assert document_profile_check(result) == "__end__"
 
 
+# 验证 compare table node builds dimension blocks and conclusion 场景。
 def test_compare_table_node_builds_dimension_blocks_and_conclusion(monkeypatch):
     monkeypatch.setattr(
         compare_generator.CompareGeneratorAgent,
@@ -335,7 +365,9 @@ def test_compare_table_node_builds_dimension_blocks_and_conclusion(monkeypatch):
     assert "引用校验警告" not in result["answer"]
 
 
+# 验证 compare table node records conclusion failure 场景。
 def test_compare_table_node_records_conclusion_failure(monkeypatch):
+    # 抛出超时。
     def raise_timeout(state, table_answer):
         raise TimeoutError("api timeout")
 
@@ -382,7 +414,9 @@ def test_compare_table_node_records_conclusion_failure(monkeypatch):
     assert result["steps_trace"][-1]["step_name"] == "compare_conclusion_warning"
 
 
+# 验证 compare table node skips conclusion in local mode 场景。
 def test_compare_table_node_skips_conclusion_in_local_mode(monkeypatch):
+    # 记录失败if调用。
     def fail_if_called(state, table_answer):
         raise AssertionError("local mode should not generate conclusion")
 
@@ -430,6 +464,7 @@ def test_compare_table_node_skips_conclusion_in_local_mode(monkeypatch):
     assert "## 简短结论" not in result["answer"]
 
 
+# 验证 citation node downgrades invalid compare citation 场景。
 def test_citation_node_downgrades_invalid_compare_citation(monkeypatch):
     monkeypatch.setattr(
         compare_generator.CompareGeneratorAgent,
@@ -477,6 +512,7 @@ def test_citation_node_downgrades_invalid_compare_citation(monkeypatch):
     assert "页码错误" in result["critique"]
 
 
+# 验证 citation node downgrades uncited conclusion 场景。
 def test_citation_node_downgrades_uncited_conclusion(monkeypatch):
     monkeypatch.setattr(
         compare_generator.CompareGeneratorAgent,
@@ -525,6 +561,7 @@ def test_citation_node_downgrades_uncited_conclusion(monkeypatch):
     assert result["critique"]
 
 
+# 验证 citation node checks table after bad conclusion 场景。
 def test_citation_node_checks_table_after_bad_conclusion(monkeypatch):
     monkeypatch.setattr(
         compare_generator.CompareGeneratorAgent,
@@ -572,6 +609,7 @@ def test_citation_node_checks_table_after_bad_conclusion(monkeypatch):
     assert "页码错误" in result["critique"]
 
 
+# 验证 citation node flags substantive uncited table 场景。
 def test_citation_node_flags_substantive_uncited_table(monkeypatch):
     monkeypatch.setattr(
         compare_generator.CompareGeneratorAgent,
@@ -617,6 +655,7 @@ def test_citation_node_flags_substantive_uncited_table(monkeypatch):
     assert result["critique"]
 
 
+# 验证 citation node accepts all no evidence table 场景。
 def test_citation_node_accepts_all_no_evidence_table(monkeypatch):
     monkeypatch.setattr(
         compare_generator.CompareGeneratorAgent,
@@ -664,17 +703,20 @@ def test_citation_node_accepts_all_no_evidence_table(monkeypatch):
     assert result["critique"] == ""
 
 
+# 每次调用睡随机抖动时长，放大并发完成乱序，用于验证回填保序。
 class FakeJitterLLM:
     # 每次调用睡随机抖动时长，放大并发完成乱序，用于验证回填保序。
     def __init__(self):
         self._counter = 0
 
+    # 调用测试替身并返回预设结果。
     def invoke(self, messages):
         self._counter += 1
         time.sleep(0.04 if self._counter % 2 else 0.01)
         return FakeMessage("该维度内容来自文档。")
 
 
+# 验证 document profile node preserves order under concurrency 场景。
 def test_document_profile_node_preserves_order_under_concurrency(monkeypatch):
     monkeypatch.setattr(
         compare_profile.Generator, "_get_client", lambda is_local=False: FakeJitterLLM()
@@ -709,6 +751,7 @@ def test_document_profile_node_preserves_order_under_concurrency(monkeypatch):
         assert all(cell["source"] == profile["source"] for cell in profile["cells"])
 
 
+# 验证 workflow routes to compare subgraph smoke 场景。
 def test_workflow_routes_to_compare_subgraph_smoke(monkeypatch):
     engine = FakeEngine([_doc("a.pdf", 1, 0), _doc("b.pdf", 2, 0)])
     monkeypatch.setattr(compare.RetrieverFactory, "get_engine", lambda doc_id: engine)

@@ -10,6 +10,7 @@ DEFAULT_SIMILARITY_THRESHOLD = 0.5
 SIMILARITY_BASELINE_HISTORY_LIMIT = 4
 
 
+# 完成 余弦相似度归一化值 处理。
 def _cosine_normalized(a: List[float], b: List[float]) -> float:
     # 输入向量已由 Embedder 做 L2 归一化，cosine 等于点积。
     if not a or not b or len(a) != len(b):
@@ -17,6 +18,7 @@ def _cosine_normalized(a: List[float], b: List[float]) -> float:
     return sum(x * y for x, y in zip(a, b))
 
 
+# 过滤重写问题by相似度。
 def filter_rewrites_by_similarity(
     original_vec: List[float],
     rewrite_vecs: List[List[float]],
@@ -38,7 +40,9 @@ def filter_rewrites_by_similarity(
     return kept, dropped
 
 
+# 定义 RewriteVerifyAgent 数据结构。
 class RewriteVerifyAgent:
+    # 校验 rewrites。
     @staticmethod
     def verify_rewrites(state: dict) -> dict:
         # 全部改写被过滤时返回空列表，retrieve 节点会只用原问题检索。

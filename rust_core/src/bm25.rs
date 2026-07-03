@@ -88,6 +88,7 @@ fn build_index(corpus: Vec<Vec<String>>, k1: f64, b: f64, epsilon: f64) -> Bm25I
 
 #[pymethods]
 impl Bm25Index {
+    // 从分词语料创建 BM25 索引。
     #[new]
     #[pyo3(signature = (tokenized_corpus, k1 = 1.5, b = 0.75, epsilon = 0.25))]
     fn new(tokenized_corpus: Vec<Vec<String>>, k1: f64, b: f64, epsilon: f64) -> Self {

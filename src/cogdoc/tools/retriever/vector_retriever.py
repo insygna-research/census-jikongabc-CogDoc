@@ -8,13 +8,12 @@ from cogdoc.tools.retriever.base_retriever import BaseRetriever
 from cogdoc.tools.retriever.retrieval_text import retrieval_text
 
 
-# 封装 EmbeddingModelMismatchError 的状态与行为。
+# 集合中记录的嵌入模型与当前系统模型不符：当前代不可用，需触发新代重建而非硬失败。
 class EmbeddingModelMismatchError(RuntimeError):
-    # 集合中记录的嵌入模型与当前系统模型不符：当前代不可用，需触发新代重建而非硬失败。
     pass
 
 
-# 封装 VectorRetriever 的状态与行为。
+# 初始化实例状态。
 class VectorRetriever(BaseRetriever):
     # 初始化实例状态。
     def __init__(self, collection_id: str, persist_directory: str = None):
@@ -25,7 +24,7 @@ class VectorRetriever(BaseRetriever):
         self.collection_name = f"col-{collection_id}"
         self._init_collection()
 
-    # 处理 init collection 相关逻辑。
+    # 完成 initcollection 处理。
     def _init_collection(self) -> None:
         # Chroma 集合名最长 60 字符；调用方必须保证 collection_name 合法，超长立即失败而非截断。
         if len(self.collection_name) > 60:
@@ -46,20 +45,20 @@ class VectorRetriever(BaseRetriever):
                 f"system model={Embedder.MODEL_NAME!r}"
             )
 
-    # 检查是否存在 exists 相关逻辑。
+    # 检查存在性。
     def exists(self) -> bool:
         return self.collection.count() > 0
 
-    # 统计 count 相关逻辑。
+    # 统计数量。
     def count(self) -> int:
         return self.collection.count()
 
-    # 切分 chunk ids 相关逻辑。
+    # 切分 ids。
     def chunk_ids(self) -> set:
         # 一致性校验用：取全部主键（即 chunk_id），include=[] 只拉 id 不拉文档/向量。
         return set(self.collection.get(include=[])["ids"])
 
-    # 清理 clear 相关逻辑。
+    # 清理。
     def clear(self) -> None:
         # 容忍「集合本就不存在」，但清理后必须确为空；残留旧块则抛错，不静默成功。
         try:
@@ -70,7 +69,7 @@ class VectorRetriever(BaseRetriever):
         if self.collection.count() > 0:
             raise RuntimeError("vector index was not cleared")
 
-    # 写入索引 index 相关逻辑。
+    # 写入索引。
     def index(self, chunks: List[RetrievedDoc]) -> None:
         # 全量重建：先清后写。增量入库走 add_documents/delete_by_source。
         if not chunks:
@@ -78,14 +77,14 @@ class VectorRetriever(BaseRetriever):
         self.clear()
         self._upsert_chunks(chunks)
 
-    # 添加 add documents 相关逻辑。
+    # 添加 documents。
     def add_documents(self, chunks: List[RetrievedDoc]) -> None:
         # 增量加入：按稳定 chunk_id upsert，不清空既有集合。
         if not chunks:
             return
         self._upsert_chunks(chunks)
 
-    # 删除 delete by source 相关逻辑。
+    # 删除 by source。
     def delete_by_source(self, sources) -> None:
         # 按文件名删除其全部 chunk（删/改文档时清旧条目）；文件名是文档身份，区分同内容不同名。
         names = [s for s in {str(s) for s in sources} if s]
@@ -93,7 +92,7 @@ class VectorRetriever(BaseRetriever):
             return
         self.collection.delete(where={"source": {"$in": names}})
 
-    # 处理 materialize 相关逻辑。
+    # 展开结果。
     def _materialize(self, chunks: List[RetrievedDoc]):
         # 把 chunk 列表展开成 Chroma upsert 所需的 (ids, metadatas, texts)；主键直接用稳定 chunk_id。
         ids, metadatas, texts = [], [], []
@@ -118,7 +117,7 @@ class VectorRetriever(BaseRetriever):
             metadatas.append(stored_meta)
         return ids, metadatas, texts
 
-    # 增量写入 upsert chunks 相关逻辑。
+    # 增量写入分块列表。
     def _upsert_chunks(self, chunks: List[RetrievedDoc]) -> None:
         # 此路重新计算 embedding；跨代复用旧向量请走 add_with_embeddings 避免重算。
         embeddings = Embedder.embed_documents([retrieval_text(c) for c in chunks])
@@ -127,7 +126,7 @@ class VectorRetriever(BaseRetriever):
             ids=ids, embeddings=embeddings, documents=texts, metadatas=metadatas
         )
 
-    # 添加 add with embeddings 相关逻辑。
+    # 添加 with embeddings。
     def add_with_embeddings(self, chunks: List[RetrievedDoc], embeddings) -> None:
         # 带预算好的 embedding 写入：跨代增量复用上一代未变文档的向量时绝不重算。
         if not chunks:
@@ -143,7 +142,7 @@ class VectorRetriever(BaseRetriever):
             ids=ids, embeddings=embeddings, documents=texts, metadatas=metadatas
         )
 
-    # 处理 embeddings by chunk id 相关逻辑。
+    # 完成 嵌入向量by分块id 处理。
     def embeddings_by_chunk_id(self) -> dict:
         # 导出 {chunk_id: embedding}，供跨代复用按稳定 chunk_id 关联向量，绝不重算 embedding。 只提供向量，文本/metadata 权威另取自 BM25 registry，避免向量侧损坏被洗白。
         data = self.collection.get(include=["embeddings"])
@@ -152,7 +151,7 @@ class VectorRetriever(BaseRetriever):
             for i, chunk_id in enumerate(data["ids"])
         }
 
-    # 检索 search 相关逻辑。
+    # 检索。
     def search(self, query: str, top_k: int = 3) -> List[RetrievedDoc]:
         # 返回结构保持与 BM25Retriever 一致。
         results = self.collection.query(
@@ -183,7 +182,7 @@ class VectorRetriever(BaseRetriever):
         return retrieved_docs
 
 
-# 处理 meta from stored 相关逻辑。
+# 完成 metafromstored 处理。
 def _meta_from_stored(meta_data: dict) -> dict:
     # 从 Chroma 存储元数据重建 chunk 身份元数据；缺 chunk_id 视为旧索引，必须重建而非现场拼回。
     chunk_id = meta_data.get("chunk_id")

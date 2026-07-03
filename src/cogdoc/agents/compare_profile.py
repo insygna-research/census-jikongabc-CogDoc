@@ -55,6 +55,7 @@ DEFAULT_COMPARE_DIMENSIONS: List[CompareDimensionPlan] = [
 ]
 
 
+# 完成 default对比维度列表 处理。
 def default_compare_dimensions(is_local: bool = False) -> List[CompareDimensionPlan]:
     # 本地模式只保留核心维度，控制 LLM 调用次数。
     dimensions = [
@@ -74,6 +75,7 @@ def default_compare_dimensions(is_local: bool = False) -> List[CompareDimensionP
     return dimensions
 
 
+# 完成 维度as章节计划 处理。
 def _dimension_as_section_plan(dimension: CompareDimensionPlan) -> SummarySectionPlan:
     # Compare 维度复用 Summary section 生成器的字段契约。
     return SummarySectionPlan(
@@ -83,6 +85,7 @@ def _dimension_as_section_plan(dimension: CompareDimensionPlan) -> SummarySectio
     )
 
 
+# 生成对比 messages。
 def _compare_messages(source: str, plan: SummarySectionPlan, query: str, context: str):
     # 首轮提示禁止模型自造引用，引用由共享 helper 统一绑定。
     return [
@@ -115,6 +118,7 @@ def _compare_messages(source: str, plan: SummarySectionPlan, query: str, context
     ]
 
 
+# 生成对比 retry messages。
 def _compare_retry_messages(
     source: str, plan: SummarySectionPlan, query: str, context: str
 ):
@@ -141,7 +145,9 @@ def _compare_retry_messages(
     ]
 
 
+# 定义 DocumentProfileAgent 数据结构。
 class DocumentProfileAgent:
+    # 构建 profiles。
     @staticmethod
     def build_profiles(state: dict) -> dict:
         # 每篇文档按相同维度生成 profile，供后续对齐输出。
@@ -170,6 +176,7 @@ class DocumentProfileAgent:
             for dimension in dimensions:
                 tasks.append((source, dimension, docs, doc_tokens))
 
+        # 构建 cell。
         def build_cell(
             task: Tuple[str, CompareDimensionPlan, List[RetrievedDoc], List],
         ) -> CompareCell:

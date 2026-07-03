@@ -4,14 +4,14 @@ from cogdoc.tools.retriever.bm25_retriever import BM25Retriever
 from cogdoc.tools.retriever.vector_retriever import VectorRetriever, _meta_from_stored
 
 
-# 封装 _DummyBM25 的状态与行为。
+# BM25 新 native 接口返回 (doc_id, score)，测试只需要一个命中。
 class _DummyBM25:
     # BM25 新 native 接口返回 (doc_id, score)，测试只需要一个命中。
     def score_topk(self, tokenized_query, top_n):
         return [(0, 1.0)]
 
 
-# 封装 _DummyVectorCollection 的状态与行为。
+# 模拟旧 Chroma 索引结果缺少稳定 chunk_id。
 class _DummyVectorCollection:
     # 模拟旧 Chroma 索引结果缺少稳定 chunk_id。
     def query(self, query_embeddings, n_results):

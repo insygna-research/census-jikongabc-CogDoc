@@ -4,7 +4,7 @@ from cogdoc.tools.manifest import manifests_match
 DOCS = [{"name": "a.pdf", "size": 10, "sha256": "abc123"}]
 
 
-# 处理 manifest 相关逻辑。
+# 构造测试用 manifest。
 def _manifest(
     doc_id,
     documents,

@@ -3,6 +3,7 @@ from cogdoc.config.settings import Settings
 from cogdoc.observability.trace import build_trace_step, export_trace
 
 
+# 验证 build trace step keeps only safe document preview 场景。
 def test_build_trace_step_keeps_only_safe_document_preview():
     output = {
         "retrieved_docs": [
@@ -32,6 +33,7 @@ def test_build_trace_step_keeps_only_safe_document_preview():
     assert "answer" not in step
 
 
+# 验证 build trace step uses explicit retrieval top k 场景。
 def test_build_trace_step_uses_explicit_retrieval_top_k():
     output = {"retrieved_docs": [{"text": "x", "meta": {"chunk_id": "c1"}}]}
 
@@ -41,6 +43,7 @@ def test_build_trace_step_uses_explicit_retrieval_top_k():
     assert step["counts"]["retrieved_count"] == 1
 
 
+# 验证 export trace writes json file 场景。
 def test_export_trace_writes_json_file(tmp_path):
     settings = Settings(cogdoc_trace_dir=str(tmp_path), cogdoc_trace_enabled=True)
     step = build_trace_step("intent_router", {"task_type": "qa"}, 1.0)
@@ -54,6 +57,7 @@ def test_export_trace_writes_json_file(tmp_path):
     assert payload["steps"][0]["node_name"] == "intent_router"
 
 
+# 验证 export trace respects disabled flag 场景。
 def test_export_trace_respects_disabled_flag(tmp_path):
     settings = Settings(cogdoc_trace_dir=str(tmp_path), cogdoc_trace_enabled=False)
 

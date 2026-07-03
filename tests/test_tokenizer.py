@@ -6,6 +6,7 @@ from cogdoc.tools.tokenizer import (
 )
 
 
+# 验证 tokenize mixed text keeps word level chinese tokens 场景。
 def test_tokenize_mixed_text_keeps_word_level_chinese_tokens():
     tokens = tokenize_mixed_text("模型 方法 架构")
 
@@ -15,6 +16,7 @@ def test_tokenize_mixed_text_keeps_word_level_chinese_tokens():
     assert "模" not in tokens
 
 
+# 验证 tokenize mixed text keeps latin tokens 场景。
 def test_tokenize_mixed_text_keeps_latin_tokens():
     tokens = tokenize_mixed_text("BGE-reranker v2.5 chunk_id")
 
@@ -24,6 +26,7 @@ def test_tokenize_mixed_text_keeps_latin_tokens():
     assert "chunk_id" in tokens
 
 
+# 验证 tokenize english stems and drops stopwords 场景。
 def test_tokenize_english_stems_and_drops_stopwords():
     tokens = tokenize_mixed_text("The models are retrieving documents")
 
@@ -61,6 +64,7 @@ def test_native_tokenizer_matches_python_reference(text):
     assert tokenize_mixed_text(text) == _tokenize_mixed_text_python(text)
 
 
+# 验证 tokenize corpus matches per text tokenization 场景。
 def test_tokenize_corpus_matches_per_text_tokenization():
     texts = [
         "模型 方法 架构",
@@ -72,5 +76,6 @@ def test_tokenize_corpus_matches_per_text_tokenization():
     assert tokenize_corpus(texts) == [tokenize_mixed_text(t) for t in texts]
 
 
+# 验证 tokenize corpus empty input 场景。
 def test_tokenize_corpus_empty_input():
     assert tokenize_corpus([]) == []

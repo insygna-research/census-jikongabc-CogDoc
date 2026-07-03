@@ -16,6 +16,7 @@ _STATUS_BY_CODE = {
 }
 
 
+# 归类错误code。
 def classify_error_code(stage: str, error_class: str, message: str) -> ErrorCode:
     # stream 阶段维持既有契约（流中断即 STREAM_INTERRUPTED，不论底层成因）。
     if stage == "stream":
@@ -30,5 +31,6 @@ def classify_error_code(stage: str, error_class: str, message: str) -> ErrorCode
     return ErrorCode.MODEL_UNAVAILABLE
 
 
+# 返回状态forcode。
 def status_for_code(code: ErrorCode) -> int:
     return _STATUS_BY_CODE.get(code, 503)

@@ -7,6 +7,7 @@ from cogdoc.agents.conversation_memory import (
 )
 
 
+# 验证 extract chat turn skips qa fallback answer 场景。
 def test_extract_chat_turn_skips_qa_fallback_answer():
     assert (
         extract_chat_turn(
@@ -23,6 +24,7 @@ def test_extract_chat_turn_skips_qa_fallback_answer():
     )
 
 
+# 验证 extract chat turn skips unvalidated qa answer 场景。
 def test_extract_chat_turn_skips_unvalidated_qa_answer():
     assert (
         extract_chat_turn(
@@ -38,6 +40,7 @@ def test_extract_chat_turn_skips_unvalidated_qa_answer():
     )
 
 
+# 验证 extract chat turn keeps valid qa answer 场景。
 def test_extract_chat_turn_keeps_valid_qa_answer():
     turn = extract_chat_turn(
         "qa",
@@ -60,6 +63,7 @@ def test_extract_chat_turn_keeps_valid_qa_answer():
     ]
 
 
+# 验证 extract chat turn skips any task with critique 场景。
 def test_extract_chat_turn_skips_any_task_with_critique():
     assert (
         extract_chat_turn(
@@ -75,6 +79,7 @@ def test_extract_chat_turn_skips_any_task_with_critique():
     )
 
 
+# 验证 extract chat turn skips unknown task 场景。
 def test_extract_chat_turn_skips_unknown_task():
     assert (
         extract_chat_turn(
@@ -87,6 +92,7 @@ def test_extract_chat_turn_skips_unknown_task():
     )
 
 
+# 验证 extract chat turn skips compare without profiles 场景。
 def test_extract_chat_turn_skips_compare_without_profiles():
     # 点名不足等早退只产出引导消息、无 document_profiles，不应写入记忆。
     assert (
@@ -100,6 +106,7 @@ def test_extract_chat_turn_skips_compare_without_profiles():
     )
 
 
+# 验证 extract chat turn keeps valid compare answer 场景。
 def test_extract_chat_turn_keeps_valid_compare_answer():
     turn = extract_chat_turn(
         "compare",
@@ -116,6 +123,7 @@ def test_extract_chat_turn_keeps_valid_compare_answer():
     assert turn[1]["content"] == "## 方法\n- **a.pdf**：方法 A。[a.pdf:P1]"
 
 
+# 验证 extract chat turn skips summary without sections 场景。
 def test_extract_chat_turn_skips_summary_without_sections():
     # 未指定文件等早退只产出引导消息、无 summary_section_results，不应写入记忆。
     assert (
@@ -129,6 +137,7 @@ def test_extract_chat_turn_skips_summary_without_sections():
     )
 
 
+# 验证 extract chat turn keeps valid summary answer 场景。
 def test_extract_chat_turn_keeps_valid_summary_answer():
     turn = extract_chat_turn(
         "summary",
@@ -147,6 +156,7 @@ def test_extract_chat_turn_keeps_valid_summary_answer():
     assert turn[1]["content"].startswith("# a.pdf 结构化摘要")
 
 
+# 验证 clean answer for memory strips citation warning 场景。
 def test_clean_answer_for_memory_strips_citation_warning():
     answer = clean_answer_for_memory(
         "## 方法\n- **a.pdf**：方法 A。\n\n## 引用校验警告\n单元格引用错误。"
@@ -155,6 +165,7 @@ def test_clean_answer_for_memory_strips_citation_warning():
     assert answer == "## 方法\n- **a.pdf**：方法 A。"
 
 
+# 验证 extract final answer reads compare messages fallback 场景。
 def test_extract_final_answer_reads_compare_messages_fallback():
     assert (
         extract_final_answer(
@@ -167,10 +178,12 @@ def test_extract_final_answer_reads_compare_messages_fallback():
     )
 
 
+# 验证 clean answer for memory without warning is noop 场景。
 def test_clean_answer_for_memory_without_warning_is_noop():
     assert clean_answer_for_memory("正常答案") == "正常答案"
 
 
+# 验证 format recent chat history uses recent messages only 场景。
 def test_format_recent_chat_history_uses_recent_messages_only():
     history = [
         {"role": "user", "content": f"msg-{idx:02d}", "timestamp": None}

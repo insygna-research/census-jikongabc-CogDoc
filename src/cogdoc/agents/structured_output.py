@@ -8,12 +8,14 @@ STRUCTURED_OUTPUT_METHODS = ("json_mode", "json_schema", "function_calling", "ra
 _METHOD_CACHE: dict[str, str] = {}
 
 
+# 构造缓存密钥。
 def _llm_cache_key(llm) -> str:
     base_url = str(getattr(llm, "openai_api_base", "") or getattr(llm, "base_url", ""))
     model = str(getattr(llm, "model_name", "") or getattr(llm, "model", ""))
     return f"{llm.__class__.__module__}.{llm.__class__.__name__}:{base_url}:{model}"
 
 
+# 完成 auto方法列表forLLM 处理。
 def _auto_methods_for_llm(llm) -> list[str]:
     # 本地部署的兼容 OpenAI 接口的服务端，大多会拒绝各类 response_format 格式限定参数；直接返回原始 JSON 可避免无效请求损耗。
     base_url = str(
@@ -31,6 +33,7 @@ def _auto_methods_for_llm(llm) -> list[str]:
     return ["json_mode", "json_schema", "function_calling", "raw_json"]
 
 
+# 完成 configured方法列表 处理。
 def _configured_methods(llm=None) -> list[str]:
     # auto 优先走兼容面较广的 json_object，再尝试更严格/更旧的 LangChain 方法。
     configured = get_settings().llm_structured_output_method.strip()
@@ -52,6 +55,7 @@ def _configured_methods(llm=None) -> list[str]:
     return methods
 
 
+# 读取内容。
 def _message_content(message) -> str:
     if isinstance(message, str):
         return message
@@ -60,6 +64,7 @@ def _message_content(message) -> str:
     return str(getattr(message, "content", ""))
 
 
+# 完成 提取流程JSON对象 处理。
 def _extract_json_object(text: str) -> str:
     # raw_json 兜底时容忍模型包了一点解释或 Markdown。
     stripped = text.strip()
@@ -107,18 +112,21 @@ def _extract_json_object(text: str) -> str:
     raise ValueError(f"No JSON object found in model output: {text[:200]}")
 
 
+# 解析 schema。
 def _parse_schema(schema: Type[BaseModel], payload: str | dict) -> BaseModel:
     if isinstance(payload, dict):
         return schema.model_validate(payload)
     return schema.model_validate_json(payload)
 
 
+# 调用原始输出JSON。
 def _invoke_raw_json(llm, schema: Type[BaseModel], messages: Iterable) -> BaseModel:
     response = llm.invoke(list(messages))
     content = _message_content(response)
     return _parse_schema(schema, _extract_json_object(content))
 
 
+# 调用结构化输出。
 def invoke_structured(llm, schema: Type[BaseModel], messages: Iterable) -> BaseModel:
     # 统一兼容 OpenAI、DeepSeek、Ollama 等 OpenAI-compatible 后端的结构化输出差异。
     errors = []

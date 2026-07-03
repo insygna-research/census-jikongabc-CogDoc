@@ -6,7 +6,7 @@ from cogdoc.config.settings import PROJECT_ROOT, get_settings
 ENV_PATH = PROJECT_ROOT / ".env"
 
 
-# 写入 upsert env values 相关逻辑。
+# 增量写入环境变量值。
 def upsert_env_values(updates: dict[str, str], env_path: Path | None = None) -> None:
     # 原子写：保留原有注释/空行/其他键，命中的键就地改值，未命中的追加到末尾。
     path = env_path or ENV_PATH
@@ -28,7 +28,7 @@ def upsert_env_values(updates: dict[str, str], env_path: Path | None = None) -> 
     os.replace(tmp, path)
 
 
-# 应用 apply llm config 相关逻辑。
+# 应用LLM配置。
 def apply_llm_config(
     *, api_key: str | None = None, base_url: str | None = None, model: str | None = None
 ) -> None:

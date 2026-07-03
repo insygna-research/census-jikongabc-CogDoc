@@ -3,6 +3,7 @@ from cogdoc.service import chat_service
 from cogdoc.service.chat_service import ChatServiceError, run_chat_sync
 
 
+# 构造测试用文档。
 def _doc() -> dict:
     return {
         "text": "报名要求。",
@@ -21,7 +22,9 @@ def _doc() -> dict:
     }
 
 
+# 定义 FakeApp 数据结构。
 class FakeApp:
+    # 流式返回结果。
     def stream(self, initial_state, config, stream_mode, subgraphs):
         assert initial_state["trace_id"]
         assert config["configurable"]["trace_id"] == initial_state["trace_id"]
@@ -68,6 +71,7 @@ class FakeApp:
         )
 
 
+# 验证 run chat sync returns structured result 场景。
 def test_run_chat_sync_returns_structured_result(monkeypatch):
     monkeypatch.setattr(chat_service, "app", FakeApp())
     monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
@@ -89,6 +93,7 @@ def test_run_chat_sync_returns_structured_result(monkeypatch):
     assert any(step["retrieval_top_k"] == 9 for step in result.steps)
 
 
+# 验证 run chat emits golden event sequence 场景。
 def test_run_chat_emits_golden_event_sequence(monkeypatch):
     monkeypatch.setattr(chat_service, "app", FakeApp())
     monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
@@ -106,6 +111,7 @@ def test_run_chat_emits_golden_event_sequence(monkeypatch):
     ]
 
 
+# 路由后流式迭代中途崩溃，父子图始终未产出可信输出。
 class StreamInterruptApp:
     # 路由后流式迭代中途崩溃，父子图始终未产出可信输出。
     def stream(self, initial_state, config, stream_mode, subgraphs):
@@ -117,6 +123,7 @@ class StreamInterruptApp:
         raise TimeoutError("流中断")
 
 
+# 验证 run chat sync raises on stream interrupt without output 场景。
 def test_run_chat_sync_raises_on_stream_interrupt_without_output(monkeypatch):
     monkeypatch.setattr(chat_service, "app", StreamInterruptApp())
     monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
@@ -130,6 +137,7 @@ def test_run_chat_sync_raises_on_stream_interrupt_without_output(monkeypatch):
     assert excinfo.value.error_class == "TimeoutError"
 
 
+# 父子图输出已落地后流才中断，属于可降级返回而非彻底失败。
 class StreamInterruptWithPartialApp:
     # 父子图输出已落地后流才中断，属于可降级返回而非彻底失败。
     def stream(self, initial_state, config, stream_mode, subgraphs):
@@ -152,6 +160,7 @@ class StreamInterruptWithPartialApp:
         raise TimeoutError("流中断")
 
 
+# 验证 run chat sync returns degraded result when partial output 场景。
 def test_run_chat_sync_returns_degraded_result_when_partial_output(monkeypatch):
     monkeypatch.setattr(chat_service, "app", StreamInterruptWithPartialApp())
     monkeypatch.setattr(chat_service, "configure_logging", lambda: None)

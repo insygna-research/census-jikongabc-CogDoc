@@ -7,9 +7,9 @@ _locks: dict[str, RLock] = {}
 _refs: dict[str, int] = {}  # 锁句柄发放计数：>0 表示有人持有引用，禁止压缩回收
 
 
-# 封装 _KbLock 的状态与行为。
+# kb_write_lock 的句柄：构造即登记引用（即便尚未 acquire，也不会被 compact 回收），退出 with 时注销；闭合"取得旧锁引用但未 acquire 时被 sweeper 移除、重建同名 KB 拿到第二把锁"的竞态。
 class _KbLock:
-    # kb_write_lock 的句柄：构造即登记引用（即便尚未 acquire，也不会被 compact 回收），退出 with 时注销。 闭合"取得旧锁引用但未 acquire 时被 sweeper 移除、重建同名 KB 拿到第二把锁"的竞态。
+    # kb_write_lock 的句柄：构造即登记引用（即便尚未 acquire，也不会被 compact 回收），退出 with 时注销；闭合"取得旧锁引用但未 acquire 时被 sweeper 移除、重建同名 KB 拿到第二把锁"的竞态。
     def __init__(self, kb_id: str):
         self._kb_id = kb_id
         with _registry_lock:
@@ -37,13 +37,13 @@ class _KbLock:
         return False
 
 
-# 处理 kb write lock 相关逻辑。
+# 完成 知识库写入锁 处理。
 def kb_write_lock(kb_id: str) -> _KbLock:
     # 返回可重入的 with-句柄：同线程嵌套 with 共享同一底层 RLock（如删库路由再调 delete_kb_index）。
     return _KbLock(kb_id)
 
 
-# 压缩 compact locks 相关逻辑。
+# 压缩锁。
 def compact_locks(keep: set[str]) -> int:
     # sweeper 调用：丢弃不在 keep 内、且引用计数为 0 的锁，防一次性 KB ID 撑大锁表。 引用计数从句柄构造起就 >0，故"已发放但未 acquire"的锁不会被回收，杜绝同名 KB 出现两把锁。
     with _registry_lock:

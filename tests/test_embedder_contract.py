@@ -6,25 +6,25 @@ from cogdoc.tools.embedder import Embedder
 from cogdoc.tools.retriever.vector_retriever import VectorRetriever
 
 
-# 处理 good 相关逻辑。
+# 构造合法嵌入向量。
 def _good(n=1):
     return [[0.0] * Embedder.EMBEDDING_DIM for _ in range(n)]
 
 
-# 封装 _FakeModel 的状态与行为。
+# 初始化实例状态。
 class _FakeModel:
     # 初始化实例状态。
     def __init__(self, dim):
         self._dim = dim
         self.last_kwargs = {}
 
-    # 处理 encode 相关逻辑。
+    # 构造或驱动 encode 测试场景。
     def encode(self, texts, **kwargs):
         self.last_kwargs = kwargs
         return np.zeros((len(texts), self._dim))
 
 
-# 处理 reset model 相关逻辑。
+# 重置嵌入模型单例。
 def _reset_model():
     Embedder._model = None
 
@@ -33,7 +33,7 @@ def _reset_model():
 def test_get_model_pins_revision(monkeypatch):
     captured = {}
 
-    # 处理 fake st 相关逻辑。
+    # 构造测试用 SentenceTransformer。
     def fake_st(name, device=None, revision=None):
         captured["name"] = name
         captured["revision"] = revision

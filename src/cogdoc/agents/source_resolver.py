@@ -8,8 +8,8 @@ from cogdoc.agents.qa_generator import Generator
 from cogdoc.agents.structured_output import invoke_structured
 
 
+# 允许为空：无法确定指代时返回空数组，由调用方回落原早退。
 class SourceResolution(BaseModel):
-    # 允许为空：无法确定指代时返回空数组，由调用方回落原早退。
     sources: List[str] = Field(
         default_factory=list,
         description="用户实际指向的文件名，逐字取自可用文件清单；无法确定时为空数组。",
@@ -41,6 +41,7 @@ _SUMMARY_SYSTEM = (
 )
 
 
+# 过滤known源文件列表。
 def _filter_known_sources(names: Sequence[str], sources: Sequence[str]) -> List[str]:
     # 闭集校验 + 去重，只保留清单中真实存在的文件名，并按 sources 下标排序保证列序确定。
     order = {source: index for index, source in enumerate(sources)}
@@ -55,6 +56,7 @@ def _filter_known_sources(names: Sequence[str], sources: Sequence[str]) -> List[
     return resolved
 
 
+# 解析 sources。
 def _resolve_sources(
     query: str,
     sources: Sequence[str],
@@ -94,6 +96,7 @@ def _resolve_sources(
     return _filter_known_sources(output.sources, sources)
 
 
+# 解析 compare sources。
 def resolve_compare_sources(
     query: str,
     sources: Sequence[str],
@@ -107,6 +110,7 @@ def resolve_compare_sources(
     return resolved if len(resolved) >= 2 else []
 
 
+# 解析 summary source。
 def resolve_summary_source(
     query: str,
     sources: Sequence[str],

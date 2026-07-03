@@ -2,6 +2,7 @@ from cogdoc.agents import rewrite_verifier
 from cogdoc.agents.rewrite_verifier import RewriteVerifyAgent, filter_rewrites_by_similarity
 
 
+# 验证 keeps above threshold drops below 场景。
 def test_keeps_above_threshold_drops_below():
     # 相似度高于阈值的改写保留，低于阈值的改写丢弃。
     kept, dropped = filter_rewrites_by_similarity(
@@ -15,6 +16,7 @@ def test_keeps_above_threshold_drops_below():
     assert dropped == [("bad", 0.0)]
 
 
+# 验证 similarity equal to threshold is kept 场景。
 def test_similarity_equal_to_threshold_is_kept():
     # 相似度等于阈值时按通过处理。
     kept, dropped = filter_rewrites_by_similarity(
@@ -28,6 +30,7 @@ def test_similarity_equal_to_threshold_is_kept():
     assert dropped == []
 
 
+# 验证 all below returns empty 场景。
 def test_all_below_returns_empty():
     # 全部低于阈值时返回空列表，由检索节点回退原问题。
     kept, dropped = filter_rewrites_by_similarity(
@@ -41,6 +44,7 @@ def test_all_below_returns_empty():
     assert dropped == [("bad", 0.0)]
 
 
+# 验证 length mismatch is zero 场景。
 def test_length_mismatch_is_zero():
     # 向量维度不一致时按不相关处理。
     kept, dropped = filter_rewrites_by_similarity(
@@ -54,6 +58,7 @@ def test_length_mismatch_is_zero():
     assert dropped == [("x", 0.0)]
 
 
+# 验证 missing rewrite vector is dropped not silently lost 场景。
 def test_missing_rewrite_vector_is_dropped_not_silently_lost():
     # 向量数量少于改写数量时，缺失向量的改写必须进入 dropped。
     kept, dropped = filter_rewrites_by_similarity(
@@ -67,6 +72,7 @@ def test_missing_rewrite_vector_is_dropped_not_silently_lost():
     assert dropped == [("missing", 0.0)]
 
 
+# 验证 verify rewrites overwrites with filtered queries 场景。
 def test_verify_rewrites_overwrites_with_filtered_queries(monkeypatch):
     # verify 节点直接覆盖 rewritten_queries，不依赖 reducer 累加。
     monkeypatch.setattr(
@@ -88,10 +94,12 @@ def test_verify_rewrites_overwrites_with_filtered_queries(monkeypatch):
     assert "bad" in result["steps_trace"][0]["output_summary"]
 
 
+# 验证 baseline augmented with chat history 场景。
 def test_baseline_augmented_with_chat_history(monkeypatch):
     # 覆盖历史补全改写不再被裸省略句基准误杀。
     captured = {}
 
+    # 捕获结果。
     def capture(texts):
         captured["texts"] = texts
         return [[1.0, 0.0]] * len(texts)
@@ -123,10 +131,12 @@ def test_baseline_augmented_with_chat_history(monkeypatch):
     assert result["rewritten_queries"] == ["Transformer 作者"]
 
 
+# 验证 baseline is bare query without history 场景。
 def test_baseline_is_bare_query_without_history(monkeypatch):
     # 单轮（无历史）基准仍是原问题，行为与改造前一致。
     captured = {}
 
+    # 捕获结果。
     def capture(texts):
         captured["texts"] = texts
         return [[1.0, 0.0]] * len(texts)
@@ -140,6 +150,7 @@ def test_baseline_is_bare_query_without_history(monkeypatch):
     assert captured["texts"][0] == "原始问题"
 
 
+# 验证 verify rewrites skips empty inputs 场景。
 def test_verify_rewrites_skips_empty_inputs(monkeypatch):
     # 空原问题或空改写无需加载 embedding 模型。
     def fail_if_called(_texts):
@@ -155,6 +166,7 @@ def test_verify_rewrites_skips_empty_inputs(monkeypatch):
     ) == {"rewritten_queries": []}
 
 
+# 验证 verify rewrites handles empty embedding result 场景。
 def test_verify_rewrites_handles_empty_embedding_result(monkeypatch):
     # embedding 异常少返回空向量时，所有改写按低相似丢弃并写入 trace。
     monkeypatch.setattr(rewrite_verifier.Embedder, "embed_documents", lambda texts: [])

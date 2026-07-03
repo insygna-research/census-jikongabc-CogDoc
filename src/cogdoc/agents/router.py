@@ -12,6 +12,7 @@ FORCED_TASK_TYPES = ("qa", "summary", "compare")
 FORCED_TASK_TYPE_SET = frozenset(FORCED_TASK_TYPES)
 
 
+# 定义 RouteDecision 的接口数据模型。
 class RouteDecision(BaseModel):
     task_type: Literal["qa", "summary", "compare", "unknown"] = Field(
         description="任务类型: 'qa', 'summary', 'compare', 'unknown'"
@@ -19,6 +20,7 @@ class RouteDecision(BaseModel):
     reason: str = Field(description="做出该路由决策的清晰理由。")
 
 
+# 归类意图byrule。
 def classify_intent_by_rule(query: str) -> RouteDecision:
     # LLM 结构化输出不可用时的确定性兜底，不能把明确摘要/对比请求打到 QA。
     normalized = (query or "").strip().lower()
@@ -45,7 +47,9 @@ def classify_intent_by_rule(query: str) -> RouteDecision:
     return RouteDecision(task_type="qa", reason="规则兜底为问答")
 
 
+# 定义 RouterAgent 数据结构。
 class RouterAgent:
+    # 路由 intent。
     @staticmethod
     def route_intent(state: dict, config: RunnableConfig) -> dict:
         messages = state.get("messages", [])

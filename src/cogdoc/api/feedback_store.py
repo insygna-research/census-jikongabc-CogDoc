@@ -10,10 +10,12 @@ from cogdoc.config.settings import get_settings
 _BAD_CASE_TYPES = {"thumbs_down", "correction"}
 
 
+# 返回当前 UTC 时间字符串。
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# 反馈追加落 jsonl；点踩/纠错另写 bad_cases，供评测集自我进化。
 class FeedbackStore:
     # 反馈追加落 jsonl；点踩/纠错另写 bad_cases，供评测集自我进化。
     def __init__(
@@ -28,6 +30,7 @@ class FeedbackStore:
         for path in (self._feedback_path, self._bad_cases_path):
             os.makedirs(os.path.dirname(path), exist_ok=True)
 
+    # 记录结果。
     def record(self, payload: dict[str, Any]) -> dict[str, Any]:
         feedback_id = uuid4().hex
         entry = {"feedback_id": feedback_id, "created_at": _now_iso(), **payload}
@@ -38,6 +41,7 @@ class FeedbackStore:
                 self._append(self._bad_cases_path, entry)
         return {"feedback_id": feedback_id, "is_bad_case": is_bad_case}
 
+    # 追加。
     def _append(self, path: str, entry: dict[str, Any]) -> None:
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")

@@ -2,6 +2,7 @@ from statistics import mean
 from typing import Dict, List, Sequence
 
 
+# 计算atk。
 def recall_at_k(
     retrieved_sources: Sequence[str], expected_sources: Sequence[str], k: int
 ) -> float:
@@ -12,6 +13,7 @@ def recall_at_k(
     return len(expected & top) / len(expected)
 
 
+# 计算atk。
 def hit_at_k(
     retrieved_sources: Sequence[str], expected_sources: Sequence[str], k: int
 ) -> float:
@@ -21,6 +23,7 @@ def hit_at_k(
     return 1.0 if expected & set(retrieved_sources[:k]) else 0.0
 
 
+# 计算排序。
 def reciprocal_rank(
     retrieved_sources: Sequence[str], expected_sources: Sequence[str]
 ) -> float:
@@ -31,6 +34,7 @@ def reciprocal_rank(
     return 0.0
 
 
+# 评估问题。
 def evaluate_query(
     retrieved_sources: Sequence[str],
     expected_sources: Sequence[str],
@@ -45,6 +49,7 @@ def evaluate_query(
     return metrics
 
 
+# 聚合结果。
 def aggregate(per_query_metrics: List[Dict[str, float]]) -> Dict[str, float]:
     if not per_query_metrics:
         return {}

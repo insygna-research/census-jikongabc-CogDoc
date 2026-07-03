@@ -13,7 +13,7 @@ from cogdoc.tools.document_loader import select_sources_for_compare
 LOCAL_COMPARE_MAX_SOURCES = 2
 
 
-# 处理 document loader node 相关逻辑。
+# 完成 documentloadernode 处理。
 def document_loader_node(state: GraphState) -> dict:
     # Compare MVP 只处理用户显式点名的多文档对比。
     query = state.get("query", "")
@@ -143,7 +143,7 @@ def document_loader_node(state: GraphState) -> dict:
     return result
 
 
-# 处理 document profile node 相关逻辑。
+# 完成 document画像node 处理。
 def document_profile_node(state: GraphState) -> dict:
     try:
         return DocumentProfileAgent.build_profiles(state)
@@ -178,24 +178,24 @@ def document_profile_node(state: GraphState) -> dict:
         return result
 
 
-# 处理 compare table node 相关逻辑。
+# 生成对比 table node。
 def compare_table_node(state: GraphState) -> dict:
     return CompareGeneratorAgent.build_compare_answer(state)
 
 
-# 处理 citation node 相关逻辑。
+# 完成 引用node 处理。
 def citation_node(state: GraphState) -> dict:
     return CompareGeneratorAgent.validate_compare_answer(state)
 
 
-# 处理 document loader check 相关逻辑。
+# 完成 documentloadercheck 处理。
 def document_loader_check(state: GraphState) -> str:
     if len(state.get("compare_docs_by_source", {})) < 2:
         return END
     return "document_profile_node"
 
 
-# 处理 document profile check 相关逻辑。
+# 完成 document画像check 处理。
 def document_profile_check(state: GraphState) -> str:
     if not state.get("document_profiles"):
         return END

@@ -4,6 +4,7 @@ from tests._native import require_rust_core
 rust_core = require_rust_core("rrf_fusion_native")
 
 
+# 构造测试用文档。
 def _doc(source: str, chunk_index: int) -> dict:
     # 构造带稳定 chunk_id 的最小检索结果。
     return {
@@ -16,11 +17,13 @@ def _doc(source: str, chunk_index: int) -> dict:
     }
 
 
+# 提取文档身份键列表。
 def _keys(docs):
     # 测试只关心排序身份。
     return [(d["meta"]["source"], d["meta"]["chunk_index"]) for d in docs]
 
 
+# 验证 tie break is deterministic by doc key 场景。
 def test_tie_break_is_deterministic_by_doc_key():
     # 平分时按 chunk_id 稳定排序。
     vector = [_doc("a.pdf", 0), _doc("b.pdf", 1)]
@@ -31,6 +34,7 @@ def test_tie_break_is_deterministic_by_doc_key():
     assert _keys(result) == [("a.pdf", 0), ("b.pdf", 1)]
 
 
+# 验证 tie break top k boundary is stable 场景。
 def test_tie_break_top_k_boundary_is_stable():
     # top_k 截断不能破坏平分排序。
     vector = [_doc("a.pdf", 0), _doc("b.pdf", 1)]
@@ -40,6 +44,7 @@ def test_tie_break_top_k_boundary_is_stable():
     assert _keys(result) == [("a.pdf", 0)]
 
 
+# 验证 repeated runs produce identical order 场景。
 def test_repeated_runs_produce_identical_order():
     # 相同输入多次融合必须顺序一致。
     vector = [_doc("a.pdf", i) for i in range(5)]
@@ -58,6 +63,7 @@ def test_repeated_runs_produce_identical_order():
         assert again == first
 
 
+# 验证 same doc in both channels is merged 场景。
 def test_same_doc_in_both_channels_is_merged():
     # 相同 chunk_id 的两路结果必须合并。
     vector = [_doc("a.pdf", 0)]
@@ -71,6 +77,7 @@ def test_same_doc_in_both_channels_is_merged():
     assert result[0]["retrieval"]["search_channel"] == "hybrid"
 
 
+# 验证 chunk id is the rrf identity key 场景。
 def test_chunk_id_is_the_rrf_identity_key():
     # source/chunk_index 相同但 chunk_id 不同时不能合并。
     vector = [_doc("same.pdf", 0)]
@@ -86,6 +93,7 @@ def test_chunk_id_is_the_rrf_identity_key():
     }
 
 
+# 验证 higher rank wins when scores differ 场景。
 def test_higher_rank_wins_when_scores_differ():
     # 融合得分更高的文档必须排在前面。
     vector = [_doc("b.pdf", 1), _doc("a.pdf", 0)]

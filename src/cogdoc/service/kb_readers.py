@@ -6,7 +6,7 @@ _condition = Condition()
 _readers: dict[str, int] = {}
 
 
-# 处理 kb read lease 相关逻辑。
+# 完成 知识库读取读租约 处理。
 @contextmanager
 def kb_read_lease(kb_id: str):
     with _condition:
@@ -23,7 +23,7 @@ def kb_read_lease(kb_id: str):
             _condition.notify_all()
 
 
-# 检查是否存在 has readers 相关逻辑。
+# 判断是否存在 readers。
 def has_readers(kb_id: str) -> bool:
     with _condition:
         return _readers.get(kb_id, 0) > 0

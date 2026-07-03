@@ -73,14 +73,14 @@ KB_SUBCOMMANDS = ["new", "use", "rm", "list"]
 rust_core = None
 
 
-# 释放 release runtime lock 相关逻辑。
+# 释放运行时锁。
 def _release_runtime_lock(lock_fh) -> None:
     # 仅在后台 Timer 确已排空时显式释放锁；否则留给进程退出由 OS 释放。
     if cancel_all_timers():
         release_single_instance_lock(lock_fh)
 
 
-# 获取 get rust core 相关逻辑。
+# 加载并返回 Rust 原生扩展模块。
 def get_rust_core():
     global rust_core
     if rust_core is None:
@@ -88,7 +88,7 @@ def get_rust_core():
     return rust_core
 
 
-# 解析 parse forced mode 相关逻辑。
+# 解析用户指定的强制任务模式。
 def parse_forced_mode(user_input: str) -> tuple[str | None, str]:
     match = FORCED_MODE_PATTERN.match(user_input.strip())
     if not match:
@@ -96,7 +96,7 @@ def parse_forced_mode(user_input: str) -> tuple[str | None, str]:
     return match.group(1).lower(), (match.group(2) or "").strip()
 
 
-# 处理 safe print on interrupt 相关逻辑。
+# 在中断信号期间安全输出提示。
 def safe_print_on_interrupt(message: str) -> None:
     # 打印退出提示时临时忽略 SIGINT，避免 Ctrl+C 连按打断清理路径。
     previous_handler = signal.getsignal(signal.SIGINT)
@@ -107,13 +107,13 @@ def safe_print_on_interrupt(message: str) -> None:
         signal.signal(signal.SIGINT, previous_handler)
 
 
-# 脱敏 mask key 相关逻辑。
+# 脱敏密钥。
 def _mask_key(key: str) -> str:
     # 提示当前 key 时只露头尾，避免整串明文回显到终端。
     return f"{key[:3]}***{key[-4:]}" if len(key) > 7 else "***"
 
 
-# 预热 warm kb 相关逻辑。
+# 完成 预热流程知识库 处理。
 def _warm_kb(kb_id: str) -> None:
     # 切库时预热该库 bm25 分词资源；索引尚未落盘时静默跳过，留待提问时按需加载。
     try:
@@ -124,7 +124,7 @@ def _warm_kb(kb_id: str) -> None:
         pass
 
 
-# 列出 kb documents 相关逻辑。
+# 完成 知识库documents 处理。
 def _kb_documents(kb_id: str) -> list[dict]:
     # generation state 是事务提交指针且内含 documents；manifest 是提交后派生缓存，写失败时可能滞后。
     active = KBState(kb_id).active()
@@ -164,7 +164,7 @@ HELP_TEXT = """\
 """
 
 
-# 封装 Console 的状态与行为。
+# 对话历史落 SqliteSessionStore，重启不丢。
 class Console:
     # 对话历史落 SqliteSessionStore，重启不丢。
     def __init__(self):
@@ -181,18 +181,18 @@ class Console:
 
     # ---- 工具 ----
 
-    # 处理 confirm 相关逻辑。
+    # 确认结果。
     def _confirm(self, prompt: str) -> bool:
         return input(f"{prompt} [y/N] ").strip().lower() in ("y", "yes")
 
-    # 处理 require kb 相关逻辑。
+    # 校验知识库。
     def _require_kb(self) -> bool:
         if self.active_kb is None:
             print("⚠️ 还没有选择知识库。用 /kb 查看、/kb new <名> 创建、/kb use <名> 切换。")
             return False
         return True
 
-    # 列出 inbox pdfs 相关逻辑。
+    # 完成 收件箱PDF 列表 处理。
     def _inbox_pdfs(self) -> list[str]:
         os.makedirs(self.inbox_dir, exist_ok=True)
         return sorted(
@@ -202,7 +202,7 @@ class Console:
             and os.path.isfile(os.path.join(self.inbox_dir, f))
         )
 
-    # 解析 resolve session 相关逻辑。
+    # 解析会话。
     def _resolve_session(self, prefix: str) -> str | None:
         # 对话 ID 是 32 位 hex，太长，按前缀唯一匹配。
         if not prefix:
@@ -221,7 +221,7 @@ class Console:
             return None
         return matches[0]
 
-    # 重建 rebuild 相关逻辑。
+    # 完成 rebuild 处理。
     def _rebuild(self) -> None:
         # 重建后索引已变，需重新预热新 bm25。
         kb = self.active_kb
@@ -240,14 +240,14 @@ class Console:
 
     # ---- 知识库命令 ----
 
-    # 切换 use kb 相关逻辑。
+    # 切换到知识库。
     def _use_kb(self, name: str) -> None:
         self.active_kb = name
         self.active_session_id = None
         _warm_kb(name)
         print(f"📚 已切换到知识库: {name}（/new 开始新对话，/chats 查看历史）")
 
-    # 删除 delete kb 相关逻辑。
+    # 删除 kb。
     def _delete_kb(self, kb_id: str) -> None:
         # 写锁内先事务清理索引并落 tombstone，再撤 registry，避免半删除态。
         with kb_write_lock(kb_id):
@@ -257,7 +257,7 @@ class Console:
             # 连带清掉该库的会话历史，否则同名新库复用 doc_id 会捡到旧对话。
             self.sessions.clear_kb(kb_id)
 
-    # 处理 cmd kb 相关逻辑。
+    # 完成 cmd知识库 处理。
     def cmd_kb(self, sub: str, name: str) -> None:
         if sub in ("", "list"):
             records = self.registry.list()
@@ -317,7 +317,7 @@ class Console:
 
     # ---- 文档命令 ----
 
-    # 处理 cmd inbox 相关逻辑。
+    # 完成 cmd收件箱 处理。
     def cmd_inbox(self) -> None:
         pdfs = self._inbox_pdfs()
         if not pdfs:
@@ -333,7 +333,7 @@ class Console:
             tag = " （已在当前库）" if f in in_kb else ""
             print(f"   • {f}{tag}")
 
-    # 处理 cmd add 相关逻辑。
+    # 完成 cmdadd 处理。
     def cmd_add(self, arg: str) -> None:
         if not self._require_kb():
             return
@@ -360,7 +360,7 @@ class Console:
         print(f"📎 已复制 {len(targets)} 个 PDF 进知识库源目录，开始同步重建索引...")
         self._rebuild()
 
-    # 处理 cmd docs 相关逻辑。
+    # 完成 cmd文档列表 处理。
     def cmd_docs(self) -> None:
         if not self._require_kb():
             return
@@ -372,7 +372,7 @@ class Console:
         for d in docs:
             print(f"   • {d.get('name')}")
 
-    # 处理 cmd rm 相关逻辑。
+    # 完成 cmdrm 处理。
     def cmd_rm(self, arg: str) -> None:
         if not self._require_kb():
             return
@@ -390,14 +390,14 @@ class Console:
 
     # ---- 对话命令 ----
 
-    # 处理 cmd new 相关逻辑。
+    # 完成 cmdnew 处理。
     def cmd_new(self) -> None:
         if not self._require_kb():
             return
         self.active_session_id = uuid4().hex
         print(f"🆕 已开启新对话（{self.active_session_id[:8]}）。")
 
-    # 处理 cmd chats 相关逻辑。
+    # 完成 cmdchats 处理。
     def cmd_chats(self) -> None:
         if not self._require_kb():
             return
@@ -413,7 +413,7 @@ class Console:
             )
         print("（用 /open <ID前缀> 打开，/rmchat <ID前缀> 删除）")
 
-    # 处理 cmd open 相关逻辑。
+    # 完成 cmdopen 处理。
     def cmd_open(self, arg: str) -> None:
         if not self._require_kb():
             return
@@ -428,7 +428,7 @@ class Console:
             print(f"  [{role}] {m.get('content', '')}")
         print("-" * 50)
 
-    # 处理 cmd rmchat 相关逻辑。
+    # 完成 cmdrmchat 处理。
     def cmd_rmchat(self, arg: str) -> None:
         if not self._require_kb():
             return
@@ -445,7 +445,7 @@ class Console:
 
     # ---- 云端配置 ----
 
-    # 配置 configure cloud 相关逻辑。
+    # 配置云端配置。
     def _configure_cloud(self, first_time: bool) -> bool:
         # 写入 .env 并即时生效；返回云端是否可用（有 key）。
         from cogdoc.config.llm_config import apply_llm_config
@@ -474,7 +474,7 @@ class Console:
 
     # ---- 问答 ----
 
-    # 输出 print answer 相关逻辑。
+    # 输出回答。
     def _print_answer(self, task_type: str, output: dict) -> None:
         if task_type == "qa":
             if "critique" not in output:
@@ -492,7 +492,7 @@ class Console:
             print(f"\n🤖 {content}")
         print()
 
-    # 处理 do chat 相关逻辑。
+    # 执行一次控制台问答。
     def do_chat(self, query: str, forced_task: str | None) -> None:
         if not self._require_kb():
             return
@@ -533,19 +533,19 @@ class Console:
 
     # ---- Tab 补全 ----
 
-    # 列出 doc names 相关逻辑。
+    # 构造names。
     def _doc_names(self) -> list[str]:
         if self.active_kb is None:
             return []
         return [d.get("name", "") for d in _kb_documents(self.active_kb)]
 
-    # 列出 session prefixes 相关逻辑。
+    # 完成 会话前缀列表 处理。
     def _session_prefixes(self) -> list[str]:
         if self.active_kb is None:
             return []
         return [s["session_id"][:8] for s in self.sessions.list_sessions(self.active_kb)]
 
-    # 计算 completion candidates 相关逻辑。
+    # 完成 补全候选项 处理。
     def _completion_candidates(self, tokens: list[str]) -> list[str]:
         # tokens 是光标前已完成的词；为空说明正在补第一个词，给出全部命令。
         if not tokens:
@@ -567,7 +567,7 @@ class Console:
             return self._session_prefixes() if len(tokens) == 1 else []
         return []
 
-    # 处理 complete 相关逻辑。
+    # 补全结果。
     def complete(self, text: str, state: int) -> str | None:
         # readline 对同一补全会按 state 递增回调，state==0 时重算候选并缓存。
         try:
@@ -588,7 +588,7 @@ class Console:
 
     # ---- 分发 ----
 
-    # 处理 dispatch 相关逻辑。
+    # 分发结果。
     def dispatch(self, raw: str) -> bool:
         # 返回 False 表示退出控制台。
         text = raw.strip()
@@ -667,7 +667,7 @@ class Console:
         return True
 
 
-# 配置 setup completion 相关逻辑。
+# 配置补全。
 def _setup_completion(console: "Console") -> None:
     # 无 readline（如 Windows 原生）则静默跳过，不影响主流程。
     if readline is None:
@@ -682,7 +682,6 @@ def _setup_completion(console: "Console") -> None:
         readline.parse_and_bind("tab: complete")
 
 
-# 处理 main 相关逻辑。
 # 启动横幅：纯静态 ASCII（ansi_shadow 字体），不引入运行时依赖。
 BANNER = r"""
  ██████╗ ██████╗  ██████╗ ██████╗  ██████╗  ██████╗
@@ -694,6 +693,7 @@ BANNER = r"""
 """
 
 
+# 启动入口。
 def main():
     configure_logging()
 

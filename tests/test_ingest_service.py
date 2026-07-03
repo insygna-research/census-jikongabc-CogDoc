@@ -3,28 +3,28 @@ from collections import OrderedDict
 from cogdoc.service import ingest_service
 
 
-# 封装 FakeEngine 的状态与行为。
+# 初始化实例状态。
 class FakeEngine:
     # 初始化实例状态。
     def __init__(self):
         self.cleared = False
         self.indexed = None
 
-    # 清理 clear 相关逻辑。
+    # 清理。
     def clear(self):
         self.cleared = True
 
-    # 写入索引 index 相关逻辑。
+    # 写入索引。
     def index(self, chunks):
         self.indexed = chunks
 
-    # 处理 is consistent 相关逻辑。
+    # 判断 consistent 是否成立。
     def is_consistent(self):
         # 全量重建后写后校验：假引擎视为一致。
         return True
 
 
-# 配置测试替身 patch common 相关逻辑。
+# 替换公共依赖。
 def _patch_common(monkeypatch, engine, pages, chunks):
     monkeypatch.setattr(
         ingest_service.RetrieverFactory, "get_engine", lambda kb: engine

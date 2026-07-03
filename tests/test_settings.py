@@ -2,6 +2,7 @@ import pytest
 from cogdoc.config.settings import Settings, get_settings
 
 
+# 清理 settings cache。
 @pytest.fixture(autouse=True)
 def clear_settings_cache():
     get_settings.cache_clear()
@@ -9,6 +10,7 @@ def clear_settings_cache():
     get_settings.cache_clear()
 
 
+# 验证 settings defaults match current runtime contract 场景。
 def test_settings_defaults_match_current_runtime_contract():
     settings = Settings()
 
@@ -26,6 +28,7 @@ def test_settings_defaults_match_current_runtime_contract():
     assert settings.cogdoc_trace_dir == "logs/traces"
 
 
+# 验证 settings reads environment overrides 场景。
 def test_settings_reads_environment_overrides(monkeypatch):
     monkeypatch.setenv("COGDOC_DOC_DIR", "papers")
     monkeypatch.setenv("LLM_MODEL_NAME", "custom-model")
@@ -38,6 +41,7 @@ def test_settings_reads_environment_overrides(monkeypatch):
     assert settings.qa_retrieval_top_k == 11
 
 
+# 验证 cuda thresholds are exposed as bytes 场景。
 def test_cuda_thresholds_are_exposed_as_bytes(monkeypatch):
     monkeypatch.setenv("EMBEDDER_MIN_CUDA_FREE_MB", "123")
 
@@ -48,6 +52,7 @@ def test_cuda_thresholds_are_exposed_as_bytes(monkeypatch):
     )
 
 
+# 验证 cuda thresholds reject unknown keys 场景。
 def test_cuda_thresholds_reject_unknown_keys():
     settings = get_settings()
 

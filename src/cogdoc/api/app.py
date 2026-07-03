@@ -39,7 +39,7 @@ from cogdoc.service.sweeper import BackgroundSweeper
 ChatRunner = Callable[..., ChatResult]
 
 
-# 处理 unhandled error response 相关逻辑。
+# 完成 unhandled错误响应 处理。
 def _unhandled_error_response(exc: Exception) -> JSONResponse:
     # 线程池关闭竞争窗口的调度异常归为暂时不可用，其余未预期异常归为内部错误；都不漏栈。
     if isinstance(exc, RuntimeError) and "shutdown" in str(exc):
@@ -52,7 +52,7 @@ def _unhandled_error_response(exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=status, content=error.model_dump())
 
 
-# 创建 create app 相关逻辑。
+# 创建 app。
 def create_app(
     *,
     chat_runner: ChatRunner | None = None,
@@ -65,7 +65,7 @@ def create_app(
     rate_limiter: TokenBucketRateLimiter | None = None,
     offload_workers: int = 8,
 ) -> FastAPI:
-    # 处理 lifespan 相关逻辑。
+    # 管理结果。
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # 非 CLI 入口也要在启动时配一次日志，否则节点 log_event 全部静默丢失。
@@ -213,7 +213,7 @@ def create_app(
     app.state.metrics = Metrics()
     app.add_middleware(MetricsMiddleware, metrics=app.state.metrics)
 
-    # 处理 handle unexpected 相关逻辑。
+    # 完成 handleunexpected 处理。
     @app.exception_handler(Exception)
     async def handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
         return _unhandled_error_response(exc)

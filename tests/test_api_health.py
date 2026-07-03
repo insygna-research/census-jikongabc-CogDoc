@@ -5,16 +5,19 @@ from cogdoc.api.app import _unhandled_error_response, create_app
 from cogdoc.api.session_store import SessionStore
 
 
+# 声明异步测试使用的后端。
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
 
 
+# 创建测试客户端。
 async def _client(app, raise_app_exceptions=True):
     transport = ASGITransport(app=app, raise_app_exceptions=raise_app_exceptions)
     return AsyncClient(transport=transport, base_url="http://testserver")
 
 
+# 验证 healthz is ok 场景。
 @pytest.mark.anyio
 async def test_healthz_is_ok(monkeypatch):
     import cogdoc.api.app as app_module
@@ -30,6 +33,7 @@ async def test_healthz_is_ok(monkeypatch):
     assert resp.json() == {"status": "ok"}
 
 
+# 验证 readyz reports native dependency 场景。
 @pytest.mark.anyio
 async def test_readyz_reports_native_dependency(monkeypatch):
     import cogdoc.api.app as app_module
@@ -45,6 +49,7 @@ async def test_readyz_reports_native_dependency(monkeypatch):
     assert resp.json() == {"status": "ready", "rust_core": True}
 
 
+# 验证 readyz returns 503 when native missing 场景。
 @pytest.mark.anyio
 async def test_readyz_returns_503_when_native_missing(monkeypatch):
     import cogdoc.api.app as app_module
@@ -52,6 +57,7 @@ async def test_readyz_returns_503_when_native_missing(monkeypatch):
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
 
+    # 构造或驱动 missing 测试场景。
     def _missing(*symbols):
         raise RuntimeError("rust_core 未安装")
 
@@ -67,6 +73,7 @@ async def test_readyz_returns_503_when_native_missing(monkeypatch):
     assert resp.json()["rust_core"] is False
 
 
+# 验证 unhandled error response maps shutdown to 503 场景。
 def test_unhandled_error_response_maps_shutdown_to_503():
     resp = _unhandled_error_response(
         RuntimeError("cannot schedule new futures after shutdown")
@@ -77,6 +84,7 @@ def test_unhandled_error_response_maps_shutdown_to_503():
     assert payload["details"]["error_class"] == "RuntimeError"
 
 
+# 验证 unhandled error response maps generic to 500 without stack 场景。
 def test_unhandled_error_response_maps_generic_to_500_without_stack():
     resp = _unhandled_error_response(ValueError("某个内部细节"))
     payload = json.loads(resp.body)
@@ -87,12 +95,14 @@ def test_unhandled_error_response_maps_generic_to_500_without_stack():
     assert "Traceback" not in payload["message"]
 
 
+# 验证 chat unexpected exception maps to internal error 场景。
 @pytest.mark.anyio
 async def test_chat_unexpected_exception_maps_to_internal_error(monkeypatch):
     import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
 
+    # 模拟失败结果。
     def boom(doc_id, query, is_local, chat_history, forced_task):
         raise ValueError("非 ChatServiceError 的意外异常")
 

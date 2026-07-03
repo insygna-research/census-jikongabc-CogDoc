@@ -4,6 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 
 const FALLBACK_MARKER: &str = "在所提供的参考资料中未找到与该问题相关的内容";
 
+// 保存答案引用中的来源文件和页码。
 #[derive(Debug, PartialEq, Eq)]
 struct Citation {
     source: String,
@@ -258,6 +259,7 @@ pub fn validate_citations_core<'py>(
 mod tests {
     use super::{Citation, extract_citations};
 
+    // 验证半角引用标签可以被提取。
     #[test]
     fn extracts_half_width_citation() {
         assert_eq!(
@@ -269,6 +271,7 @@ mod tests {
         );
     }
 
+    // 验证全角引用标签可以被提取。
     #[test]
     fn extracts_full_width_citation() {
         assert_eq!(
@@ -280,6 +283,7 @@ mod tests {
         );
     }
 
+    // 验证全角数字页码可以被提取。
     #[test]
     fn extracts_full_width_digit_citation() {
         assert_eq!(
@@ -291,6 +295,7 @@ mod tests {
         );
     }
 
+    // 验证格式错误的引用标签会被忽略。
     #[test]
     fn ignores_malformed_citation_body() {
         assert!(extract_citations("不是引用[a.pdf:P五]。").is_empty());

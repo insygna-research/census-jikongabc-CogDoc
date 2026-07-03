@@ -3,7 +3,7 @@ from cogdoc.tools import device, embedder
 from cogdoc.tools.embedder import Embedder
 
 
-# 恢复 restore embedder state 相关逻辑。
+# 恢复嵌入器全局状态。
 @pytest.fixture(autouse=True)
 def restore_embedder_state():
     saved_device = Embedder.device

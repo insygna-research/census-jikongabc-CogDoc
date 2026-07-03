@@ -9,10 +9,12 @@ from cogdoc.agents.router import classify_intent_by_rule
 BASELINE_GATED_METRICS = ("router_rule_accuracy", "citation_accuracy")
 
 
+# 计算结果。
 def accuracy(correct: bool) -> float:
     return 1.0 if correct else 0.0
 
 
+# 评估路由器用例。
 def evaluate_router_case(item: dict) -> dict:
     decision = classify_intent_by_rule(item["query"])
     expected = item["expected_task_type"]
@@ -26,6 +28,7 @@ def evaluate_router_case(item: dict) -> dict:
     }
 
 
+# 评估引用用例。
 def evaluate_citation_case(item: dict) -> dict:
     result = CitationValidatorAgent.validate_citations(
         item.get("answer", ""), item.get("docs", [])
@@ -41,6 +44,7 @@ def evaluate_citation_case(item: dict) -> dict:
     }
 
 
+# 评估faithfulness用例。
 def evaluate_faithfulness_case(item: dict) -> dict:
     is_faithful = bool(item["is_faithful"])
     return {
@@ -53,6 +57,7 @@ def evaluate_faithfulness_case(item: dict) -> dict:
     }
 
 
+# 评估用例。
 def evaluate_case(item: dict) -> dict:
     case_type = item.get("case_type")
     if case_type == "router":
@@ -64,11 +69,13 @@ def evaluate_case(item: dict) -> dict:
     raise ValueError(f"不支持的评测 case_type: {case_type}")
 
 
+# 计算指标。
 def mean_metric(rows: List[dict], metric: str) -> float | None:
     values = [row["metrics"][metric] for row in rows if metric in row["metrics"]]
     return mean(values) if values else None
 
 
+# 分组行列表。
 def group_rows(rows: List[dict], key: str) -> Dict[str, List[dict]]:
     grouped: Dict[str, List[dict]] = {}
     for row in rows:
@@ -76,6 +83,7 @@ def group_rows(rows: List[dict], key: str) -> Dict[str, List[dict]]:
     return grouped
 
 
+# 生成摘要。
 def summarize(rows: List[dict]) -> dict:
     by_type = group_rows(rows, "case_type")
     by_layer = group_rows(rows, "layer")
@@ -120,6 +128,7 @@ def summarize(rows: List[dict]) -> dict:
     }
 
 
+# 运行 eval。
 def run_eval(items: List[dict]) -> dict:
     rows = [evaluate_case(item) for item in items]
     summary = summarize(rows)
@@ -133,6 +142,7 @@ def run_eval(items: List[dict]) -> dict:
     }
 
 
+# 生成对比 baseline。
 def compare_baseline(report: dict, baseline_path: Path) -> int:
     baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
     base_agg = baseline.get("aggregate", {})

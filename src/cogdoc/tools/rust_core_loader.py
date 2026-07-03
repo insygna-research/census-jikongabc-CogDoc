@@ -13,6 +13,7 @@ REQUIRED_NATIVE_SYMBOLS = (
 )
 
 
+# 确保 rust core。
 def ensure_rust_core(*required: str) -> ModuleType:
     # 统一校验 Rust 扩展是否已安装且包含必需符号。
     try:

@@ -6,6 +6,7 @@ from cogdoc.graph.state import RetrievedDoc
 from cogdoc.tools.device import required_cuda_free_bytes, resolve_device
 
 
+# 定义 BGEReranker 数据结构。
 class BGEReranker:
     _tokenizer = None  # Tokenizer单例
     _model = None  # 模型单例
@@ -17,18 +18,21 @@ class BGEReranker:
 
     device = None  # None=未显式指定，加载时按空闲显存自动判定；set_device 后固定
 
+    # 设置 device。
     @classmethod
     def set_device(cls, device: str) -> None:
         if device != cls.device:
             cls._model = None  # 设备变更时清除单例，下次调用重新加载到新设备
             cls.device = device
 
+    # 完成 default设备 处理。
     @classmethod
     def default_device(cls) -> str:
         return resolve_device(
             cls.REQUIRED_CUDA_FREE_BYTES, cls.device, cls._model is not None
         )
 
+    # 获取 resources。
     @classmethod
     def _get_resources(cls):
         # Tokenizer 与模型按进程级单例懒加载。
@@ -46,10 +50,12 @@ class BGEReranker:
             cls._model.eval()
         return cls._tokenizer, cls._model
 
+    # 完成 预热流程预热流程 处理。
     @classmethod
     def warm_up(cls) -> None:
         cls._get_resources()
 
+    # 重排。
     @classmethod
     def rerank(
         cls, query: str, docs: List[RetrievedDoc], top_n: int = 3

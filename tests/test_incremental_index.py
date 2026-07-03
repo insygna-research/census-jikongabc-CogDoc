@@ -6,7 +6,7 @@ from cogdoc.tools.chunk_identity import build_chunk_id
 from cogdoc.tools.retriever.bm25_retriever import BM25Retriever
 
 
-# 处理 manifest 相关逻辑。
+# 构造测试用 manifest。
 def _manifest(doc_id, docs, version="v1"):
     return {
         "doc_id": doc_id,
@@ -81,7 +81,7 @@ def test_plan_same_content_files_deleted_independently():
 # ---- ingest_service 增量编排（FakeEngine）----
 
 
-# 封装 _FakeEngine 的状态与行为。
+# 初始化实例状态。
 class _FakeEngine:
     # 初始化实例状态。
     def __init__(self):
@@ -93,38 +93,38 @@ class _FakeEngine:
         self.consistent_after_mutate = True
         self.raise_on_mutate = False
 
-    # 清理 clear 相关逻辑。
+    # 清理。
     def clear(self):
         self.cleared = True
 
-    # 写入索引 index 相关逻辑。
+    # 写入索引。
     def index(self, chunks):
         if self.raise_on_mutate:
             raise RuntimeError("boom")
         self.indexed = chunks
         self._consistent = self.consistent_after_mutate
 
-    # 增量写入 upsert documents 相关逻辑。
+    # 增量写入documents。
     def upsert_documents(self, new_chunks, removed_sources):
         if self.raise_on_mutate:
             raise RuntimeError("boom")
         self.upserts.append((new_chunks, removed_sources))
         self._consistent = self.consistent_after_mutate
 
-    # 统计 count 相关逻辑。
+    # 统计数量。
     def count(self):
         return self._count
 
-    # 处理 is consistent 相关逻辑。
+    # 判断 consistent 是否成立。
     def is_consistent(self):
         return self._consistent
 
-    # 获取最大 max chunk index 相关逻辑。
+    # 构造或驱动 max分块索引 测试场景。
     def max_chunk_index(self):
         return 41
 
 
-# 配置测试替身 patch 相关逻辑。
+# 替换结果。
 def _patch(monkeypatch, engine, manifest, parsed_names):
     monkeypatch.setattr(
         ingest_service.RetrieverFactory, "get_engine", lambda kb: engine
@@ -313,7 +313,7 @@ def _chunk(name, sha, local_idx, text):
     }
 
 
-# 切分 chunk ids 相关逻辑。
+# 切分 ids。
 def _chunk_ids(retriever):
     return {d["meta"]["chunk_id"] for d in retriever.doc_registry}
 
@@ -418,19 +418,19 @@ def test_hybrid_upsert_delegates_delete_then_add():
 
     calls = []
 
-    # 封装 _V 的状态与行为。
+    # 定义 _V 数据结构。
     class _V:
-        # 删除 delete by source 相关逻辑。
+        # 删除 by source。
         def delete_by_source(self, s):
             calls.append(("vec_delete", set(s)))
 
-        # 添加 add documents 相关逻辑。
+        # 添加 documents。
         def add_documents(self, c):
             calls.append(("vec_add", [x["t"] for x in c]))
 
-    # 封装 _B 的状态与行为。
+    # 模拟关键词检索器的增量写入。
     class _B:
-        # 增量写入 upsert documents 相关逻辑。
+        # 增量写入documents。
         def upsert_documents(self, c, s):
             calls.append(("bm25_upsert", [x["t"] for x in c], set(s)))
 
@@ -448,39 +448,39 @@ def test_hybrid_upsert_delegates_delete_then_add():
 def test_retrieval_rejects_corrupt_index():
     from cogdoc.tools.retriever.hybrid import HybridRetriever, IndexCorruptError
 
-    # 封装 _V 的状态与行为。
+    # 初始化实例状态。
     class _V:
         # 初始化实例状态。
         def __init__(self, n):
             self.n = n
 
-        # 统计 count 相关逻辑。
+        # 统计数量。
         def count(self):
             return self.n
 
-        # 检索 search 相关逻辑。
+        # 检索。
         def search(self, *a, **k):
             return []
 
-    # 封装 _B 的状态与行为。
+    # 初始化实例状态。
     class _B:
         # 初始化实例状态。
         def __init__(self, n):
             self.n = n
 
-        # 统计 count 相关逻辑。
+        # 统计数量。
         def count(self):
             return self.n
 
-        # 检索 search 相关逻辑。
+        # 检索。
         def search(self, *a, **k):
             return []
 
-        # 列出 list sources 相关逻辑。
+        # 列出 sources。
         def list_sources(self):
             return []
 
-        # 加载 load source chunks 相关逻辑。
+        # 加载 source chunks。
         def load_source_chunks(self, s):
             return []
 
@@ -533,13 +533,13 @@ def test_vector_clear_failure_raises(tmp_path, monkeypatch):
 def test_hybrid_is_consistent_compares_chunk_id_sets():
     from cogdoc.tools.retriever.hybrid import HybridRetriever
 
-    # 封装 _C 的状态与行为。
+    # 初始化实例状态。
     class _C:
         # 初始化实例状态。
         def __init__(self, ids):
             self._ids = set(ids)
 
-        # 切分 chunk ids 相关逻辑。
+        # 切分 ids。
         def chunk_ids(self):
             return self._ids
 

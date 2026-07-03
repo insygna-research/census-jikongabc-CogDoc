@@ -10,7 +10,7 @@ from cogdoc.service.kb_readers import kb_read_lease
 from cogdoc.tools.document_loader import select_source_for_summary
 
 
-# 处理 document loader node 相关逻辑。
+# 完成 documentloadernode 处理。
 def document_loader_node(state: GraphState) -> dict:
     # Summary MVP 从当前索引直接加载单个 source 的全部 chunk。
     query = state.get("query", "")
@@ -102,22 +102,22 @@ def document_loader_node(state: GraphState) -> dict:
     return result
 
 
-# 处理 section planner node 相关逻辑。
+# 完成 章节规划器node 处理。
 def section_planner_node(state: GraphState) -> dict:
     return SectionPlannerAgent.plan_sections(state)
 
 
-# 处理 section summary node 相关逻辑。
+# 完成 章节摘要node 处理。
 def section_summary_node(state: GraphState) -> dict:
     return SectionSummaryAgent.summarize_sections(state)
 
 
-# 处理 global summary node 相关逻辑。
+# 完成 global摘要node 处理。
 def global_summary_node(state: GraphState) -> dict:
     return GlobalSummaryAgent.build_final_summary(state)
 
 
-# 处理 document loader check 相关逻辑。
+# 完成 documentloadercheck 处理。
 def document_loader_check(state: GraphState) -> str:
     # 文档加载失败时直接结束，避免下游节点在空 docs 上运行。
     if not state.get("summary_docs"):

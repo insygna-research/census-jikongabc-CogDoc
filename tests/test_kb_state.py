@@ -9,7 +9,7 @@ from cogdoc.service.kb_state import (
 )
 
 
-# 处理 state 相关逻辑。
+# 构造或驱动 状态 测试场景。
 def _state(tmp_path, kb_id="kb"):
     # 共享同一个 epochs 文件，让重开的实例看到同一份 epoch。
     epochs = EpochStore(path=str(tmp_path / "epochs.json"))

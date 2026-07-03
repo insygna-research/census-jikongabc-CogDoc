@@ -14,13 +14,13 @@ from cogdoc.tools.chunk_identity import build_chunk_id
 from cogdoc.tools.embedder import Embedder
 
 
-# 构造 make state 相关逻辑。
+# 构造状态。
 def _make_state(tmp_path, kb_id="kb"):
     epochs = EpochStore(path=str(tmp_path / "epochs.json"))
     return KBState(kb_id, path=str(tmp_path / kb_id / "state.json"), epochs=epochs)
 
 
-# 处理 reg doc 相关逻辑。
+# 构造或驱动 reg文档 测试场景。
 def _reg_doc(source, sha, local_idx, chunk_index, page_start=1, page_end=1):
     # BM25 registry 形态的自洽复用 chunk：chunk_id 由 hash/name/页跨度/局部序号真实构建。
     chunk_id = build_chunk_id(sha, source, page_start, page_end, local_idx)
@@ -40,12 +40,12 @@ def _reg_doc(source, sha, local_idx, chunk_index, page_start=1, page_end=1):
     }
 
 
-# 处理 docs 相关逻辑。
+# 构造测试用文档列表。
 def _docs(*pairs):
     return [{"name": n, "sha256": h} for n, h in pairs]
 
 
-# 准备 seed active 相关逻辑。
+# 写入活跃代。
 def _seed_active(state, documents, registry):
     gen_id = state.begin_generation(Embedder.MODEL_NAME, INDEX_BUILD_VERSION)
     state.mark_ready(gen_id, expected_count=len(registry), documents=documents)
@@ -53,7 +53,7 @@ def _seed_active(state, documents, registry):
     return gen_id
 
 
-# 配置测试替身 patch prev stores 相关逻辑。
+# 替换上一代存储。
 def _patch_prev_stores(monkeypatch, registry, embeddings):
     fake_vec = MagicMock()
     fake_vec.embeddings_by_chunk_id.return_value = dict(embeddings)
@@ -68,12 +68,12 @@ def _patch_prev_stores(monkeypatch, registry, embeddings):
     return fake_vec, fake_bm25
 
 
-# 处理 emb for 相关逻辑。
+# 构造或驱动 embfor 测试场景。
 def _emb_for(registry):
     return {d["meta"]["chunk_id"]: [0.1] for d in registry}
 
 
-# 处理 manifest 相关逻辑。
+# 构造测试用 manifest。
 def _manifest(kb_id, documents, build_version=INDEX_BUILD_VERSION):
     return {
         "doc_id": kb_id,

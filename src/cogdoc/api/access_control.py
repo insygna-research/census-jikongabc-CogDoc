@@ -16,6 +16,7 @@ _EXEMPT_PATHS = frozenset(
 _RATE_LIMIT_EXEMPT_PREFIXES = ("/v1/index-jobs/",)
 
 
+# 按身份分桶的令牌桶：突发容量 capacity，恒定速率 refill_per_second 补充。
 class TokenBucketRateLimiter:
     # 按身份分桶的令牌桶：突发容量 capacity，恒定速率 refill_per_second 补充。
     def __init__(
@@ -31,6 +32,7 @@ class TokenBucketRateLimiter:
         self._buckets: "OrderedDict[str, tuple[float, float]]" = OrderedDict()
         self._lock = Lock()
 
+    # 放行结果。
     def allow(self, identity: str) -> bool:
         # capacity<=0 表示关闭限流，直接放行。
         if self.capacity <= 0:
@@ -50,6 +52,7 @@ class TokenBucketRateLimiter:
             return allowed
 
 
+# 完成 提取流程API密钥 处理。
 def _extract_api_key(request: Request) -> str | None:
     # 先认 Authorization: Bearer，再退回 X-API-Key。
     auth = request.headers.get("authorization", "")
@@ -59,11 +62,13 @@ def _extract_api_key(request: Request) -> str | None:
     return key.strip() or None
 
 
+# 拒绝结果。
 def _reject(code: ErrorCode, message: str) -> JSONResponse:
     error = build_error_response(code, message)
     return JSONResponse(status_code=status_for_code(code), content=error.model_dump())
 
 
+# 统一入口的鉴权 + 限流：先校验 API key，再按身份限流，最后放行到路由。
 class AccessControlMiddleware(BaseHTTPMiddleware):
     # 统一入口的鉴权 + 限流：先校验 API key，再按身份限流，最后放行到路由。
     def __init__(
@@ -73,6 +78,7 @@ class AccessControlMiddleware(BaseHTTPMiddleware):
         self._api_keys = api_keys
         self._limiter = rate_limiter
 
+    # 分发结果。
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         if path in _EXEMPT_PATHS:
@@ -99,6 +105,7 @@ class AccessControlMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+# 构建 rate limiter。
 def build_rate_limiter(per_minute: int, burst: int) -> TokenBucketRateLimiter:
     # 每分钟速率换算成每秒补充；burst 即令牌桶容量。
     return TokenBucketRateLimiter(capacity=burst, refill_per_second=per_minute / 60.0)

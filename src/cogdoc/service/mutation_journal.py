@@ -7,14 +7,14 @@ OP_UPLOAD = "upload"
 OP_DELETE_DOC = "delete_doc"
 
 
-# 封装 MutationJournalError 的状态与行为。
+# 表示 MutationJournalError 异常。
 class MutationJournalError(RuntimeError):
     pass
 
 
-# 封装 MutationJournal 的状态与行为。
+# 源文件 mutation 的崩溃恢复日志；每个 job 一个 JSON 条目，记录目标/备份路径与所属 generation；提交点是 state.json 的 switch_active（tmp+rename 原子写）；恢复时直接读 state.json 判定真值： 条目的 gen_id == active → 已提交，前滚保留新文件；否则未提交，回滚旧文件；两文件无需各自原子。
 class MutationJournal:
-    # 源文件 mutation 的崩溃恢复日志。每个 job 一个 JSON 条目，记录目标/备份路径与所属 generation。 提交点是 state.json 的 switch_active（tmp+rename 原子写）；恢复时直接读 state.json 判定真值： 条目的 gen_id == active → 已提交，前滚保留新文件；否则未提交，回滚旧文件。两文件无需各自原子。
+    # 源文件 mutation 的崩溃恢复日志；每个 job 一个 JSON 条目，记录目标/备份路径与所属 generation；提交点是 state.json 的 switch_active（tmp+rename 原子写）；恢复时直接读 state.json 判定真值： 条目的 gen_id == active → 已提交，前滚保留新文件；否则未提交，回滚旧文件；两文件无需各自原子。
     def __init__(self, journal_dir: str | None = None):
         self._dir = journal_dir or os.path.join(
             get_settings().kb_root, "mutation_journal"
@@ -22,11 +22,11 @@ class MutationJournal:
         self._degraded_path = os.path.join(self._dir, ".degraded")
         self._lock = Lock()
 
-    # 处理 path 相关逻辑。
+    # 完成 路径 处理。
     def _path(self, job_id: str) -> str:
         return os.path.join(self._dir, f"{job_id}.json")
 
-    # 写入 write 相关逻辑。
+    # 写入结果。
     def _write(self, job_id: str, entry: dict) -> None:
         os.makedirs(self._dir, exist_ok=True)
         path = self._path(job_id)
@@ -35,7 +35,7 @@ class MutationJournal:
             json.dump(entry, f, ensure_ascii=False)
         os.replace(tmp_path, path)
 
-    # 开始记录 begin upload 相关逻辑。
+    # 完成 begin上传 处理。
     def begin_upload(
         self, job_id: str, kb_id: str, dest: str, backup: str, had_old: bool
     ) -> None:
@@ -55,7 +55,7 @@ class MutationJournal:
                 },
             )
 
-    # 开始记录 begin delete 相关逻辑。
+    # 完成 begin删除 处理。
     def begin_delete(self, job_id: str, kb_id: str, dest: str, backup: str) -> None:
         with self._lock:
             self._write(
@@ -73,7 +73,7 @@ class MutationJournal:
                 },
             )
 
-    # 标记 mark source moved 相关逻辑。
+    # 标记来源moved。
     def mark_source_moved(self, job_id: str) -> None:
         # 原文件已进入 backup/quarantine 后立刻持久化。恢复时若该标记为真但备份缺失， 不能把当前磁盘状态猜成安全，必须保留 journal 并 fail-closed。
         with self._lock:
@@ -82,7 +82,7 @@ class MutationJournal:
             entry["source_moved"] = True
             self._write(job_id, entry)
 
-    # 处理 record generation 相关逻辑。
+    # 记录索引代。
     def record_generation(self, job_id: str, gen_id: str) -> None:
         # 提交前（switch_active 之前）记录待提交 gen_id；写失败抛出，调用方据此中止提交以保持一致。
         with self._lock:
@@ -91,7 +91,7 @@ class MutationJournal:
             entry["gen_id"] = gen_id
             self._write(job_id, entry)
 
-    # 标记 mark committed 相关逻辑。
+    # 标记committed。
     def mark_committed(self, job_id: str) -> bool:
         # switch_active 成功后写入不可逆的 committed 标记：恢复时据此前滚，绝不因 active 已切代而误回滚。
         with self._lock:
@@ -107,7 +107,7 @@ class MutationJournal:
                 return False
             return True
 
-    # 标记 mark rolled back 相关逻辑。
+    # 标记rolledback。
     def mark_rolled_back(self, job_id: str) -> bool:
         # 磁盘已恢复到 mutation 前状态后写入；clear 失败时，启动恢复据此只需删除残留条目。
         with self._lock:
@@ -120,7 +120,7 @@ class MutationJournal:
                 return False
             return True
 
-    # 清理 clear 相关逻辑。
+    # 清理。
     def clear(self, job_id: str) -> bool:
         with self._lock:
             try:
@@ -131,7 +131,7 @@ class MutationJournal:
             except OSError:
                 return False
 
-    # 检查是否存在 has entries 相关逻辑。
+    # 判断是否存在 entries。
     def has_entries(self, kb_id: str) -> bool:
         with self._lock:
             if os.path.exists(self._degraded_path):
@@ -160,7 +160,7 @@ class MutationJournal:
                     return True
             return False
 
-    # 恢复 recover all 相关逻辑。
+    # 恢复all。
     def recover_all(self) -> list[str]:
         # 启动期回放所有残留条目，返回已处理的 job_id 列表供日志。
         with self._lock:
@@ -222,7 +222,7 @@ class MutationJournal:
             return recovered
 
 
-# 处理 valid entry 相关逻辑。
+# 完成 合法性条目 处理。
 def _valid_entry(entry) -> bool:
     if not isinstance(entry, dict):
         return False
@@ -250,7 +250,7 @@ def _valid_entry(entry) -> bool:
     )
 
 
-# 隔离 quarantine 相关逻辑。
+# 隔离结果。
 def _quarantine(path: str) -> None:
     import time
 
@@ -260,7 +260,7 @@ def _quarantine(path: str) -> None:
         pass
 
 
-# 标记 mark degraded 相关逻辑。
+# 标记降级状态。
 def _mark_degraded(path: str) -> None:
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -270,7 +270,7 @@ def _mark_degraded(path: str) -> None:
         pass
 
 
-# 处理 is committed 相关逻辑。
+# 判断 committed 是否成立。
 def _is_committed(entry: dict) -> bool:
     # 已提交判定：不可逆 committed 标记优先（即便 active 已切代/KB 已删也判为已提交，杜绝误回滚）； 否则回退到 gen_id == 当前 active（覆盖 switch_active 与写 committed 标记之间的崩溃窗口）。
     if entry.get("committed") is True:
@@ -300,7 +300,7 @@ def _is_committed(entry: dict) -> bool:
         return False
 
 
-# 恢复 recover entry 相关逻辑。
+# 恢复条目。
 def _recover_entry(entry: dict) -> bool:
     # 据 state.json 真值把源文件恢复到与 active 代一致。返回是否恢复成功；失败保留 journal 供下次重试。
     if entry.get("rolled_back") is True:
@@ -341,7 +341,7 @@ def _recover_entry(entry: dict) -> bool:
     )  # 回滚：删除未提交的新文件；删除失败保留 journal 下次重试
 
 
-# 处理 silent remove 相关逻辑。
+# 完成 silentremove 处理。
 def _silent_remove(path: str) -> bool:
     # 成功或本就不存在返回 True；删除失败返回 False，供调用方据此保留 journal。
     try:
@@ -353,7 +353,7 @@ def _silent_remove(path: str) -> bool:
         return False
 
 
-# 处理 safe replace 相关逻辑。
+# 完成 safereplace 处理。
 def _safe_replace(src: str, dst: str) -> bool:
     try:
         os.replace(src, dst)
@@ -366,7 +366,7 @@ _shared: MutationJournal | None = None
 _shared_lock = Lock()
 
 
-# 处理 shared mutation journal 相关逻辑。
+# 完成 sharedmutation变更日志 处理。
 def shared_mutation_journal() -> MutationJournal:
     # 进程内共享单例；双重检查锁防并发重复构造。
     global _shared

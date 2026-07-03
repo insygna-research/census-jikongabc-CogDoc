@@ -25,14 +25,14 @@ from cogdoc.tools.manifest import load_index_manifest
 router = APIRouter(prefix="/v1", tags=["documents"])
 
 
-# 创建 create kb 相关逻辑。
+# 创建 kb。
 def _create_kb(kb_id, registry):
     # 与删库尾部互斥：create 与 delete 都持 kb_write_lock，杜绝"删库已删 registry、未落 tombstone" 之间并发 create 把 lifecycle 切 active、随后旧删库又写 deleted 把新 KB 标删的竞态。
     with kb_write_lock(kb_id):
         return registry.create(kb_id)
 
 
-# 删除 delete kb 相关逻辑。
+# 删除 kb。
 def _delete_kb(kb_id, registry, index_jobs, session_store=None):
     # registry 删除与落 tombstone 必须与 create 在同一把锁内原子完成。
     try:
@@ -59,20 +59,20 @@ _ERROR_RESPONSES = {
 }
 
 
-# 构造错误 error 相关逻辑。
+# 完成 错误 处理。
 def _error(code: ErrorCode, message: str, status: int) -> JSONResponse:
     return JSONResponse(
         status_code=status, content=build_error_response(code, message).model_dump()
     )
 
 
-# 处理 public job 相关逻辑。
+# 完成 公开视图任务 处理。
 def _public_job(job: dict) -> IndexJob:
     # committed_generation_id 是崩溃对账证据，只存内部 job record，不进入严格 API schema。
     return IndexJob(**{k: v for k, v in job.items() if k != "committed_generation_id"})
 
 
-# 处理 kb documents 相关逻辑。
+# 完成 知识库documents 处理。
 def _kb_documents(kb_id: str) -> list[Document]:
     # generation state 是事务提交指针且内含 documents；manifest 是提交后的派生缓存，写失败时可能滞后。
     active = KBState(kb_id).active()
@@ -87,7 +87,7 @@ def _kb_documents(kb_id: str) -> list[Document]:
     ]
 
 
-# 创建 create knowledge base 相关逻辑。
+# 创建 knowledge base。
 @router.post("/knowledge-bases", status_code=201, responses=_ERROR_RESPONSES)
 async def create_knowledge_base(body: KnowledgeBaseCreate, request: Request):
     loop = asyncio.get_running_loop()
@@ -106,7 +106,7 @@ async def create_knowledge_base(body: KnowledgeBaseCreate, request: Request):
     return KnowledgeBase(**record, document_count=0)
 
 
-# 列出 list knowledge bases 相关逻辑。
+# 列出 knowledge bases。
 @router.get("/knowledge-bases")
 async def list_knowledge_bases(request: Request):
     registry = request.app.state.kb_registry
@@ -116,7 +116,7 @@ async def list_knowledge_bases(request: Request):
     ]
 
 
-# 获取 get knowledge base 相关逻辑。
+# 返回knowledgebase。
 @router.get("/knowledge-bases/{kb_id}", responses=_ERROR_RESPONSES)
 async def get_knowledge_base(kb_id: str, request: Request):
     record = request.app.state.kb_registry.get(kb_id)
@@ -125,7 +125,7 @@ async def get_knowledge_base(kb_id: str, request: Request):
     return KnowledgeBase(**record, document_count=len(_kb_documents(kb_id)))
 
 
-# 删除 delete knowledge base 相关逻辑。
+# 删除 knowledge base。
 @router.delete("/knowledge-bases/{kb_id}", status_code=204, responses=_ERROR_RESPONSES)
 async def delete_knowledge_base(kb_id: str, request: Request):
     registry = request.app.state.kb_registry
@@ -153,7 +153,7 @@ async def delete_knowledge_base(kb_id: str, request: Request):
     return Response(status_code=204)
 
 
-# 列出 list documents 相关逻辑。
+# 列出 documents。
 @router.get("/knowledge-bases/{kb_id}/documents", responses=_ERROR_RESPONSES)
 async def list_documents(kb_id: str, request: Request):
     if not request.app.state.kb_registry.exists(kb_id):
@@ -161,7 +161,7 @@ async def list_documents(kb_id: str, request: Request):
     return _kb_documents(kb_id)
 
 
-# 上传 upload document 相关逻辑。
+# 完成 上传document 处理。
 @router.post(
     "/knowledge-bases/{kb_id}/documents", status_code=202, responses=_ERROR_RESPONSES
 )
@@ -206,7 +206,7 @@ async def upload_document(kb_id: str, request: Request, file: UploadFile = File(
     return _public_job(job)
 
 
-# 删除 delete document 相关逻辑。
+# 删除 document。
 @router.delete(
     "/knowledge-bases/{kb_id}/documents/{name}",
     status_code=202,
@@ -230,7 +230,7 @@ async def delete_document(kb_id: str, name: str, request: Request):
     return _public_job(job)
 
 
-# 获取 get index job 相关逻辑。
+# 返回索引任务。
 @router.get("/index-jobs/{job_id}", responses=_ERROR_RESPONSES)
 async def get_index_job(job_id: str, request: Request):
     job = request.app.state.index_jobs.get(job_id)

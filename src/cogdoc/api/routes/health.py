@@ -6,12 +6,14 @@ from cogdoc.tools.rust_core_loader import REQUIRED_NATIVE_SYMBOLS, ensure_rust_c
 router = APIRouter(tags=["health"])
 
 
+# 返回结果。
 @router.get("/healthz")
 async def healthz():
     # 存活探针：进程在跑即可，不做依赖检查。
     return {"status": "ok"}
 
 
+# 返回结果。
 @router.get("/readyz")
 async def readyz():
     # 就绪探针：native 扩展是缺了就无法服务的硬依赖。
@@ -25,6 +27,7 @@ async def readyz():
     return {"status": "ready", "rust_core": True}
 
 
+# 返回结果。
 @router.get("/metrics")
 async def metrics(request: Request):
     # Prometheus 抓取端点：返回每 app 注册表的文本快照，鉴权/限流已豁免。

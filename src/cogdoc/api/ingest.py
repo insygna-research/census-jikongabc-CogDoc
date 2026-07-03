@@ -19,12 +19,12 @@ from cogdoc.service.kb_lifecycle import LIFECYCLE_ACTIVE, shared_lifecycle_store
 from cogdoc.service.mutation_journal import shared_mutation_journal
 
 
-# 获取当前 now iso 相关逻辑。
+# 返回当前 UTC 时间字符串。
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# 处理 silent remove 相关逻辑。
+# 完成 silentremove 处理。
 def _silent_remove(path: str) -> bool:
     # 删除文件，成功或本就不存在返回 True；删除失败返回 False，供调用方据此保留 journal 重试。
     try:
@@ -36,18 +36,17 @@ def _silent_remove(path: str) -> bool:
         return False
 
 
-# 封装 KBExistsError 的状态与行为。
+# 表示 KBExistsError 异常。
 class KBExistsError(Exception):
     pass
 
 
-# 封装 RegistryCorruptError 的状态与行为。
+# registry 损坏：宁可拒绝启动也不退回空表，否则现存 KB 全部消失、同名重建会复用旧 source/state/index。
 class RegistryCorruptError(Exception):
-    # registry 损坏：宁可拒绝启动也不退回空表，否则现存 KB 全部消失、同名重建会复用旧 source/state/index。
     pass
 
 
-# 封装 KnowledgeBaseRegistry 的状态与行为。
+# 知识库元数据的 JSON 注册表；source/chroma/bm25/manifest 仍按 kb_id 物理隔离。
 class KnowledgeBaseRegistry:
     # 知识库元数据的 JSON 注册表；source/chroma/bm25/manifest 仍按 kb_id 物理隔离。
     def __init__(
@@ -63,7 +62,7 @@ class KnowledgeBaseRegistry:
         os.makedirs(os.path.dirname(self._path), exist_ok=True)
         self._entries = self._load()
 
-    # 加载 load 相关逻辑。
+    # 加载。
     def _load(self) -> dict:
         # 文件不存在=全新系统，空表。损坏（语法/结构）则隔离原文件并抛错 fail-closed，绝不退回空表。
         if os.path.exists(self._degraded_path):
@@ -86,7 +85,7 @@ class KnowledgeBaseRegistry:
             raise RegistryCorruptError(f"registry 顶层非 dict 已隔离: {self._path}")
         return data
 
-    # 隔离 quarantine corrupt 相关逻辑。
+    # 隔离损坏文件。
     def _quarantine_corrupt(self) -> None:
         try:
             os.replace(self._path, f"{self._path}.corrupt-{time.time_ns()}")
@@ -98,7 +97,7 @@ class KnowledgeBaseRegistry:
         except OSError:
             pass
 
-    # 保存 save entries 相关逻辑。
+    # 保存 entries。
     def _save_entries(self, entries: dict) -> None:
         # 原子写候选表：先写临时文件再 rename，避免中途崩溃留下半截 JSON。
         tmp_path = f"{self._path}.tmp"
@@ -106,11 +105,11 @@ class KnowledgeBaseRegistry:
             json.dump(entries, f, ensure_ascii=False, indent=2)
         os.replace(tmp_path, self._path)
 
-    # 获取源文件 source dir 相关逻辑。
+    # 返回目录。
     def source_dir(self, kb_id: str) -> str:
         return self._source_dir_for(kb_id)
 
-    # 创建 create 相关逻辑。
+    # 创建。
     def create(self, kb_id: str) -> dict:
         with self._lock:
             if kb_id in self._entries:
@@ -149,23 +148,23 @@ class KnowledgeBaseRegistry:
                 raise
             return dict(record)
 
-    # 检查是否存在 exists 相关逻辑。
+    # 检查存在性。
     def exists(self, kb_id: str) -> bool:
         with self._lock:
             return kb_id in self._entries
 
-    # 获取 get 相关逻辑。
+    # 返回结果。
     def get(self, kb_id: str) -> dict | None:
         with self._lock:
             record = self._entries.get(kb_id)
             return dict(record) if record else None
 
-    # 列出 list 相关逻辑。
+    # 列出。
     def list(self) -> list[dict]:
         with self._lock:
             return [dict(record) for record in self._entries.values()]
 
-    # 删除 delete 相关逻辑。
+    # 删除。
     def delete(self, kb_id: str) -> bool:
         # 先删源目录，成功后才从 registry 移除：目录删失败时 registry 仍保留该 KB，DELETE 可重试不返回 404。
         with self._lock:
@@ -189,7 +188,7 @@ _MAX_KB_EXECUTORS = 256  # 防止持续创建/删库积累无界线程对象
 _BAK_SUFFIX = ".cogdoc-bak"  # 源文件回滚备份后缀；不以 .pdf 结尾故不被索引扫描
 
 
-# 封装 IndexJobManager 的状态与行为。
+# 每个 kb_id 独享一个单线程 executor：不同 KB 并发构建，同 KB 内 mutation + 构建全部串行。
 class IndexJobManager:
     # 每个 kb_id 独享一个单线程 executor：不同 KB 并发构建，同 KB 内 mutation + 构建全部串行。
     def __init__(
@@ -223,7 +222,7 @@ class IndexJobManager:
         self._ex_lock = Lock()
         self._closed = False
 
-    # 获取 get executor locked 相关逻辑。
+    # 返回执行器locked。
     def _get_executor_locked(self, kb_id: str) -> ThreadPoolExecutor:
         # 调用方必须已持 _ex_lock；与 release_executor/shutdown 互斥。
         if self._closed:
@@ -245,7 +244,7 @@ class IndexJobManager:
             self._executors[kb_id] = ex
         return ex
 
-    # 处理 prune retired locked 相关逻辑。
+    # 完成 prune已退役执行器locked 处理。
     def _prune_retired_locked(self) -> None:
         # shutdown(wait=False) 后 executor 对象仍持有 Thread 引用；线程全部退出后即可丢弃句柄。
         self._retired_executors = {
@@ -254,12 +253,12 @@ class IndexJobManager:
             if any(thread.is_alive() for thread in getattr(ex, "_threads", ()))
         }
 
-    # 获取 get executor 相关逻辑。
+    # 返回执行器。
     def _get_executor(self, kb_id: str) -> ThreadPoolExecutor:
         with self._ex_lock:
             return self._get_executor_locked(kb_id)
 
-    # 创建 new record 相关逻辑。
+    # 新建记录。
     def _new_record(self, kb_id: str) -> dict:
         return {
             "job_id": uuid4().hex,
@@ -273,7 +272,7 @@ class IndexJobManager:
             "message": None,
         }
 
-    # 标记失败 fail job 相关逻辑。
+    # 记录失败任务。
     def _fail_job(
         self, job_id: str, kb_id: str, exc: Exception, error_code: str = "INGEST_FAILED"
     ) -> None:
@@ -293,7 +292,7 @@ class IndexJobManager:
             error_class=type(exc).__name__,
         )
 
-    # 处理 safe restore 相关逻辑。
+    # 完成 safe恢复状态 处理。
     def _safe_restore(self, src: str, dst: str, job_id: str, kb_id: str) -> bool:
         # 回滚恢复源文件，成功返回 True。失败不外逃但返回 False：调用方据此保留 journal 供恢复重试。
         try:
@@ -316,7 +315,7 @@ class IndexJobManager:
             )
             return False
 
-    # 处理 rollback upload 相关逻辑。
+    # 回滚 upload。
     def _rollback_upload(self, job_id, kb_id, dest, backup, had_old) -> bool:
         # 把源目录恢复到上传前状态，返回是否恢复成功（失败则调用方保留 journal 供启动重试）。
         if had_old:
@@ -325,13 +324,13 @@ class IndexJobManager:
             return True  # 备份未生成（replace 前失败），dest 仍是原文件
         return _silent_remove(dest)  # 新增上传：删除残缺/未提交的新文件
 
-    # 处理 finish rollback 相关逻辑。
+    # 结束回滚。
     def _finish_rollback(self, job_id: str) -> None:
         # 进程内已确认磁盘恢复到一致态：先 best-effort 写 rolled_back 终态（供 clear 失败时的崩溃恢复）， 再无条件尝试清除条目。即便标记失败，只要清除成功就不会留下 source_moved 条目阻塞下次启动。
         self._journal.mark_rolled_back(job_id)
         self._journal.clear(job_id)
 
-    # 处理 prepare commit 相关逻辑。
+    # 准备提交。
     def _prepare_commit(self, job_id: str, gen_id: str) -> None:
         # 两份证据都在 switch_active 前写入；任一步失败都会中止提交并由外层回滚源文件。
         self._journal.record_generation(job_id, gen_id)
@@ -340,7 +339,7 @@ class IndexJobManager:
         if stored is None or stored.get("committed_generation_id") != gen_id:
             raise RuntimeError(f"job {job_id} 的 generation 提交证据未持久化")
 
-    # 处理 reject if unresolved 相关逻辑。
+    # 拒绝ifunresolved。
     def _reject_if_unresolved(self, job_id: str, kb_id: str) -> bool:
         if not self._journal.has_entries(kb_id):
             return False
@@ -351,7 +350,7 @@ class IndexJobManager:
         )
         return True
 
-    # 提交 submit tracked 相关逻辑。
+    # 提交tracked。
     def _submit_tracked(self, ex, kb_id: str, fn: Callable, *args):
         # 调用方须已持 _ex_lock。包一层计数：在途归零且久未活动时 sweeper 才可淘汰该 executor。
         self._inflight[kb_id] = self._inflight.get(kb_id, 0) + 1
@@ -370,7 +369,7 @@ class IndexJobManager:
 
         return ex.submit(runner)
 
-    # 处理 enqueue 相关逻辑。
+    # 入队。
     def _enqueue(self, kb_id: str, fn: Callable, *args) -> dict:
         # get-create-submit 全程持锁与 release_executor 互斥：失败不留 pending，入队成功则 ex 必存活。
         with self._ex_lock:
@@ -389,24 +388,24 @@ class IndexJobManager:
                 raise
         return dict(record)
 
-    # 提交 submit 相关逻辑。
+    # 提交结果。
     def submit(self, kb_id: str) -> dict:
         # 向后兼容：仅触发索引，不含文件 mutation（文件变更已在调用方完成）。
         return self._enqueue(kb_id, self._run)
 
-    # 提交 submit upload 相关逻辑。
+    # 提交上传。
     def submit_upload(
         self, kb_id: str, source_dir: str, filename: str, content: bytes
     ) -> dict:
         # 写文件与构建索引作为一个 executor command：保证每个 job 快照与其 mutation 精确对应。
         return self._enqueue(kb_id, self._run_with_write, source_dir, filename, content)
 
-    # 提交 submit delete doc 相关逻辑。
+    # 提交删除文档。
     def submit_delete_doc(self, kb_id: str, path: str) -> dict:
         # 存在性检查在 executor command 内进行，保证与上传队列有序：upload 排在前则文件已落盘。
         return self._enqueue(kb_id, self._run_with_delete_doc, path)
 
-    # 执行 run blocking 相关逻辑。
+    # 运行blocking。
     def run_blocking(self, kb_id: str, fn: Callable, *args) -> object:
         # 同 KB executor 线程内调用会单线程自等待死锁，运行时直接拒绝而非仅靠注释约束。
         if threading.current_thread().name.startswith(f"cogdoc-kb-{kb_id[:8]}"):
@@ -416,7 +415,7 @@ class IndexJobManager:
             fut = self._submit_tracked(ex, kb_id, fn, *args)
         return fut.result()
 
-    # 释放 release executor 相关逻辑。
+    # 释放执行器。
     def release_executor(self, kb_id: str) -> None:
         # 释放槽位防上限耗尽；排队的陈旧命令仍跑但被 epoch/exists 守卫拦下，不写已删或重建的 KB。
         with self._ex_lock:
@@ -428,7 +427,7 @@ class IndexJobManager:
         if ex is not None:
             ex.shutdown(wait=False)
 
-    # 淘汰 evict idle 相关逻辑。
+    # 淘汰空闲执行器。
     def evict_idle(
         self, max_idle_seconds: float, now: float | None = None
     ) -> list[str]:
@@ -470,7 +469,7 @@ class IndexJobManager:
             return True
         return False
 
-    # 执行 run 相关逻辑。
+    # 运行结果。
     def _run(self, job_id: str, kb_id: str, base_epoch: int) -> None:
         if self._store.get(job_id) is None:
             return
@@ -483,7 +482,7 @@ class IndexJobManager:
             return
         self._run_ingest(job_id, kb_id, self._source_dir_for(kb_id))
 
-    # 执行 run with write 相关逻辑。
+    # 运行with写入。
     def _run_with_write(
         self,
         job_id: str,
@@ -544,7 +543,7 @@ class IndexJobManager:
         elif self._rollback_upload(job_id, kb_id, dest, backup, had_old):
             self._finish_rollback(job_id)
 
-    # 执行 run with delete doc 相关逻辑。
+    # 运行with删除文档。
     def _run_with_delete_doc(
         self, job_id: str, kb_id: str, base_epoch: int, path: str
     ) -> None:
@@ -601,7 +600,7 @@ class IndexJobManager:
         elif self._safe_restore(quarantine, path, job_id, kb_id):
             self._finish_rollback(job_id)
 
-    # 执行 run ingest 相关逻辑。
+    # 运行ingest。
     def _run_ingest(self, job_id, kb_id, source_dir, on_commit=None) -> bool:
         try:
             self._store.update(job_id, status="running")
@@ -658,23 +657,23 @@ class IndexJobManager:
             )
         return True
 
-    # 处理 is busy 相关逻辑。
+    # 判断 busy 是否成立。
     def is_busy(self, kb_id: str) -> bool:
         # 该 KB 是否有在途命令；sweeper 据此避免重复排队同一个重建任务。
         with self._ex_lock:
             return self._inflight.get(kb_id, 0) > 0
 
-    # 获取 get 相关逻辑。
+    # 返回结果。
     def get(self, job_id: str) -> dict | None:
         return self._store.get(job_id)
 
-    # 协调 reconcile orphans 相关逻辑。
+    # 协调孤儿任务。
     def reconcile_orphans(self) -> None:
         reconcile = getattr(self._store, "reconcile_orphans", None)
         if callable(reconcile):
             reconcile()
 
-    # 关闭 shutdown 相关逻辑。
+    # 完成 shutdown 处理。
     def shutdown(self, wait: bool = True) -> None:
         with self._ex_lock:
             self._closed = True

@@ -4,10 +4,12 @@ from cogdoc.graph import workflow
 from cogdoc.graph.workflow import route_by_task, unknown_node
 
 
+# 验证 route by task sends unknown to terminal node 场景。
 def test_route_by_task_sends_unknown_to_terminal_node():
     assert route_by_task({"task_type": "unknown"}) == "unknown_node"
 
 
+# 验证 unknown node returns readable answer and message 场景。
 def test_unknown_node_returns_readable_answer_and_message():
     result = unknown_node({"task_type": "unknown"})
 
@@ -16,7 +18,9 @@ def test_unknown_node_returns_readable_answer_and_message():
     assert result["messages"][0].content == result["answer"]
 
 
+# 验证 workflow unknown route produces answer 场景。
 def test_workflow_unknown_route_produces_answer(monkeypatch):
+    # 构造route意图。
     def fake_route_intent(state, config):
         return {
             "query": "你好",

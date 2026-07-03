@@ -6,6 +6,7 @@ import cogdoc.observability.logger as logger_module
 from cogdoc.observability.logger import configure_logging, log_event, new_trace_id
 
 
+# 重置 CogDoc 日志配置。
 @pytest.fixture(autouse=True)
 def reset_cogdoc_logging():
     yield
@@ -17,6 +18,7 @@ def reset_cogdoc_logging():
     logger_module._CONFIGURED_SIGNATURE = None
 
 
+# 验证 json logging writes trace fields 场景。
 def test_json_logging_writes_trace_fields(tmp_path):
     log_path = tmp_path / "cogdoc.jsonl"
     settings = Settings(cogdoc_log_file=str(log_path), cogdoc_log_to_console=False)
@@ -35,6 +37,7 @@ def test_json_logging_writes_trace_fields(tmp_path):
     assert payload["count"] == 2
 
 
+# 验证 trace id is unique hex 场景。
 def test_trace_id_is_unique_hex():
     first = new_trace_id()
     second = new_trace_id()
@@ -44,6 +47,7 @@ def test_trace_id_is_unique_hex():
     int(first, 16)
 
 
+# 验证 configure logging is idempotent for same settings 场景。
 def test_configure_logging_is_idempotent_for_same_settings(tmp_path):
     log_path = tmp_path / "cogdoc.jsonl"
     settings = Settings(cogdoc_log_file=str(log_path), cogdoc_log_to_console=False)
@@ -56,6 +60,7 @@ def test_configure_logging_is_idempotent_for_same_settings(tmp_path):
     assert logger.handlers == first_handlers
 
 
+# 验证 log event prefixes reserved extra keys 场景。
 def test_log_event_prefixes_reserved_extra_keys(tmp_path):
     log_path = tmp_path / "cogdoc.jsonl"
     settings = Settings(cogdoc_log_file=str(log_path), cogdoc_log_to_console=False)

@@ -7,6 +7,7 @@ from cogdoc.tools.eval.retrieval_metrics import (
 )
 
 
+# 验证 recall at k counts distinct expected within cutoff 场景。
 def test_recall_at_k_counts_distinct_expected_within_cutoff():
     retrieved = ["a.pdf", "a.pdf", "b.pdf", "c.pdf"]
     assert recall_at_k(retrieved, ["a.pdf", "b.pdf"], k=3) == 1.0
@@ -14,16 +15,19 @@ def test_recall_at_k_counts_distinct_expected_within_cutoff():
     assert recall_at_k(retrieved, ["x.pdf"], k=4) == 0.0
 
 
+# 验证 recall at k empty expected is zero 场景。
 def test_recall_at_k_empty_expected_is_zero():
     assert recall_at_k(["a.pdf"], [], k=3) == 0.0
 
 
+# 验证 hit at k is binary 场景。
 def test_hit_at_k_is_binary():
     retrieved = ["a.pdf", "b.pdf", "c.pdf"]
     assert hit_at_k(retrieved, ["c.pdf"], k=3) == 1.0
     assert hit_at_k(retrieved, ["c.pdf"], k=2) == 0.0
 
 
+# 验证 reciprocal rank uses first hit position 场景。
 def test_reciprocal_rank_uses_first_hit_position():
     retrieved = ["x.pdf", "a.pdf", "b.pdf"]
     assert reciprocal_rank(retrieved, ["a.pdf"]) == 0.5
@@ -31,6 +35,7 @@ def test_reciprocal_rank_uses_first_hit_position():
     assert reciprocal_rank(retrieved, ["none.pdf"]) == 0.0
 
 
+# 验证 evaluate query emits all requested cutoffs 场景。
 def test_evaluate_query_emits_all_requested_cutoffs():
     metrics = evaluate_query(["a.pdf", "b.pdf"], ["b.pdf"], k_values=[1, 3])
     assert set(metrics) == {"mrr", "recall@1", "hit@1", "recall@3", "hit@3"}
@@ -39,6 +44,7 @@ def test_evaluate_query_emits_all_requested_cutoffs():
     assert metrics["mrr"] == 0.5
 
 
+# 验证 aggregate means each metric 场景。
 def test_aggregate_means_each_metric():
     agg = aggregate(
         [
@@ -50,5 +56,6 @@ def test_aggregate_means_each_metric():
     assert agg["mrr"] == 0.75
 
 
+# 验证 aggregate empty is empty 场景。
 def test_aggregate_empty_is_empty():
     assert aggregate([]) == {}

@@ -4,6 +4,7 @@ from typing import Iterable, List, Optional, Tuple
 from cogdoc.graph.state import RetrievedDoc
 
 
+# 完成 sortdocument分块列表 处理。
 def sort_document_chunks(chunks: Iterable[RetrievedDoc]) -> List[RetrievedDoc]:
     return sorted(
         chunks,
@@ -27,6 +28,7 @@ def sort_document_chunks(chunks: Iterable[RetrievedDoc]) -> List[RetrievedDoc]:
     )
 
 
+# 列出 sources。
 def list_sources(chunks: Iterable[RetrievedDoc]) -> List[str]:
     sources = {
         str(doc.get("meta", {}).get("source", ""))
@@ -36,6 +38,7 @@ def list_sources(chunks: Iterable[RetrievedDoc]) -> List[str]:
     return sorted(sources)
 
 
+# 加载 source chunks。
 def load_source_chunks(
     chunks: Iterable[RetrievedDoc], source: str
 ) -> List[RetrievedDoc]:
@@ -48,10 +51,12 @@ def load_source_chunks(
 _CJK_RANGE = "一-鿿"
 
 
+# 判断 cjk 是否成立。
 def _is_cjk(ch: str) -> bool:
     return "一" <= ch <= "鿿"
 
 
+# 返回matchstart。
 def _source_match_start(
     query_lower: str, name_lower: str, allow_trailing_dot: bool
 ) -> Optional[int]:
@@ -79,16 +84,19 @@ def _source_match_start(
     return match.start()
 
 
+# 完成 full来源matchstart 处理。
 def _full_source_match_start(query_lower: str, source_lower: str) -> Optional[int]:
     # 完整文件名后允许句末英文句点，例如 "compare a.pdf and b.pdf."。
     return _source_match_start(query_lower, source_lower, allow_trailing_dot=True)
 
 
+# 完成 stem来源matchstart 处理。
 def _stem_source_match_start(query_lower: str, stem_lower: str) -> Optional[int]:
     # stem 匹配不允许右侧点号，避免 stem "data" 命中 data.v2.pdf。
     return _source_match_start(query_lower, stem_lower, allow_trailing_dot=False)
 
 
+# 选择来源for摘要。
 def select_source_for_summary(query: str, sources: List[str]) -> Optional[str]:
     if not sources:
         return None
@@ -108,6 +116,7 @@ def select_source_for_summary(query: str, sources: List[str]) -> Optional[str]:
     return None
 
 
+# 选择源文件列表for对比。
 def select_sources_for_compare(query: str, sources: List[str]) -> List[str]:
     if not sources:
         return []

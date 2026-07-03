@@ -11,6 +11,7 @@ app = None
 from cogdoc.observability.trace import build_trace_step, export_trace, monotonic_ms
 
 
+# 服务层灾难失败时携带稳定的错误归因，交付层据此映射 error_code，不漏栈。
 class ChatServiceError(Exception):
     # 服务层灾难失败时携带稳定的错误归因，交付层据此映射 error_code，不漏栈。
     def __init__(
@@ -27,12 +28,14 @@ class ChatServiceError(Exception):
         self.trace_id = trace_id
 
 
+# 定义 ChatEvent 数据结构。
 @dataclass(frozen=True)
 class ChatEvent:
     type: str
     payload: dict[str, Any] = field(default_factory=dict)
 
 
+# 定义 ChatResult 数据结构。
 @dataclass(frozen=True)
 class ChatResult:
     answer: str
@@ -49,12 +52,14 @@ class ChatResult:
     trace_path: str | None = None
 
 
+# 完成 提取流程词项 处理。
 def _extract_token(data: Any) -> str:
     message = data[0] if isinstance(data, tuple) and data else data
     content = getattr(message, "content", "")
     return content if isinstance(content, str) else ""
 
 
+# 构建 result。
 def _build_result(
     task_type: str,
     task_output: dict[str, Any],
@@ -81,6 +86,7 @@ def _build_result(
     )
 
 
+# 完成 运行时错误step 处理。
 def _runtime_error_step(node_name: str, exc: Exception) -> dict[str, Any]:
     return {
         "node_name": node_name,
@@ -95,6 +101,7 @@ def _runtime_error_step(node_name: str, exc: Exception) -> dict[str, Any]:
     }
 
 
+# 运行 chat。
 def run_chat(
     doc_id: str,
     query: str,
@@ -381,6 +388,7 @@ def run_chat(
         )
 
 
+# 运行 chat sync。
 def run_chat_sync(*args: Any, **kwargs: Any) -> ChatResult:
     result = None
     last_error: dict[str, Any] | None = None

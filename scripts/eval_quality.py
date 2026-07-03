@@ -13,6 +13,7 @@ from cogdoc.config.settings import get_settings
 from cogdoc.tools.eval.quality_metrics import compare_baseline, run_eval
 
 
+# 返回项目根目录路径。
 def _project_path(path: str) -> Path:
     resolved = Path(path)
     return resolved if resolved.is_absolute() else ROOT / resolved
@@ -23,6 +24,7 @@ DEFAULT_EVAL_SET = _project_path(_settings.quality_eval_set_path)
 EXAMPLE_EVAL_SET = _project_path(_settings.quality_eval_example_set_path)
 
 
+# 解析 default eval set。
 def resolve_default_eval_set() -> Path:
     if DEFAULT_EVAL_SET.exists():
         return DEFAULT_EVAL_SET
@@ -33,6 +35,7 @@ def resolve_default_eval_set() -> Path:
     return EXAMPLE_EVAL_SET
 
 
+# 加载 eval set。
 def load_eval_set(path: Path) -> List[dict]:
     items = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -42,10 +45,12 @@ def load_eval_set(path: Path) -> List[dict]:
     return items
 
 
+# 格式化评测指标数值。
 def _fmt(value: float | None) -> str:
     return "-" if value is None else f"{value:.4f}"
 
 
+# 输出 report。
 def print_report(report: dict) -> None:
     print(f"\n质量评测  |  cases={report['config']['num_cases']}\n")
     print("聚合:")
@@ -73,6 +78,7 @@ def print_report(report: dict) -> None:
     print()
 
 
+# 启动入口。
 def main() -> int:
     parser = argparse.ArgumentParser(description="离线质量评测 harness")
     parser.add_argument("--eval-set", type=Path, default=None, help="质量评测 JSONL")

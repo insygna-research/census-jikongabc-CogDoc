@@ -14,7 +14,7 @@ CHUNK_IDENTITY_VERSION = (
 )
 
 
-# 构建 build chunk id 相关逻辑。
+# 构建分块id。
 def build_chunk_id(
     source_sha256: str,
     source_name: str,

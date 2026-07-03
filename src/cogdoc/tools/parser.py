@@ -9,7 +9,7 @@ from cogdoc.graph.state import ParsedPage
 PARSER_VERSION = "pymupdf_smart_parse_v1"
 
 
-# 处理 smart parse 相关逻辑。
+# 完成 smartparse 处理。
 def smart_parse(pdf_path: str) -> List[ParsedPage]:
     source_name = os.path.basename(pdf_path)  # 文件名
     doc = fitz.open(pdf_path)

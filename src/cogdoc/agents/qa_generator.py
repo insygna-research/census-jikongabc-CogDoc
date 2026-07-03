@@ -10,15 +10,17 @@ from cogdoc.agents.conversation_memory import (
 )
 
 
+# 不同后端和模型使用独立客户端缓存。
 class Generator:
-    # 不同后端和模型使用独立客户端缓存。
     _clients = {}
 
+    # 清理 clients。
     @classmethod
     def clear_clients(cls) -> None:
         # 改了 LLM 配置后清缓存：客户端键不含 api_key，只改 key 时不清会一直用旧客户端。
         cls._clients.clear()
 
+    # 获取 client。
     @classmethod
     def _get_client(
         cls, is_local: bool = False, custom_model_name: str = None
@@ -62,6 +64,7 @@ class Generator:
             )
         return cls._clients[client_key]
 
+    # 构建 context string。
     @classmethod
     def _build_context_string(cls, docs: List[RetrievedDoc]) -> str:
         # chunk_id 只进入 Document 属性，引用格式仍按 source/page。
@@ -88,6 +91,7 @@ class Generator:
 
         return "\n\n".join(context_blocks)
 
+    # 格式化 prompt。
     @classmethod
     def format_prompt(
         cls, query: str, docs: List[RetrievedDoc], chat_history: list | None = None

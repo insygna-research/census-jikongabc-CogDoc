@@ -27,14 +27,13 @@ from cogdoc.agents.citation_validator import CitationValidatorAgent
 NEIGHBOR_CONTEXT_RADIUS = 1
 
 
-# 封装 RetrieverFactory 的状态与行为。
+# 进程内按 (kb_id, gen_id) 缓存引擎，gen_id=None 代表无活跃代/空代；线程安全且有界；switch_active 后必须调用 invalidate(kb_id)，以强制下次 get_engine 重解析 active generation。
 class RetrieverFactory:
-    # 进程内按 (kb_id, gen_id) 缓存引擎，gen_id=None 代表无活跃代/空代；线程安全且有界。 switch_active 后必须调用 invalidate(kb_id)，以强制下次 get_engine 重解析 active generation。
     _engines: "OrderedDict[tuple, HybridRetriever]" = OrderedDict()
     _lock = RLock()
     _max_engines = 32
 
-    # 获取 get engine 相关逻辑。
+    # 返回检索引擎。
     @classmethod
     def get_engine(cls, kb_id: str) -> HybridRetriever:
         # 删库进行中/已删：禁读正在拆除的代，返回空引擎且不缓存。
@@ -75,7 +74,7 @@ class RetrieverFactory:
             cls._engines.move_to_end(cache_key)
             return engine
 
-    # 解析 resolve gen id 相关逻辑。
+    # 解析genid。
     @classmethod
     def _resolve_gen_id(cls, kb_id: str) -> str | None:
         # 读 active generation id；无活跃代或合法空索引（expected_count=0）均返回 None。
@@ -84,7 +83,7 @@ class RetrieverFactory:
             return None
         return active["id"]
 
-    # 构建 build engine 相关逻辑。
+    # 构建检索引擎。
     @classmethod
     def _build_engine(cls, kb_id: str, gen_id: str | None) -> HybridRetriever:
         if gen_id is None:
@@ -116,7 +115,7 @@ class RetrieverFactory:
             )
         return engine
 
-    # 使缓存失效 invalidate 相关逻辑。
+    # 使失效结果。
     @classmethod
     def invalidate(cls, kb_id: str) -> None:
         # 删除该 kb 的全部代缓存；switch_active 后调用，强制下次重解析 active generation。
@@ -126,12 +125,12 @@ class RetrieverFactory:
                 del cls._engines[k]
 
 
-# 处理 rewrite node 相关逻辑。
+# 完成 重写问题node 处理。
 def rewrite_node(state: GraphState) -> dict:
     return QueryRewriteAgent.rewrite_query(state)
 
 
-# 校验 verify rewrite node 相关逻辑。
+# 校验重写问题node。
 def verify_rewrite_node(state: GraphState) -> dict:
     # 在检索前过滤语义漂移的 query rewrite。
     return RewriteVerifyAgent.verify_rewrites(state)
@@ -231,7 +230,7 @@ def _expand_with_neighbor_chunks(
     return list(expanded.values())
 
 
-# 处理 retrieve node 相关逻辑。
+# 检索 node。
 def retrieve_node(state: GraphState) -> dict:
     original_query = state.get("query", "")
     doc_id = state.get("doc_id", "default")
@@ -274,7 +273,7 @@ def retrieve_node(state: GraphState) -> dict:
     return {"retrieved_docs": retrieved_docs}
 
 
-# 处理 rerank node 相关逻辑。
+# 重排 node。
 def rerank_node(state: GraphState) -> dict:
     query = state.get("query", "")
     docs = state.get("retrieved_docs", [])
@@ -301,7 +300,7 @@ def rerank_node(state: GraphState) -> dict:
     return {"reranked_docs": expanded_docs}
 
 
-# 处理 generate node 相关逻辑。
+# 生成 node。
 def generate_node(state: GraphState) -> dict:
     query = state.get("query", "")
     is_local = state.get("is_local", False)
@@ -361,7 +360,7 @@ def generate_node(state: GraphState) -> dict:
     }
 
 
-# 处理 citation node 相关逻辑。
+# 完成 引用node 处理。
 def citation_node(state: GraphState) -> dict:
     answer = state.get("answer", "")
     final_docs = state.get("reranked_docs", [])
@@ -385,7 +384,7 @@ def citation_node(state: GraphState) -> dict:
     }
 
 
-# 处理 citation check 相关逻辑。
+# 完成 引用check 处理。
 def citation_check(state: GraphState) -> str:
     critique = state.get("critique", "")
     iteration_count = state.get("iteration_count", 0)

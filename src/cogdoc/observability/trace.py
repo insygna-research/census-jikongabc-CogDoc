@@ -8,15 +8,18 @@ from cogdoc.config.settings import Settings, get_settings
 TRACE_PREVIEW_CHARS = 120
 
 
+# 完成 monotonicms 处理。
 def monotonic_ms() -> float:
     return time.monotonic() * 1000
 
 
+# 完成 preview 处理。
 def _preview(text: Any, limit: int = TRACE_PREVIEW_CHARS) -> str:
     compact = " ".join(str(text or "").split())
     return compact[:limit]
 
 
+# 构造ref。
 def _doc_ref(doc: Mapping[str, Any]) -> dict:
     meta = doc.get("meta", {})
     return {
@@ -29,6 +32,7 @@ def _doc_ref(doc: Mapping[str, Any]) -> dict:
     }
 
 
+# 完成 证据ref 处理。
 def _evidence_ref(item: Mapping[str, Any]) -> dict:
     return {
         "chunk_id": item.get("chunk_id", ""),
@@ -40,6 +44,7 @@ def _evidence_ref(item: Mapping[str, Any]) -> dict:
     }
 
 
+# 构建 trace step。
 def build_trace_step(
     node_name: str,
     output: Mapping[str, Any],
@@ -94,6 +99,7 @@ def build_trace_step(
     return step
 
 
+# 完成 trace路径 处理。
 def trace_path(trace_id: str, settings: Settings | None = None) -> Path:
     settings = settings or get_settings()
     base_dir = Path(settings.cogdoc_trace_dir)
@@ -102,6 +108,7 @@ def trace_path(trace_id: str, settings: Settings | None = None) -> Path:
     return base_dir / f"{trace_id}.json"
 
 
+# 导出 trace。
 def export_trace(
     trace_id: str,
     request_id: str,

@@ -17,14 +17,17 @@ thread_local! {
     static EN_STEMMER: Stemmer = Stemmer::create(Algorithm::English);
 }
 
+// 返回全局复用的 Jieba 分词器。
 fn jieba() -> &'static Jieba {
     JIEBA.get_or_init(Jieba::new)
 }
 
+// 返回英文片段匹配正则。
 fn en_re() -> &'static Regex {
     EN_RE.get_or_init(|| Regex::new(r"[a-z0-9_\-.]+").unwrap())
 }
 
+// 返回英文停用词集合。
 fn en_stopwords() -> &'static HashSet<&'static str> {
     EN_STOPWORDS.get_or_init(|| {
         [

@@ -17,9 +17,9 @@ _SENTENCE_END_RE = re.compile(r"[。！？!?；;]+[\"'”’）】》」』]*|[.
 _SOFT_BREAK_RE = re.compile(r"\n+")
 
 
+# 文本片段用全局字符下标表示闭开区间。
 @dataclass(frozen=True)
 class TextSpan:
-    # 文本片段用全局字符下标表示闭开区间。
     start: int
     end: int
 
@@ -166,7 +166,7 @@ def _context_after(text: str, end: int, context_chars: int) -> str:
     return snippet
 
 
-# 切分 chunk paper 相关逻辑。
+# 切分 paper。
 def chunk_paper(
     parsed_pages: List[ParsedPage],
     source_sha256: str = "",
@@ -210,7 +210,7 @@ def chunk_paper(
     # local_chunk_index 只在单个 PDF 内递增，参与稳定 chunk_id。
     local_chunk_index = 0
 
-    # 查找 find page by pos 相关逻辑。
+    # 完成 find页码bypos 处理。
     def find_page_by_pos(pos: int) -> int:
         idx = bisect.bisect_right(page_starts, pos) - 1
         return page_nums[max(0, idx)]

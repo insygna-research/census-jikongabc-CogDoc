@@ -14,8 +14,8 @@ def merge_lists(old_list: Optional[Any], new_list: Optional[Any]) -> List[Any]:
     return old + new
 
 
+# chunk_id 是检索链路里的稳定身份键。
 class DocMeta(TypedDict):
-    # chunk_id 是检索链路里的稳定身份键。
     chunk_id: str
     source_sha256: str
     local_chunk_index: int
@@ -29,8 +29,8 @@ class DocMeta(TypedDict):
     context: NotRequired[str]
 
 
+# retrieval 只保存本次检索产生的动态指标。
 class RetrievalMetrics(TypedDict, total=False):
-    # retrieval 只保存本次检索产生的动态指标。
     distance: float
     bm25_score: float
     rrf_score: float
@@ -40,29 +40,29 @@ class RetrievalMetrics(TypedDict, total=False):
     parent_chunk_id: str
 
 
+# RetrievedDoc 是检索、重排和生成节点共享的文档结构。
 class RetrievedDoc(TypedDict):
-    # RetrievedDoc 是检索、重排和生成节点共享的文档结构。
     text: str
     meta: DocMeta
     retrieval: NotRequired[RetrievalMetrics]
 
 
+# ChatMessage 保存会话历史中的单条消息。
 class ChatMessage(TypedDict):
-    # ChatMessage 保存会话历史中的单条消息。
     role: str
     content: str
     timestamp: Optional[str]
 
 
+# AgentStepTrace 保存图节点的输入输出摘要。
 class AgentStepTrace(TypedDict):
-    # AgentStepTrace 保存图节点的输入输出摘要。
     step_name: str
     input_summary: str
     output_summary: str
 
 
+# Evidence 面向前端和审计展示。
 class Evidence(TypedDict, total=False):
-    # Evidence 面向前端和审计展示。
     chunk_id: str
     chunk_index: int
     source: str
@@ -74,44 +74,44 @@ class Evidence(TypedDict, total=False):
     text_preview: str
 
 
+# SummarySectionPlan 定义单文档摘要的固定章节。
 class SummarySectionPlan(TypedDict):
-    # SummarySectionPlan 定义单文档摘要的固定章节。
     section_id: str
     title: str
     instruction: str
 
 
+# SummarySectionResult 保存单个章节的带引用摘要。
 class SummarySectionResult(TypedDict):
-    # SummarySectionResult 保存单个章节的带引用摘要。
     section_id: str
     title: str
     content: str
     evidence: NotRequired[List[Evidence]]
 
 
+# CompareDimensionPlan 定义多文档对比的固定维度。
 class CompareDimensionPlan(TypedDict):
-    # CompareDimensionPlan 定义多文档对比的固定维度。
     dimension_id: str
     title: str
     instruction: str
 
 
+# CompareCell 保存某篇文档在某个对比维度下的带引用短描述。
 class CompareCell(TypedDict):
-    # CompareCell 保存某篇文档在某个对比维度下的带引用短描述。
     dimension_id: str
     source: str
     content: str
     evidence: NotRequired[List[Evidence]]
 
 
+# DocumentProfile 是 Compare 子图里单篇文档的结构化画像。
 class DocumentProfile(TypedDict):
-    # DocumentProfile 是 Compare 子图里单篇文档的结构化画像。
     source: str
     cells: List[CompareCell]
 
 
+# GraphState 是 LangGraph 节点间传递的全局状态。
 class GraphState(TypedDict):
-    # GraphState 是 LangGraph 节点间传递的全局状态。
     messages: Annotated[List[BaseMessage], add_messages]
     docs: NotRequired[List[RetrievedDoc]]
 
@@ -157,8 +157,8 @@ class GraphState(TypedDict):
     error: NotRequired[Optional[str]]
 
 
+# ParsedPage 是 PDF 解析后的页级输入。
 class ParsedPage(TypedDict):
-    # ParsedPage 是 PDF 解析后的页级输入。
     page: int
     source: str
     text: str

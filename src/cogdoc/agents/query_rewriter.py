@@ -8,8 +8,8 @@ from cogdoc.agents.qa_generator import Generator
 from cogdoc.agents.structured_output import invoke_structured
 
 
+# 改写结果限定在少量高价值检索查询内。
 class QueryRewriteOutput(BaseModel):
-    # 改写结果限定在少量高价值检索查询内。
     queries: List[str] = Field(
         min_length=1,
         max_length=3,
@@ -17,7 +17,9 @@ class QueryRewriteOutput(BaseModel):
     )
 
 
+# 定义 QueryRewriteAgent 数据结构。
 class QueryRewriteAgent:
+    # 完成 重写问题问题 处理。
     @staticmethod
     def rewrite_query(state: dict) -> dict:
         # 改写失败时回退到原始 query，保证检索链路可继续。

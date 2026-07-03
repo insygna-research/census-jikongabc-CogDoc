@@ -45,14 +45,14 @@ from cogdoc.tools.rust_core_loader import ensure_rust_core
 rust_core = None
 
 
-# 释放 release runtime lock 相关逻辑。
+# 释放运行时锁。
 def _release_runtime_lock(lock_fh) -> None:
     # 仅在后台 Timer 确已排空时显式释放锁；否则留给进程退出由 OS 释放。
     if cancel_all_timers():
         release_single_instance_lock(lock_fh)
 
 
-# 获取 get rust core 相关逻辑。
+# 加载并返回 Rust 原生扩展模块。
 def get_rust_core():
     global rust_core
     if rust_core is None:
@@ -60,7 +60,7 @@ def get_rust_core():
     return rust_core
 
 
-# 处理 safe print on interrupt 相关逻辑。
+# 在中断信号期间安全输出提示。
 def safe_print_on_interrupt(message: str) -> None:
     # 打印退出提示时临时忽略 SIGINT，避免 Ctrl+C 连按打断清理路径。
     previous_handler = signal.getsignal(signal.SIGINT)
@@ -71,7 +71,7 @@ def safe_print_on_interrupt(message: str) -> None:
         signal.signal(signal.SIGINT, previous_handler)
 
 
-# 解析 parse forced mode 相关逻辑。
+# 解析用户指定的强制任务模式。
 def parse_forced_mode(user_input: str) -> tuple[str | None, str]:
     from cogdoc.cli import FORCED_MODE_PATTERN
 
@@ -81,7 +81,7 @@ def parse_forced_mode(user_input: str) -> tuple[str | None, str]:
     return match.group(1).lower(), (match.group(2) or "").strip()
 
 
-# 写入索引 index is current 相关逻辑。
+# 写入索引 is current。
 def _index_is_current(doc_id: str, doc_dir: str, engine):
     # 任一路索引缺失都视为不可复用。
     if not (engine.vector_retriever.exists() and engine.bm25_retriever.exists()):
@@ -101,7 +101,7 @@ def _index_is_current(doc_id: str, doc_dir: str, engine):
     ), current_manifest
 
 
-# 预热 warm up runtime 相关逻辑。
+# 完成 预热流程预热流程运行时 处理。
 def warm_up_runtime(engine) -> None:
     print("🧠 正在预热检索与重排模型，请稍候...")
     Embedder.get_model()
@@ -110,7 +110,7 @@ def warm_up_runtime(engine) -> None:
     print("✅ 模型与分词资源预热完成。")
 
 
-# 构建 build index 相关逻辑。
+# 构建索引。
 def build_index(doc_id: str, doc_dir: str):
     # 索引缺失或过期时全量重建。
     if not os.path.exists(doc_dir):
@@ -132,7 +132,7 @@ def build_index(doc_id: str, doc_dir: str):
     print("✅ 物理多轨索引构建成功并落盘，数据管线安全关闭。\n")
 
 
-# 输出 print final qa output 相关逻辑。
+# 输出final问答output。
 def print_final_qa_output(subgraph_output: dict) -> None:
     final_docs = subgraph_output.get("reranked_docs", [])
 
@@ -166,7 +166,7 @@ def print_final_qa_output(subgraph_output: dict) -> None:
     print("=" * 50)
 
 
-# 输出 print final summary output 相关逻辑。
+# 输出final摘要output。
 def print_final_summary_output(subgraph_output: dict) -> None:
     summary_source = subgraph_output.get("summary_source", "")
     final_answer = subgraph_output.get("answer", "")
@@ -187,7 +187,7 @@ def print_final_summary_output(subgraph_output: dict) -> None:
     print("=" * 50)
 
 
-# 输出 print final compare output 相关逻辑。
+# 输出final对比output。
 def print_final_compare_output(subgraph_output: dict) -> None:
     content = extract_final_answer("compare", subgraph_output)
 
@@ -199,14 +199,14 @@ def print_final_compare_output(subgraph_output: dict) -> None:
     print("=" * 50)
 
 
-# 输出 print final unknown output 相关逻辑。
+# 输出final未知意图output。
 def print_final_unknown_output(subgraph_output: dict) -> None:
     content = extract_final_answer("unknown", subgraph_output) or UNKNOWN_RESPONSE
     print(f"\n🤖 [AI]: {content}")
     print("=" * 50)
 
 
-# 渲染 render chat event 相关逻辑。
+# 渲染chat事件。
 def render_chat_event(event: ChatEvent) -> ChatResult | None:
     if event.type == "router_decided":
         task = event.payload.get("task_type", "qa")
@@ -289,7 +289,7 @@ def render_chat_event(event: ChatEvent) -> ChatResult | None:
     return None
 
 
-# 处理 ask 相关逻辑。
+# 提交问题结果。
 def ask(
     doc_id: str,
     query: str,
@@ -315,7 +315,7 @@ def ask(
     return []
 
 
-# 解析 resolve source dir 相关逻辑。
+# 解析来源目录。
 def _resolve_source_dir(kb_id: str) -> str:
     # 已注册 KB 用其隔离源目录；否则回退到 COGDOC_DOC_DIR。
     registry = KnowledgeBaseRegistry()
@@ -324,7 +324,7 @@ def _resolve_source_dir(kb_id: str) -> str:
     return get_settings().cogdoc_doc_dir
 
 
-# 列出知识库 pdf 相关逻辑。
+# 列出知识库PDF 列表。
 def _list_kb_pdfs(kb_id: str, source_dir: str) -> list[str]:
     # 优先读已提交 state/manifest，索引未就绪时回退扫描源目录。
     active = KBState(kb_id).active()
@@ -346,7 +346,7 @@ def _list_kb_pdfs(kb_id: str, source_dir: str) -> list[str]:
     )
 
 
-# 打印知识库 pdf 相关逻辑。
+# 输出知识库PDF 列表。
 def print_kb_pdfs(kb_id: str, source_dir: str) -> None:
     # 展示当前 debug 知识库内的 PDF 文件名。
     pdfs = _list_kb_pdfs(kb_id, source_dir)
@@ -358,7 +358,7 @@ def print_kb_pdfs(kb_id: str, source_dir: str) -> None:
         print(f"   • {name}")
 
 
-# 处理 main 相关逻辑。
+# 启动入口。
 def main():
     parser = argparse.ArgumentParser(
         description="CogDoc 检索可视化 / 可观测控制台"

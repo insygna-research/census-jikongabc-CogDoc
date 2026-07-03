@@ -9,10 +9,12 @@ DEFAULT_API_URL = os.getenv("COGDOC_API_URL", "http://localhost:8000")
 st.set_page_config(page_title="CogDoc", layout="wide")
 
 
+# 创建测试客户端。
 def _client() -> CogDocClient:
     return CogDocClient(st.session_state.api_url)
 
 
+# 完成 init状态 处理。
 def _init_state() -> None:
     st.session_state.setdefault("api_url", DEFAULT_API_URL)
     # session_id 持久化进 URL，刷新后复用同一会话（后端多轮记忆得以续上）。
@@ -30,6 +32,7 @@ def _init_state() -> None:
     st.session_state.setdefault("known_sessions", {})
 
 
+# 恢复历史记录。
 def _restore_history(kb_id: str) -> None:
     # kb 或 session 变化时重载该 kb 的历史；同一 (kb, session) 内不重复拉，保留实时追加的消息。
     marker = (kb_id, st.session_state.session_id)
@@ -51,11 +54,13 @@ def _restore_history(kb_id: str) -> None:
     st.session_state.restored_for = marker
 
 
+# 构造label。
 def _page_label(page) -> str:
     # page 可能为空（schema 默认 None），避免渲染成 "PNone"。
     return f" · P{page}" if page is not None else ""
 
 
+# 切换会话。
 def _switch_session(session_id: str) -> None:
     # 切换/新建对话：换 session_id（同步 URL）、清空界面、触发重载历史。
     st.session_state.session_id = session_id
@@ -65,6 +70,7 @@ def _switch_session(session_id: str) -> None:
     st.rerun()
 
 
+# 完成 conversations 处理。
 def _conversations(client: CogDocClient, kb_id: str) -> None:
     # 多对话列表：前端已知会话 ∪ 后端已存会话，新建/切换/删除，全部可点。
     st.subheader("对话")
@@ -107,6 +113,7 @@ def _conversations(client: CogDocClient, kb_id: str) -> None:
             st.rerun()
 
 
+# 完成 send反馈 处理。
 def _send_feedback(final: dict, query: str, feedback: str) -> None:
     # 凭该回答的 trace_id 提交赞/踩，关联 kb/query/answer 落到后端。
     trace_id = final.get("trace_id")
@@ -125,6 +132,7 @@ def _send_feedback(final: dict, query: str, feedback: str) -> None:
     )
 
 
+# 渲染 evidence。
 def _render_evidence(final: dict, key: str, query: str = "") -> None:
     # 渲染一条回答的元信息 + 引用/证据面板 + 赞踩按钮（消费结构化字段）。
     meta = st.columns(3)
@@ -153,6 +161,7 @@ def _render_evidence(final: dict, key: str, query: str = "") -> None:
         _send_feedback(final, query, "thumbs_down")
 
 
+# 完成 侧边栏 处理。
 def _sidebar() -> None:
     # 侧栏：后端地址、模式开关、知识库选择/新建/上传入库/文档列表。
     with st.sidebar:
@@ -238,6 +247,7 @@ def _sidebar() -> None:
                     st.error(resp.json().get("message", resp.text))
 
 
+# 轮询任务。
 def _poll_job(client: CogDocClient, job_id: str) -> None:
     # 轮询入库 job 直到终态，期间在 st.status 里实时显示进度。
     with st.status("后台入库中…", expanded=True) as status:
@@ -266,6 +276,7 @@ def _poll_job(client: CogDocClient, job_id: str) -> None:
             )
 
 
+# 完成 chatarea 处理。
 def _chat_area() -> None:
     # 主对话区：还原历史 + 渲染气泡 + SSE 流式提问，final 帧为权威答案。
     kb_id = st.session_state.kb_id
@@ -360,11 +371,13 @@ def _chat_area() -> None:
     st.rerun()
 
 
+# 完成 nextid 处理。
 def _next_id() -> int:
     st.session_state.msg_seq += 1
     return st.session_state.msg_seq
 
 
+# 隐藏default默认界面。
 def _hide_default_chrome() -> None:
     # 隐藏 Streamlit 右上角默认工具条（Deploy / 菜单 / 状态）与页脚，只留自家品牌。
     st.markdown(
@@ -380,6 +393,7 @@ def _hide_default_chrome() -> None:
     )
 
 
+# 完成 品牌头部页头 处理。
 def _brand_header() -> None:
     # 主区顶部品牌标题，替代被隐藏的默认头。
     st.markdown(
@@ -389,6 +403,7 @@ def _brand_header() -> None:
     )
 
 
+# 启动入口。
 def main() -> None:
     _init_state()
     _hide_default_chrome()

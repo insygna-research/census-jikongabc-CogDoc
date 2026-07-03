@@ -2,12 +2,12 @@ from unittest.mock import MagicMock, patch
 from cogdoc.service.mutation_journal import MutationJournal
 
 
-# 处理 journal 相关逻辑。
+# 构造测试变更日志。
 def _journal(tmp_path):
     return MutationJournal(journal_dir=str(tmp_path / "journal"))
 
 
-# 处理 active 相关逻辑。
+# 构造测试用活跃代。
 def _active(gen_id):
     # 让 recovery 内 KBState(kb).active() 返回指定 active gen，用于模拟"已提交"。
     state = MagicMock()

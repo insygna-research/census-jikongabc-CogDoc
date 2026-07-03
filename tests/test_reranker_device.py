@@ -3,6 +3,7 @@ from cogdoc.tools import device, reranker
 from cogdoc.tools.reranker import BGEReranker
 
 
+# 恢复重排器全局状态。
 @pytest.fixture(autouse=True)
 def restore_reranker_state():
     # 每个测试前后恢复 reranker 单例状态。
@@ -18,6 +19,7 @@ def restore_reranker_state():
     BGEReranker.REQUIRED_CUDA_FREE_BYTES = saved_required_cuda_free_bytes
 
 
+# 模拟支持设备迁移的重排模型。
 class _FakeModel:
     # 模拟支持设备迁移的重排模型。
     def to(self, dev):
@@ -25,11 +27,13 @@ class _FakeModel:
         self.device = dev
         return self
 
+    # 切换评估模式结果。
     def eval(self):
         # 模拟模型进入推理模式。
         return self
 
 
+# 构造模型loading。
 def _stub_model_loading(monkeypatch):
     # 替换模型加载流程，避免测试下载真实权重。
     monkeypatch.setattr(
@@ -44,11 +48,13 @@ def _stub_model_loading(monkeypatch):
     return fake
 
 
+# 验证 default device is one of known backends 场景。
 def test_default_device_is_one_of_known_backends():
     # 验证默认 reranker 设备属于支持的后端。
     assert BGEReranker.default_device() in {"cuda", "mps", "cpu"}
 
 
+# 验证 default device uses gpu when enough free memory 场景。
 def test_default_device_uses_gpu_when_enough_free_memory(monkeypatch):
     # 空闲显存充足时走 cuda。
     monkeypatch.setattr(device.torch.cuda, "is_available", lambda: True)
@@ -59,6 +65,7 @@ def test_default_device_uses_gpu_when_enough_free_memory(monkeypatch):
     assert BGEReranker.default_device() == "cuda"
 
 
+# 验证 default device falls back to cpu when gpu low 场景。
 def test_default_device_falls_back_to_cpu_when_gpu_low(monkeypatch):
     # 显存被其它进程占满、空闲不足阈值时回落 CPU，避免 CUDA OOM。
     monkeypatch.setattr(device.torch.cuda, "is_available", lambda: True)
@@ -70,6 +77,7 @@ def test_default_device_falls_back_to_cpu_when_gpu_low(monkeypatch):
     assert BGEReranker.default_device() == "cpu"
 
 
+# 验证 default device sticky once loaded on cuda 场景。
 def test_default_device_sticky_once_loaded_on_cuda(monkeypatch):
     # 已在 cuda 且模型在显存里：自身占用已计入空闲值，即便此刻空闲不足也不抖回 CPU。
     monkeypatch.setattr(device, "cuda_free_bytes", lambda: 0)
@@ -79,6 +87,7 @@ def test_default_device_sticky_once_loaded_on_cuda(monkeypatch):
     assert BGEReranker.default_device() == "cuda"
 
 
+# 验证 get resources resolves device when unset 场景。
 def test_get_resources_resolves_device_when_unset(monkeypatch):
     # 直连调用（未 set_device，device=None）按显存自动选设备，不退化成 CPU。
     monkeypatch.setattr(device.torch.cuda, "is_available", lambda: True)
@@ -94,6 +103,7 @@ def test_get_resources_resolves_device_when_unset(monkeypatch):
     assert fake.device == "cuda"
 
 
+# 验证 get resources respects explicit cpu 场景。
 def test_get_resources_respects_explicit_cpu(monkeypatch):
     # 本地模式 set_device("cpu") 后即便显存充足也不被覆盖。
     monkeypatch.setattr(device.torch.cuda, "is_available", lambda: True)
@@ -108,6 +118,7 @@ def test_get_resources_respects_explicit_cpu(monkeypatch):
     assert fake.device == "cpu"
 
 
+# 验证 switch to new device invalidates model singleton 场景。
 def test_switch_to_new_device_invalidates_model_singleton():
     # 验证切换到新设备时会清空已加载模型单例。
     BGEReranker.device = "cuda"
@@ -119,6 +130,7 @@ def test_switch_to_new_device_invalidates_model_singleton():
     assert BGEReranker._model is None
 
 
+# 验证 switch to same device keeps model singleton 场景。
 def test_switch_to_same_device_keeps_model_singleton():
     # 验证切换到相同设备时保留已加载模型单例。
     BGEReranker.device = "cpu"
@@ -130,6 +142,7 @@ def test_switch_to_same_device_keeps_model_singleton():
     assert BGEReranker._model is sentinel
 
 
+# 验证 local then cloud switch restores default device 场景。
 def test_local_then_cloud_switch_restores_default_device():
     # 验证本地 CPU 模式后还能切回默认设备。
     default = BGEReranker.default_device()

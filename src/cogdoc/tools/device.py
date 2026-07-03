@@ -2,6 +2,7 @@ import torch
 from cogdoc.config.settings import get_settings
 
 
+# 完成 CUDAfreebytes 处理。
 def cuda_free_bytes() -> int:
     # 当前 GPU 的实际空闲显存（已计入其它进程占用）；查询失败按 0 处理。
     try:
@@ -11,17 +12,20 @@ def cuda_free_bytes() -> int:
         return 0
 
 
+# 完成 MPSavailable 处理。
 def mps_available() -> bool:
     # 单独封装 MPS 检测，方便测试替换并兼容无 backends 的 torch 构建。
     backend = getattr(getattr(torch, "backends", None), "mps", None)
     return backend is not None and backend.is_available()
 
 
+# 完成 requiredCUDAfreebytes 处理。
 def required_cuda_free_bytes(env_var: str) -> int:
     # 阈值支持环境变量按 MB 覆盖，内部统一换算为字节比较。
     return get_settings().cuda_min_free_bytes(env_var)
 
 
+# 解析 device。
 def resolve_device(
     min_cuda_free_bytes: int, current_device: str = None, model_loaded: bool = False
 ) -> str:

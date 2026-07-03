@@ -8,7 +8,7 @@ from cogdoc.service.kb_epoch import EpochStore
 from cogdoc.service.kb_state import KBState, StaleGenerationError
 
 
-# 构造 make state 相关逻辑。
+# 构造状态。
 def _make_state(tmp_path, kb_id="kb"):
     epochs = EpochStore(path=str(tmp_path / "epochs.json"))
     return KBState(
@@ -56,7 +56,7 @@ def test_run_blocking_serializes_behind_submitted_job():
     ingest_started = threading.Event()
     proceed = threading.Event()
 
-    # 处理 slow ingest 相关逻辑。
+    # 构造或驱动 慢任务ingest 测试场景。
     def slow_ingest(kb_id, source_dir):
         ingest_started.set()
         proceed.wait()
@@ -196,7 +196,7 @@ def test_drain_purge_queue_retries_and_dequeues_on_success(tmp_path, monkeypatch
 
     calls = []
 
-    # 清理 purge 相关逻辑。
+    # 清理。
     def purge(kb, gid):
         calls.append(gid)
         if gid == "g1":
@@ -284,7 +284,7 @@ def test_submit_compat_path_aborts_on_stale_epoch(tmp_path, monkeypatch):
     store = InMemoryJobStore()
     called = []
 
-    # 处理 track ingest 相关逻辑。
+    # 构造或驱动 跟踪任务ingest 测试场景。
     def track_ingest(kb_id, d):
         called.append(1)
         return MagicMock(document_count=0, chunk_count=0)
@@ -313,7 +313,7 @@ def test_run_blocking_rejects_same_kb_executor_thread():
     captured = {}
     done = threading.Event()
 
-    # 处理 reenter 相关逻辑。
+    # 构造或驱动 重入调用 测试场景。
     def reenter():
         try:
             mgr.run_blocking("kb", lambda: None)
@@ -336,7 +336,7 @@ def test_submit_upload_writes_file_before_ingest(tmp_path):
     # 文件写入与 ingest 必须在同一 executor command 内，ingest 时文件已落盘。
     seen_files = []
 
-    # 处理 capture ingest 相关逻辑。
+    # 捕获ingest。
     def capture_ingest(kb_id, source_dir):
         import os
 
@@ -388,7 +388,7 @@ def test_submit_delete_doc_removes_file_before_ingest(tmp_path):
 
     seen_files = []
 
-    # 处理 capture ingest 相关逻辑。
+    # 捕获ingest。
     def capture_ingest(kb_id, source_dir):
         seen_files.extend(os.listdir(source_dir))
         return MagicMock(document_count=0, chunk_count=0)
@@ -501,7 +501,7 @@ def test_upload_stale_epoch_aborts(tmp_path, monkeypatch):
     store = InMemoryJobStore()
     called = []
 
-    # 处理 track ingest 相关逻辑。
+    # 构造或驱动 跟踪任务ingest 测试场景。
     def track_ingest(kb_id, d):
         called.append(1)
         return MagicMock(document_count=0, chunk_count=0)

@@ -10,13 +10,13 @@ from cogdoc.tools.retriever.hybrid import HybridRetriever, IndexCorruptError
 from cogdoc.tools.retriever.vector_retriever import EmbeddingModelMismatchError
 
 
-# 构造 make state 相关逻辑。
+# 构造状态。
 def _make_state(tmp_path, kb_id="kb"):
     epochs = EpochStore(path=str(tmp_path / "epochs.json"))
     return KBState(kb_id, path=str(tmp_path / kb_id / "state.json"), epochs=epochs)
 
 
-# 处理 fresh factory 相关逻辑。
+# 构造或驱动 新建实例工厂 测试场景。
 def _fresh_factory():
     # 每个测试独立清空缓存，conftest autouse fixture 在 yield 后也会清，两者不冲突。
     RetrieverFactory._engines = OrderedDict()
@@ -273,7 +273,7 @@ def test_race_stale_engine_not_cached(tmp_path):
 
     call_count = [0]
 
-    # 解析 resolve side effect 相关逻辑。
+    # 解析副作用效果。
     def resolve_side_effect(kb):
         call_count[0] += 1
         # 第一次（锁外解析）返回旧代；第二次（锁内插入前重解析）返回新代。

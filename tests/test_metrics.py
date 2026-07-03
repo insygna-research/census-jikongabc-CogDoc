@@ -6,11 +6,13 @@ from cogdoc.api.session_store import SessionStore
 from cogdoc.service.chat_service import ChatResult
 
 
+# 声明异步测试使用的后端。
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
 
 
+# 运行成功路径。
 def _runner_ok(doc_id, query, is_local, chat_history, forced_task):
     return ChatResult(
         answer="ok",
@@ -27,6 +29,7 @@ def _runner_ok(doc_id, query, is_local, chat_history, forced_task):
     )
 
 
+# 创建测试应用实例。
 def _app(monkeypatch, **kwargs):
     import cogdoc.api.app as app_module
 
@@ -34,10 +37,12 @@ def _app(monkeypatch, **kwargs):
     return create_app(chat_runner=_runner_ok, session_store=SessionStore(), **kwargs)
 
 
+# 创建测试客户端。
 async def _client(app):
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver")
 
 
+# 验证 metrics render is prometheus text 场景。
 def test_metrics_render_is_prometheus_text():
     metrics = Metrics()
     metrics.requests.labels("GET", "/x", "200").inc()
@@ -46,6 +51,7 @@ def test_metrics_render_is_prometheus_text():
     assert "cogdoc_http_request_duration_seconds" in body
 
 
+# 验证 middleware records 500 when call next raises 场景。
 @pytest.mark.anyio
 async def test_middleware_records_500_when_call_next_raises():
     # call_next 抛未兜底异常时：仍记一条 status=500、在途归零，且异常透传。
@@ -54,10 +60,12 @@ async def test_middleware_records_500_when_call_next_raises():
     metrics = Metrics()
     mw = MetricsMiddleware(app=None, metrics=metrics)
 
+    # 定义 _Req 数据结构。
     class _Req:
         method = "POST"
         scope: dict = {}
 
+    # 模拟失败结果。
     async def boom(_request):
         raise RuntimeError("kaboom")
 
@@ -69,6 +77,7 @@ async def test_middleware_records_500_when_call_next_raises():
     assert "cogdoc_http_requests_in_progress 0.0" in body
 
 
+# 验证 metrics endpoint reachable and auth exempt 场景。
 @pytest.mark.anyio
 async def test_metrics_endpoint_reachable_and_auth_exempt(monkeypatch):
     # 开了鉴权，/metrics 仍应免鉴权可抓取。
@@ -80,6 +89,7 @@ async def test_metrics_endpoint_reachable_and_auth_exempt(monkeypatch):
     assert "cogdoc_http_requests_total" in resp.text
 
 
+# 验证 requests are counted 场景。
 @pytest.mark.anyio
 async def test_requests_are_counted(monkeypatch):
     app = _app(monkeypatch, api_keys=set())
@@ -95,6 +105,7 @@ async def test_requests_are_counted(monkeypatch):
     assert "cogdoc_http_request_duration_seconds_count" in scraped
 
 
+# 验证 path params collapse to route template 场景。
 @pytest.mark.anyio
 async def test_path_params_collapse_to_route_template(monkeypatch):
     # 不同 job_id 不能各成一条时间序列，必须聚到 /v1/index-jobs/{job_id}。
@@ -108,6 +119,7 @@ async def test_path_params_collapse_to_route_template(monkeypatch):
     assert "/v1/index-jobs/aaa" not in scraped
 
 
+# 验证 chat result counter increments 场景。
 @pytest.mark.anyio
 async def test_chat_result_counter_increments(monkeypatch):
     app = _app(monkeypatch, api_keys=set())
@@ -118,6 +130,7 @@ async def test_chat_result_counter_increments(monkeypatch):
     assert 'cogdoc_chat_results_total{task_type="qa",valid="true"}' in scraped
 
 
+# 验证 rejected requests are counted 场景。
 @pytest.mark.anyio
 async def test_rejected_requests_are_counted(monkeypatch):
     # 指标中间件在访问控制外层：401 也应计入。

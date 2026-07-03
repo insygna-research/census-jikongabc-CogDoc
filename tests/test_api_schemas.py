@@ -10,6 +10,7 @@ from cogdoc.api.schemas import (
 from cogdoc.service.chat_service import ChatResult
 
 
+# 验证 chat request defaults and forced task 场景。
 def test_chat_request_defaults_and_forced_task():
     request = ChatRequest(query="  总结 a.pdf  ", mode="summary")
 
@@ -20,6 +21,7 @@ def test_chat_request_defaults_and_forced_task():
     assert ChatRequest(query="问题").forced_task is None
 
 
+# 验证 chat request rejects blank and unknown fields 场景。
 def test_chat_request_rejects_blank_and_unknown_fields():
     with pytest.raises(ValidationError):
         ChatRequest(query="  ")
@@ -28,6 +30,7 @@ def test_chat_request_rejects_blank_and_unknown_fields():
         ChatRequest(query="问题", unexpected=True)
 
 
+# 验证 chat result to response maps stable fields without raw text 场景。
 def test_chat_result_to_response_maps_stable_fields_without_raw_text():
     result = ChatResult(
         answer="需要满足报名要求。[a.pdf:P1]",
@@ -91,6 +94,7 @@ def test_chat_result_to_response_maps_stable_fields_without_raw_text():
     assert "不应进入 API 响应的全文" not in str(payload)
 
 
+# 验证 chat result to response normalizes unknown task 场景。
 def test_chat_result_to_response_normalizes_unknown_task():
     result = ChatResult(
         answer="无法识别",
@@ -111,6 +115,7 @@ def test_chat_result_to_response_normalizes_unknown_task():
     assert response.task_type == "unknown"
 
 
+# 验证 error response uses stable error code values 场景。
 def test_error_response_uses_stable_error_code_values():
     response = build_error_response(
         ErrorCode.STREAM_INTERRUPTED,

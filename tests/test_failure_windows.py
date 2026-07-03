@@ -7,7 +7,7 @@ from cogdoc.service.kb_lifecycle import LifecycleStore, LIFECYCLE_DELETING, LIFE
 from cogdoc.service.purge_queue import PurgeQueue, PurgeQueueCorruptError
 
 
-# 处理 boom ingest 相关逻辑。
+# 模拟失败ingest。
 def _boom_ingest(kb_id, source_dir):
     raise ValueError("build failed")
 
@@ -35,7 +35,7 @@ def test_upload_build_failure_restore_fail_keeps_journal(tmp_path):
     )
     real_replace = __import__("os").replace
 
-    # 处理 replace fail restore 相关逻辑。
+    # 构造或驱动 replace失败路径恢复状态 测试场景。
     def replace_fail_restore(src, dst):
         # 仅恢复方向（src 是 .bak）失败；备份创建方向放行，确保走到回滚失败分支。
         if str(src).endswith(".cogdoc-bak"):

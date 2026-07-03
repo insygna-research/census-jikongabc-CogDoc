@@ -25,7 +25,9 @@ _HANDLER_MARKER = "_cogdoc_handler"
 _CONFIGURED_SIGNATURE = None
 
 
+# 定义 JsonLogFormatter 数据结构。
 class JsonLogFormatter(logging.Formatter):
+    # 格式化。
     def format(self, record: logging.LogRecord) -> str:
         payload = {
             "timestamp": datetime.fromtimestamp(
@@ -46,6 +48,7 @@ class JsonLogFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
+# 解析safe。
 def _json_safe(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -56,14 +59,17 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+# 新建traceid。
 def new_trace_id() -> str:
     return uuid4().hex
 
 
+# 获取 logger。
 def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(f"cogdoc.{name}")
 
 
+# 配置logging。
 def configure_logging(settings: Settings | None = None) -> None:
     global _CONFIGURED_SIGNATURE
     settings = settings or get_settings()
@@ -107,6 +113,7 @@ def configure_logging(settings: Settings | None = None) -> None:
     _CONFIGURED_SIGNATURE = signature
 
 
+# 完成 log事件 处理。
 def log_event(
     logger_name: str,
     event: str,

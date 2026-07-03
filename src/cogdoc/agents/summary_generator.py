@@ -20,6 +20,7 @@ CITATION_PATTERN = re.compile(
 CLOUD_SECTION_MAX_WORKERS = get_settings().cloud_section_max_workers
 
 
+# 解析 section workers。
 def resolve_section_workers(is_local: bool, task_count: int) -> int:
     # 本地 Ollama 并发会放大显存/内存压力，退回串行；单任务无需起线程池。
     if task_count <= 1 or is_local:
@@ -27,6 +28,7 @@ def resolve_section_workers(is_local: bool, task_count: int) -> int:
     return min(task_count, CLOUD_SECTION_MAX_WORKERS)
 
 
+# 运行 section cells。
 def run_section_cells(tasks: List, worker: Callable, is_local: bool) -> List:
     # ThreadPoolExecutor.map 按输入顺序返回结果，与完成先后无关，保证列序/章节序确定。
     workers = resolve_section_workers(is_local, len(tasks))
@@ -36,11 +38,13 @@ def run_section_cells(tasks: List, worker: Callable, is_local: bool) -> List:
         return list(executor.map(worker, tasks))
 
 
+# 分词 for section。
 def tokenize_for_section(text: str) -> set[str]:
     # 把章节选择文本转成去重 token 集合。
     return set(tokenize_mixed_text(text))
 
 
+# 选择章节文档列表。
 def select_section_docs(
     docs: List[RetrievedDoc],
     plan: SummarySectionPlan,
@@ -72,6 +76,7 @@ def select_section_docs(
     return [doc for _, _, doc in sorted(selected, key=lambda item: item[1])]
 
 
+# 格式化 summary context。
 def format_summary_context(docs: List[RetrievedDoc]) -> str:
     # Document 标签属性是 citation checker 的唯一来源。
     blocks = []
@@ -92,6 +97,7 @@ def format_summary_context(docs: List[RetrievedDoc]) -> str:
     return "\n\n".join(blocks)
 
 
+# 构建 section citations。
 def build_section_citations(docs: List[RetrievedDoc]) -> str:
     # 引用由实际使用的 chunk 元数据确定性生成。
     seen = set()
@@ -116,6 +122,7 @@ _CONTENT_TURN_RE = re.compile(r"(但|不过|然而|另外|此外)")
 _SENTENCE_SPLIT_RE = re.compile(r"[。！？!?；;\n]+")
 
 
+# 判断 no evidence summary 是否成立。
 def is_no_evidence_summary(content: str) -> bool:
     # 只有单句无依据声明才跳过引用；转折或第二句都按实质内容绑定引用。
     normalized = content.strip()
@@ -127,6 +134,7 @@ def is_no_evidence_summary(content: str) -> bool:
     return not _CONTENT_TURN_RE.search(normalized[len(NO_EVIDENCE_MARKER) :])
 
 
+# 绑定章节引用列表。
 def attach_section_citations(content: str, docs: List[RetrievedDoc]) -> str:
     # 模型只写正文，程序统一替换为合法引用。
     content = content.strip()
@@ -141,6 +149,7 @@ def attach_section_citations(content: str, docs: List[RetrievedDoc]) -> str:
     return f"{content}{citations}"
 
 
+# 完成 allcontentsno证据 处理。
 def all_contents_no_evidence(contents: Iterable[str]) -> bool:
     # 仅全为显式无依据声明时才允许跳过缺引用校验。
     contents = list(contents)
@@ -149,6 +158,7 @@ def all_contents_no_evidence(contents: Iterable[str]) -> bool:
     )
 
 
+# 构建 summary evidence。
 def build_summary_evidence(docs: List[RetrievedDoc]) -> List[Evidence]:
     # 将参与生成的 chunk 转成前端展示 evidence。
     return [
@@ -169,6 +179,7 @@ def build_summary_evidence(docs: List[RetrievedDoc]) -> List[Evidence]:
     ]
 
 
+# 构建 cell evidence。
 def build_cell_evidence(content: str, docs: List[RetrievedDoc]) -> List[Evidence]:
     # 明确无依据的 cell/section 不展示支撑 chunk，避免 evidence 面板误导审计。
     if is_no_evidence_summary(content):
@@ -176,6 +187,7 @@ def build_cell_evidence(content: str, docs: List[RetrievedDoc]) -> List[Evidence
     return build_summary_evidence(docs)
 
 
+# 完成 章节上下文limit 处理。
 def section_context_limit(is_local: bool, doc_count: int) -> int:
     # 本地模型按文档长度分档，避免长文档 4k context 截断，同时不过度牺牲摘要覆盖面。
     if is_local and doc_count > 16:
@@ -183,6 +195,7 @@ def section_context_limit(is_local: bool, doc_count: int) -> int:
     return MAX_SECTION_CONTEXT_CHUNKS
 
 
+# 收集证据条目列表。
 def collect_evidence_items(
     evidence_groups: Iterable[Iterable[Evidence]],
     fallback_docs: List[RetrievedDoc],
@@ -213,6 +226,7 @@ def collect_evidence_items(
     return []
 
 
+# 收集章节证据。
 def collect_section_evidence(
     results: List[SummarySectionResult],
     fallback_docs: List[RetrievedDoc],
@@ -225,6 +239,7 @@ def collect_section_evidence(
     )
 
 
+# 追加 citation warning。
 def append_citation_warning(answer: str, critique: str, unit_label: str) -> str:
     # 在答案末尾追加引用校验警告。
     return (
@@ -235,6 +250,7 @@ def append_citation_warning(answer: str, critique: str, unit_label: str) -> str:
     )
 
 
+# 完成 摘要消息列表 处理。
 def _summary_messages(source: str, plan: SummarySectionPlan, query: str, context: str):
     # 构造首次章节摘要调用的消息。
     return [
@@ -273,6 +289,7 @@ def _summary_messages(source: str, plan: SummarySectionPlan, query: str, context
     ]
 
 
+# 完成 摘要retry消息列表 处理。
 def _summary_retry_messages(
     source: str, plan: SummarySectionPlan, query: str, context: str
 ):
@@ -303,6 +320,7 @@ def _summary_retry_messages(
     ]
 
 
+# 生成 section cell。
 def generate_section_cell(
     llm,
     source: str,
@@ -335,6 +353,7 @@ def generate_section_cell(
     return content, build_cell_evidence(content, section_docs)
 
 
+# 负责按章节生成单文档摘要。
 class SectionSummaryAgent:
     # 负责按章节生成单文档摘要。
     @staticmethod
@@ -352,6 +371,7 @@ class SectionSummaryAgent:
         llm = Generator._get_client(is_local=is_local)
         doc_tokens = [(doc, tokenize_for_section(doc["text"])) for doc in docs]
 
+        # 构建 section result。
         def build_section_result(plan: SummarySectionPlan) -> SummarySectionResult:
             # 生成单个章节结果。
             content, evidence = generate_section_cell(
@@ -376,6 +396,7 @@ class SectionSummaryAgent:
         return {"summary_section_results": results}
 
 
+# 负责合并章节摘要并执行最终引用校验。
 class GlobalSummaryAgent:
     # 负责合并章节摘要并执行最终引用校验。
     @staticmethod

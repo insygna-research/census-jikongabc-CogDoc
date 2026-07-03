@@ -5,21 +5,20 @@ from threading import Lock
 from cogdoc.config.settings import get_settings
 
 
-# 封装 EpochCorruptError 的状态与行为。
+# epoch/tombstone 损坏：归零会令 incarnation 防护失效（旧任务被重新合法化），故 fail-closed 抛错。
 class EpochCorruptError(Exception):
-    # epoch/tombstone 损坏：归零会令 incarnation 防护失效（旧任务被重新合法化），故 fail-closed 抛错。
     pass
 
 
-# 封装 EpochStore 的状态与行为。
+# 全局 epoch/tombstone：存在 KB 目录之外（data/kb/epochs.json），删库不会随目录一起抹掉；重建同名 KB 时 epoch 续增而非归零，杜绝「删库前在飞的旧任务被重新合法化」；原子性依赖共享实例 + 外部 kb_write_lock；多进程部署不安全，需改文件/DB 锁（当前单进程约束）。
 class EpochStore:
-    # 全局 epoch/tombstone：存在 KB 目录之外（data/kb/epochs.json），删库不会随目录一起抹掉。 重建同名 KB 时 epoch 续增而非归零，杜绝「删库前在飞的旧任务被重新合法化」。 原子性依赖共享实例 + 外部 kb_write_lock；多进程部署不安全，需改文件/DB 锁（当前单进程约束）。
+    # 全局 epoch/tombstone：存在 KB 目录之外（data/kb/epochs.json），删库不会随目录一起抹掉；重建同名 KB 时 epoch 续增而非归零，杜绝「删库前在飞的旧任务被重新合法化」；原子性依赖共享实例 + 外部 kb_write_lock；多进程部署不安全，需改文件/DB 锁（当前单进程约束）。
     def __init__(self, path: str | None = None):
         self._path = path or os.path.join(get_settings().kb_root, "epochs.json")
         self._degraded_path = f"{self._path}.degraded"
         self._lock = Lock()
 
-    # 加载 load 相关逻辑。
+    # 加载。
     def _load(self) -> dict:
         # 文件不存在=空表。损坏则隔离并抛错：绝不退回空表把损坏解释成 epoch 0。
         if os.path.exists(self._degraded_path):
@@ -48,7 +47,7 @@ class EpochStore:
             raise EpochCorruptError(f"epochs 条目损坏已隔离: {self._path}")
         return data
 
-    # 隔离 quarantine corrupt 相关逻辑。
+    # 隔离损坏文件。
     def _quarantine_corrupt(self) -> None:
         try:
             os.replace(self._path, f"{self._path}.corrupt-{time.time_ns()}")
@@ -60,7 +59,7 @@ class EpochStore:
         except OSError:
             pass
 
-    # 保存 save 相关逻辑。
+    # 保存。
     def _save(self, data: dict) -> None:
         os.makedirs(os.path.dirname(self._path), exist_ok=True)
         tmp_path = f"{self._path}.tmp"
@@ -68,12 +67,12 @@ class EpochStore:
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(tmp_path, self._path)
 
-    # 获取当前 current 相关逻辑。
+    # 返回当前。
     def current(self, kb_id: str) -> int:
         with self._lock:
             return self._load().get(kb_id, 0)
 
-    # 递增 bump 相关逻辑。
+    # 递增。
     def bump(self, kb_id: str) -> int:
         with self._lock:
             data = self._load()
@@ -87,7 +86,7 @@ _shared: EpochStore | None = None
 _shared_lock = Lock()
 
 
-# 处理 shared epoch store 相关逻辑。
+# 完成 sharedepoch存储 处理。
 def shared_epoch_store() -> EpochStore:
     # 进程内共享单例，保证所有 KBState 实例看到同一份 epoch；双重检查锁防并发重复构造。
     global _shared

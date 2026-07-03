@@ -13,19 +13,19 @@ def anyio_backend():
     return "asyncio"
 
 
-# 处理 ok ingest 相关逻辑。
+# 模拟成功ingest。
 def _ok_ingest(kb_id, source_dir):
     return SimpleNamespace(document_count=1, chunk_count=3)
 
 
-# 构造 make app 相关逻辑。
+# 构造应用。
 def _make_app(tmp_path, ingest_fn=_ok_ingest, monkeypatch=None):
     if monkeypatch is not None:
         import cogdoc.api.app as app_module
 
         monkeypatch.setattr(app_module, "configure_logging", lambda: None)
 
-    # 获取源文件 source dir for 相关逻辑。
+    # 返回目录for。
     def source_dir_for(kb_id: str) -> str:
         return str(tmp_path / "kb" / kb_id / "sources")
 
@@ -41,13 +41,13 @@ def _make_app(tmp_path, ingest_fn=_ok_ingest, monkeypatch=None):
     return app, source_dir_for
 
 
-# 处理 client 相关逻辑。
+# 创建测试客户端。
 async def _client(app):
     transport = ASGITransport(app=app)
     return AsyncClient(transport=transport, base_url="http://testserver")
 
 
-# 等待 wait job 相关逻辑。
+# 等待任务。
 async def _wait_job(client, job_id, timeout=2.0):
     deadline = time.time() + timeout
     resp = await client.get(f"/v1/index-jobs/{job_id}")

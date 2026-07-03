@@ -5,16 +5,19 @@ from cogdoc.api.app import create_app
 from cogdoc.api.session_store import SessionStore
 
 
+# 声明异步测试使用的后端。
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
 
 
+# 创建测试应用实例。
 def _app(monkeypatch, **kwargs):
     import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
 
+    # 创建测试运行器。
     def runner(doc_id, query, is_local, chat_history, forced_task):
         from cogdoc.service.chat_service import ChatResult
 
@@ -35,6 +38,7 @@ def _app(monkeypatch, **kwargs):
     return create_app(chat_runner=runner, session_store=SessionStore(), **kwargs)
 
 
+# 创建测试客户端。
 async def _client(app):
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver")
 
@@ -42,6 +46,7 @@ async def _client(app):
 # ---- 限流器单元 ----
 
 
+# 验证 token bucket allows burst then throttles 场景。
 def test_token_bucket_allows_burst_then_throttles():
     limiter = TokenBucketRateLimiter(capacity=2, refill_per_second=0.0)
     assert limiter.allow("k") is True
@@ -49,6 +54,7 @@ def test_token_bucket_allows_burst_then_throttles():
     assert limiter.allow("k") is False
 
 
+# 验证 token bucket isolates identities 场景。
 def test_token_bucket_isolates_identities():
     limiter = TokenBucketRateLimiter(capacity=1, refill_per_second=0.0)
     assert limiter.allow("a") is True
@@ -57,11 +63,13 @@ def test_token_bucket_isolates_identities():
     assert limiter.allow("b") is True
 
 
+# 验证 token bucket disabled when capacity zero 场景。
 def test_token_bucket_disabled_when_capacity_zero():
     limiter = TokenBucketRateLimiter(capacity=0, refill_per_second=0.0)
     assert all(limiter.allow("k") for _ in range(100))
 
 
+# 验证 identity cap is enforced under distinct flood 场景。
 def test_identity_cap_is_enforced_under_distinct_flood():
     # 大量各做一次请求的不同身份（桶都未回满），仍必须把内存压回上限。
     limiter = TokenBucketRateLimiter(
@@ -72,6 +80,7 @@ def test_identity_cap_is_enforced_under_distinct_flood():
     assert len(limiter._buckets) <= 10
 
 
+# 验证 eviction is lru keeps recently active 场景。
 def test_eviction_is_lru_keeps_recently_active():
     # 访问会刷新活跃度：淘汰时丢最久未活跃，而非最早创建。
     limiter = TokenBucketRateLimiter(
@@ -84,6 +93,7 @@ def test_eviction_is_lru_keeps_recently_active():
     assert set(limiter._buckets) == {"a", "c"}
 
 
+# 验证 build rate limiter converts per minute 场景。
 def test_build_rate_limiter_converts_per_minute():
     limiter = build_rate_limiter(per_minute=120, burst=60)
     assert limiter.capacity == 60
@@ -93,6 +103,7 @@ def test_build_rate_limiter_converts_per_minute():
 # ---- 鉴权 ----
 
 
+# 验证 auth disabled when no keys 场景。
 @pytest.mark.anyio
 async def test_auth_disabled_when_no_keys(monkeypatch):
     app = _app(monkeypatch, api_keys=set())
@@ -102,6 +113,7 @@ async def test_auth_disabled_when_no_keys(monkeypatch):
     assert resp.status_code == 200
 
 
+# 验证 startup warns when auth disabled 场景。
 @pytest.mark.anyio
 async def test_startup_warns_when_auth_disabled(monkeypatch):
     import cogdoc.api.app as app_module
@@ -116,6 +128,7 @@ async def test_startup_warns_when_auth_disabled(monkeypatch):
     assert any(a[:2] == ("startup", "auth_disabled") for a, _ in events)
 
 
+# 验证 no startup warning when auth enabled 场景。
 @pytest.mark.anyio
 async def test_no_startup_warning_when_auth_enabled(monkeypatch):
     import cogdoc.api.app as app_module
@@ -129,6 +142,7 @@ async def test_no_startup_warning_when_auth_enabled(monkeypatch):
     assert not any(a[:2] == ("startup", "auth_disabled") for a, _ in events)
 
 
+# 验证 missing key rejected 401 场景。
 @pytest.mark.anyio
 async def test_missing_key_rejected_401(monkeypatch):
     app = _app(monkeypatch, api_keys={"secret"})
@@ -139,6 +153,7 @@ async def test_missing_key_rejected_401(monkeypatch):
     assert resp.json()["error_code"] == "UNAUTHORIZED"
 
 
+# 验证 wrong key rejected 401 场景。
 @pytest.mark.anyio
 async def test_wrong_key_rejected_401(monkeypatch):
     app = _app(monkeypatch, api_keys={"secret"})
@@ -152,6 +167,7 @@ async def test_wrong_key_rejected_401(monkeypatch):
     assert resp.status_code == 401
 
 
+# 验证 bearer and x api key accepted 场景。
 @pytest.mark.anyio
 async def test_bearer_and_x_api_key_accepted(monkeypatch):
     app = _app(monkeypatch, api_keys={"secret"})
@@ -171,6 +187,7 @@ async def test_bearer_and_x_api_key_accepted(monkeypatch):
     assert via_header.status_code == 200
 
 
+# 验证 health endpoints exempt from auth 场景。
 @pytest.mark.anyio
 async def test_health_endpoints_exempt_from_auth(monkeypatch):
     app = _app(monkeypatch, api_keys={"secret"})
@@ -186,6 +203,7 @@ async def test_health_endpoints_exempt_from_auth(monkeypatch):
 # ---- 限流（端到端）----
 
 
+# 验证 rate limit returns 429 after capacity 场景。
 @pytest.mark.anyio
 async def test_rate_limit_returns_429_after_capacity(monkeypatch):
     limiter = TokenBucketRateLimiter(capacity=2, refill_per_second=0.0)
@@ -202,6 +220,7 @@ async def test_rate_limit_returns_429_after_capacity(monkeypatch):
     assert third.json()["error_code"] == "REQUEST_THROTTLED"
 
 
+# 验证 job polling exempt from rate limit 场景。
 @pytest.mark.anyio
 async def test_job_polling_exempt_from_rate_limit(monkeypatch):
     # 即便桶极小，入库 job 状态轮询也不该被限流（否则长任务轮询会误判失败）。
@@ -216,6 +235,7 @@ async def test_job_polling_exempt_from_rate_limit(monkeypatch):
     assert all(code == 404 for code in statuses)
 
 
+# 验证 job polling still requires auth 场景。
 @pytest.mark.anyio
 async def test_job_polling_still_requires_auth(monkeypatch):
     # 限流豁免不等于鉴权豁免：开了 key 还是要带。
@@ -230,6 +250,7 @@ async def test_job_polling_still_requires_auth(monkeypatch):
     assert authed.status_code == 404
 
 
+# 验证 rate limit is per key 场景。
 @pytest.mark.anyio
 async def test_rate_limit_is_per_key(monkeypatch):
     limiter = TokenBucketRateLimiter(capacity=1, refill_per_second=0.0)

@@ -23,7 +23,7 @@ from cogdoc.tools.retriever.hybrid import HybridRetriever
 from cogdoc.tools.retriever.base_retriever import NullRetriever
 
 
-# 构造 make state 相关逻辑。
+# 构造状态。
 def _make_state(tmp_path, kb_id="kb"):
     epochs = EpochStore(path=str(tmp_path / "epochs.json"))
     return KBState(kb_id, path=str(tmp_path / kb_id / "state.json"), epochs=epochs)
@@ -273,7 +273,7 @@ def test_transactional_build_stale_cleans_and_reraises(tmp_path, monkeypatch):
 
     original_switch = state.switch_active
 
-    # 处理 stale switch 相关逻辑。
+    # 构造或驱动 staleswitch 测试场景。
     def stale_switch(gid):
         raise StaleGenerationError("epoch mismatch")
 
@@ -345,7 +345,7 @@ def test_transactional_empty_stale_marks_failed(tmp_path, monkeypatch):
     kb_id = "kb-empty-stale"
     state = _make_state(tmp_path, kb_id)
 
-    # 处理 stale switch 相关逻辑。
+    # 构造或驱动 staleswitch 测试场景。
     def stale_switch(gid):
         raise StaleGenerationError("epoch mismatch")
 

@@ -7,7 +7,7 @@ from cogdoc.service.kb_locks import compact_locks
 from cogdoc.service.kb_state import KBState
 
 
-# 封装 BackgroundSweeper 的状态与行为。
+# 常驻后台回收：GC 崩溃遗留的僵尸 generation(#12)、淘汰空闲 executor(#13)、压缩锁表(#15)。
 class BackgroundSweeper:
     # 常驻后台回收：GC 崩溃遗留的僵尸 generation(#12)、淘汰空闲 executor(#13)、压缩锁表(#15)。
     def __init__(
@@ -24,7 +24,7 @@ class BackgroundSweeper:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
-    # 启动 start 相关逻辑。
+    # 启动结果。
     def start(self) -> None:
         if self._thread is not None:
             return
@@ -33,14 +33,14 @@ class BackgroundSweeper:
         )
         self._thread.start()
 
-    # 处理 stop 相关逻辑。
+    # 停止。
     def stop(self, join_timeout: float | None = None) -> None:
         # 置停止信号并 join：返回后保证清扫线程不再操作索引，可安全释放进程锁。
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=join_timeout)
 
-    # 处理 loop 相关逻辑。
+    # 循环执行结果。
     def _loop(self) -> None:
         # wait 返回 True 表示收到停止信号；否则超时一轮，执行一次清扫。
         while not self._stop.wait(self._interval):
@@ -49,7 +49,7 @@ class BackgroundSweeper:
             except Exception:
                 log_event("sweeper", "sweep_failed", {}, level=logging.ERROR)
 
-    # 执行清扫 sweep once 相关逻辑。
+    # 清扫单次执行。
     def sweep_once(self) -> None:
         kb_ids = list(self._kb_ids())
         tasks = (
@@ -72,7 +72,7 @@ class BackgroundSweeper:
                     error_class=type(exc).__name__,
                 )
 
-    # 处理 rebuild stale models 相关逻辑。
+    # 完成 rebuildstale模型列表 处理。
     def _rebuild_stale_models(self, kb_ids: list) -> None:
         # active 代的嵌入模型 / 构建版本与当前不符：自动排队重建，不必等用户再次改文档。
         for kb_id in kb_ids:
@@ -93,7 +93,7 @@ class BackgroundSweeper:
                 except Exception:
                     pass
 
-    # 处理 gc stale generations 相关逻辑。
+    # 回收stale索引代。
     def _gc_stale_generations(self, kb_ids: list) -> None:
         # 只回收 failed / superseded / 超租约的在飞代，绝不动 active；清理失败留待下轮重试。
         for kb_id in kb_ids:

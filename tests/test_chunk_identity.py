@@ -13,7 +13,7 @@ from cogdoc.tools.chunker import chunk_paper
 SOURCE_SHA = "a" * 64
 
 
-# 处理 page 相关逻辑。
+# 构造测试页。
 def _page(page: int, text: str) -> dict:
     # 构造最小 ParsedPage 输入。
     return {

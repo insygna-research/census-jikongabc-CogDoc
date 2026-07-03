@@ -4,14 +4,17 @@ from tests._native import require_rust_core
 rust_core = require_rust_core("scan_pdf_manifest_native")
 
 
+# 写入。
 def _write(path, content: bytes = b"%PDF-1.4 dummy"):
     path.write_bytes(content)
 
 
+# 构造或驱动 names 测试场景。
 def _names(manifest):
     return [d["name"] for d in manifest["documents"]]
 
 
+# 验证 only pdf files are scanned 场景。
 def test_only_pdf_files_are_scanned(tmp_path):
     # 验证扫描只收录 PDF 文件。
     _write(tmp_path / "a.pdf")
@@ -22,6 +25,7 @@ def test_only_pdf_files_are_scanned(tmp_path):
     assert _names(manifest) == ["a.pdf"]
 
 
+# 验证 uppercase extension is included 场景。
 def test_uppercase_extension_is_included(tmp_path):
     # 验证 PDF 后缀大小写不敏感。
     _write(tmp_path / "lower.pdf")
@@ -31,6 +35,7 @@ def test_uppercase_extension_is_included(tmp_path):
     assert _names(manifest) == ["UPPER.PDF", "lower.pdf"]
 
 
+# 验证 documents are sorted by name 场景。
 def test_documents_are_sorted_by_name(tmp_path):
     # 验证 manifest 文档列表按文件名稳定排序。
     for name in ["c.pdf", "a.pdf", "b.pdf"]:
@@ -40,6 +45,7 @@ def test_documents_are_sorted_by_name(tmp_path):
     assert _names(manifest) == ["a.pdf", "b.pdf", "c.pdf"]
 
 
+# 验证 manifest carries fingerprint fields 场景。
 def test_manifest_carries_fingerprint_fields(tmp_path):
     # 验证 manifest 返回文件名、大小、哈希与知识库 ID。
     _write(tmp_path / "a.pdf", b"hello world")
@@ -52,6 +58,7 @@ def test_manifest_carries_fingerprint_fields(tmp_path):
     assert manifest["doc_id"] == "kb"
 
 
+# 验证 content change triggers hash change 场景。
 def test_content_change_triggers_hash_change(tmp_path):
     # 验证 PDF 内容变化会改变指纹并触发 stale。
     pdf = tmp_path / "a.pdf"
@@ -65,6 +72,7 @@ def test_content_change_triggers_hash_change(tmp_path):
     assert before != after
 
 
+# 验证 identical content is stable across scans 场景。
 def test_identical_content_is_stable_across_scans(tmp_path):
     # 验证相同内容重复扫描得到相同 documents 列表。
     _write(tmp_path / "a.pdf", b"stable bytes")
@@ -73,6 +81,7 @@ def test_identical_content_is_stable_across_scans(tmp_path):
     assert first["documents"] == second["documents"]
 
 
+# 验证 missing directory raises 场景。
 def test_missing_directory_raises(tmp_path):
     # 验证目录不存在时 native scanner 抛出异常。
     missing = tmp_path / "does_not_exist"

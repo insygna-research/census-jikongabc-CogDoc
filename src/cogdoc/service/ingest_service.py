@@ -43,21 +43,21 @@ INDEX_BUILD_VERSION = (
 )
 
 
-# 处理 stamp index build version 相关逻辑。
+# 完成 stamp索引buildversion 处理。
 def stamp_index_build_version(manifest: dict) -> dict:
     # 写入当前构建版本；run.py 启动检查与入库共用，保证两处门控一致。
     manifest["index_build_version"] = INDEX_BUILD_VERSION
     return manifest
 
 
-# 封装 IngestDocResult 的状态与行为。
+# 定义 IngestDocResult 数据结构。
 @dataclass(frozen=True)
 class IngestDocResult:
     name: str
     chunk_count: int
 
 
-# 封装 IngestResult 的状态与行为。
+# 定义 IngestResult 数据结构。
 @dataclass(frozen=True)
 class IngestResult:
     kb_id: str
@@ -66,47 +66,44 @@ class IngestResult:
     documents: list[IngestDocResult] = field(default_factory=list)
 
 
-# 封装 IndexInconsistencyError 的状态与行为。
+# 写后两路索引不一致（如向量清理静默失败、部分写）：标记入库失败而非误报成功。
 class IndexInconsistencyError(Exception):
-    # 写后两路索引不一致（如向量清理静默失败、部分写）：标记入库失败而非误报成功。
     pass
 
 
-# 封装 KBCleanupError 的状态与行为。
+# 删库时部分代资源清理失败：manifest 保留以支持调用方重试，避免孤儿 Chroma/BM25 数据丢失 GC 记录。
 class KBCleanupError(Exception):
-    # 删库时部分代资源清理失败：manifest 保留以支持调用方重试，避免孤儿 Chroma/BM25 数据丢失 GC 记录。
     pass
 
 
-# 封装 IncrementalPlan 的状态与行为。
+# 需要重新解析的文档名（新增+内容改变）与需要从索引删除的文件名（删除+改变）。
 @dataclass(frozen=True)
 class IncrementalPlan:
-    # 需要重新解析的文档名（新增+内容改变）与需要从索引删除的文件名（删除+改变）。
     to_parse: list[str]
     removed_sources: set[str]
 
 
-# 列出 list pdf files 相关逻辑。
+# 列出 pdf files。
 def list_pdf_files(source_dir: str) -> list[str]:
     if not os.path.isdir(source_dir):
         return []
     return sorted(f for f in os.listdir(source_dir) if f.lower().endswith(".pdf"))
 
 
-# 使缓存失效 invalidate engine cache 相关逻辑。
+# 使失效检索引擎缓存。
 def _invalidate_engine_cache(kb_id: str) -> None:
     # 只失效本库引擎，否则 /chat 命中旧引擎读旧索引；不波及其他 kb。
     RetrieverFactory.invalidate(kb_id)
 
 
-# 移除 remove manifest 相关逻辑。
+# 移除manifest。
 def _remove_manifest(kb_id: str) -> None:
     manifest_file = manifest_path(kb_id)
     if os.path.exists(manifest_file):
         os.remove(manifest_file)
 
 
-# 删除 delete kb index 相关逻辑。
+# 删除 kb index。
 def delete_kb_index(kb_id: str) -> None:
     # 删库索引：清向量/BM25 + 删 manifest + 失效引擎缓存。clear 失败不删 manifest，避免旧文档残留泄露。 取 KB 写锁，与正在运行/排队的入库任务串行，避免删库后任务又把索引/manifest 写回去。
     with kb_write_lock(kb_id):
@@ -121,7 +118,7 @@ def delete_kb_index(kb_id: str) -> None:
         _invalidate_engine_cache(kb_id)
 
 
-# 清理 purge generation external 相关逻辑。
+# 清理 generation external。
 def _purge_generation_external(kb_id: str, gen_id: str) -> None:
     # 删库专用：只清理 KB 目录外的 Chroma 集合与 BM25 pkl；state.json 与 gen 快照随 KB 目录整体删除。 不调用 remove_generation（其禁止删 active），避免正常非空 KB 删库被误判失败。
     if has_readers(kb_id):
@@ -155,7 +152,7 @@ _active_timers: set = set()
 _timers_lock = threading.Lock()
 
 
-# 启动 start tracked timer 相关逻辑。
+# 启动tracked定时器。
 def _start_tracked_timer(delay: float, fn, args=()) -> None:
     # 执行后台任务并完成收尾。
     def runner():
@@ -177,7 +174,7 @@ def _start_tracked_timer(delay: float, fn, args=()) -> None:
         raise
 
 
-# 处理 cancel all timers 相关逻辑。
+# 完成 cancelall定时器列表 处理。
 def cancel_all_timers(join_timeout: float | None = 30.0) -> bool:
     # 关闭期调用：取消未触发的 Timer，并有界 join 已进入执行的 runner。 返回是否全部排空（无存活线程）。默认 30s 上界：正常清理能跑完，又不让卡死清理永久挂起 shutdown。 未排空时调用方不应显式释放进程锁——留给进程退出由 OS 释放，保证不会"锁已放但旧线程仍在写"。
     with _timers_lock:
@@ -191,7 +188,7 @@ def cancel_all_timers(join_timeout: float | None = 30.0) -> bool:
     return not any(t.is_alive() for t in timers)
 
 
-# 处理 drain purge queue 相关逻辑。
+# 排空 purge queue。
 def drain_purge_queue(now: float | None = None) -> int:
     # 重试持久化 purge 队列中已过 grace period 的外部资源清理；成功才出队。sweeper 与启动时调用。
     queue = shared_purge_queue()
@@ -206,7 +203,7 @@ def drain_purge_queue(now: float | None = None) -> int:
     return done
 
 
-# 处理 schedule kb purge 相关逻辑。
+# 调度 kb purge。
 def _schedule_kb_purge(kb_id: str, gen_ids: list) -> None:
     # 物理清理入持久队列（带 grace period），并起一个 Timer 促其尽快执行；失败/退出由 sweeper 兜底重试。
     not_before = time.time() + GENERATION_CLEANUP_DELAY_SECONDS
@@ -226,7 +223,7 @@ def _schedule_kb_purge(kb_id: str, gen_ids: list) -> None:
         )
 
 
-# 删除 delete kb index transactional 相关逻辑。
+# 删除 kb index transactional。
 def delete_kb_index_transactional(kb_id: str) -> None:
     # 逻辑删库同步完成：deleting 门控读路径与新 mutation、bump epoch、删 manifest、失效缓存。 Chroma/BM25 物理清理入持久队列、延迟 grace period 后执行，避免删掉在途检索正持有的索引。
     with kb_write_lock(kb_id):
@@ -238,18 +235,18 @@ def delete_kb_index_transactional(kb_id: str) -> None:
         _schedule_kb_purge(kb_id, gen_ids)
 
 
-# 标记 mark kb deleted 相关逻辑。
+# 标记知识库deleted。
 def mark_kb_deleted(kb_id: str) -> None:
     # 删库全流程（含 registry 删除）成功后落 deleted tombstone，防旧任务复活读写。
     shared_lifecycle_store().set(kb_id, LIFECYCLE_DELETED)
 
 
-# 处理 documents by name 相关逻辑。
+# 完成 documentsbyname 处理。
 def _documents_by_name(manifest: dict) -> dict[str, str]:
     return {doc["name"]: doc["sha256"] for doc in manifest.get("documents", [])}
 
 
-# 规划 plan incremental 相关逻辑。
+# 完成 计划incremental 处理。
 def plan_incremental(previous: dict, current: dict) -> IncrementalPlan | None:
     # 无上一版、库标识或分块身份契约版本变化时返回 None，交由全量重建。
     if not previous:
@@ -271,7 +268,7 @@ def plan_incremental(previous: dict, current: dict) -> IncrementalPlan | None:
     return IncrementalPlan(sorted(added + changed), removed_sources)
 
 
-# 解析 parse and chunk 相关逻辑。
+# 解析and分块。
 def _parse_and_chunk(
     source_dir: str,
     names: list[str],
@@ -293,14 +290,14 @@ def _parse_and_chunk(
     return all_chunks, doc_results
 
 
-# 校验 verify consistent 相关逻辑。
+# 校验consistent。
 def _verify_consistent(engine) -> None:
     # 写后校验两路 chunk_id 一致：识破静默的清理失败/部分写，避免残留旧块却报成功。
     if not engine.is_consistent():
         raise IndexInconsistencyError("index stores inconsistent after write")
 
 
-# 处理 full rebuild 相关逻辑。
+# 完成 fullrebuild 处理。
 def _full_rebuild(
     engine, kb_id, source_dir, pdf_files, manifest, source_hash_by_name
 ) -> IngestResult:
@@ -323,7 +320,7 @@ def _full_rebuild(
     return IngestResult(kb_id, len(pdf_files), len(all_chunks), doc_results)
 
 
-# 处理 incremental apply 相关逻辑。
+# 完成 incrementalapply 处理。
 def _incremental_apply(
     engine, kb_id, source_dir, pdf_files, manifest, plan, source_hash_by_name
 ) -> IngestResult:
@@ -348,14 +345,14 @@ def _incremental_apply(
     return IngestResult(kb_id, len(pdf_files), engine.count(), doc_results)
 
 
-# 构建 build kb index 相关逻辑。
+# 构建知识库索引。
 def build_kb_index(kb_id: str, source_dir: str) -> IngestResult:
     # 取 KB 写锁串行化整个入库：扫描→hash→解析→写索引期间，删库与文件增删都被挡住， 杜绝「manifest hash 属旧文件、chunk 来自新文件」与并发任务交错。
     with kb_write_lock(kb_id):
         return _build_kb_index_locked(kb_id, source_dir)
 
 
-# 构建 build kb index locked 相关逻辑。
+# 构建知识库索引locked。
 def _build_kb_index_locked(kb_id: str, source_dir: str) -> IngestResult:
     engine = RetrieverFactory.get_engine(kb_id)
     pdf_files = list_pdf_files(source_dir)
@@ -397,7 +394,7 @@ def _build_kb_index_locked(kb_id: str, source_dir: str) -> IngestResult:
 GENERATION_CLEANUP_DELAY_SECONDS = 60.0
 
 
-# 处理 hardlink snapshot 相关逻辑。
+# 完成 hardlink快照 处理。
 def _hardlink_snapshot(source_dir: str, gen_dir: str, filenames: list[str]) -> None:
     # 源文件不可变快照：硬链接到 generation 工作区，避免构建期间源文件被改写。 跨文件系统时退化为 copy（语义不变，只是多占磁盘）。
     os.makedirs(gen_dir, exist_ok=True)
@@ -410,7 +407,7 @@ def _hardlink_snapshot(source_dir: str, gen_dir: str, filenames: list[str]) -> N
             shutil.copy2(src, dst)
 
 
-# 校验 verify staging 相关逻辑。
+# 校验暂存区。
 def _verify_staging(staging: HybridRetriever, all_chunks: list) -> None:
     # staging 入库后精确校验：count 与 chunk_id 集合都要与 all_chunks 完全吻合。 仅靠两路集合相等（_verify_consistent）无法发现「两路以相同方式少写」的情况。
     expected_count = len(all_chunks)
@@ -432,7 +429,7 @@ def _verify_staging(staging: HybridRetriever, all_chunks: list) -> None:
         raise IndexInconsistencyError("staging vector/bm25 chunk_id sets diverge")
 
 
-# 处理 cleanup generation storage 相关逻辑。
+# 完成 cleanup索引代storage 处理。
 def _cleanup_generation_storage(kb_id: str, gen_id: str) -> None:
     # 回收单个非 active generation 的全部磁盘资源：Chroma 集合、BM25 pkl、gen 快照目录。 持 kb_write_lock 与构建/删库串行，避免 GC 与 state.json 写入并发丢更新或 .tmp 互相覆盖。
     with kb_write_lock(kb_id):
@@ -482,7 +479,7 @@ def _cleanup_generation_storage(kb_id: str, gen_id: str) -> None:
             raise KBCleanupError(f"generation {gen_id} 资源未完全清理")
 
 
-# 处理 cleanup generation storage quiet 相关逻辑。
+# 完成 cleanup索引代storagequiet 处理。
 def _cleanup_generation_storage_quiet(kb_id: str, gen_id: str) -> None:
     # 异步 GC 包装：清理失败由下次 stale GC 扫描重试，daemon 线程不向上抛噪声。
     try:
@@ -491,7 +488,7 @@ def _cleanup_generation_storage_quiet(kb_id: str, gen_id: str) -> None:
         pass
 
 
-# 处理 schedule generation cleanup 相关逻辑。
+# 调度 generation cleanup。
 def _schedule_generation_cleanup(kb_id: str, gen_id: str) -> None:
     # 延迟 GENERATION_CLEANUP_DELAY_SECONDS 秒后在 daemon 线程异步清理旧代（受统一 Timer 注册表管理）。 grace period 保证切代前已获取旧引擎的在途请求能完成，再物理删除 Chroma 集合。
     _start_tracked_timer(
@@ -501,7 +498,7 @@ def _schedule_generation_cleanup(kb_id: str, gen_id: str) -> None:
     )
 
 
-# 构建 build staging engine 相关逻辑。
+# 构建暂存区检索引擎。
 def _build_staging_engine(kb_id: str, gen_id: str) -> HybridRetriever:
     collection_id = get_settings().kb_collection_id(kb_id, gen_id)
     return HybridRetriever(
@@ -510,7 +507,7 @@ def _build_staging_engine(kb_id: str, gen_id: str) -> HybridRetriever:
     )
 
 
-# 规划 plan transactional incremental 相关逻辑。
+# 完成 计划transactionalincremental 处理。
 def _plan_transactional_incremental(state: KBState, manifest: dict):
     # 以 active generation 的文档清单作 diff 基准：它是已提交集合的权威记录，绝不像 manifest 文件那样滞后。
     prev_active = state.active()
@@ -525,7 +522,7 @@ def _plan_transactional_incremental(state: KBState, manifest: dict):
     return (plan, prev_active) if plan is not None else (None, None)
 
 
-# 处理 fill staging incremental 相关逻辑。
+# 填充暂存区incremental。
 def _fill_staging_incremental(
     kb_id, staging, prev_active, plan, gen_dir, source_hash_by_name
 ):
@@ -587,7 +584,7 @@ def _fill_staging_incremental(
     return all_chunks, doc_results
 
 
-# 处理 populate staging 相关逻辑。
+# 填充暂存区。
 def _populate_staging(
     kb_id, state, gen_dir, pdf_files, manifest, source_hash_by_name, staging
 ):
@@ -615,7 +612,7 @@ def _populate_staging(
     return all_chunks, doc_results
 
 
-# 构建 build kb index transactional 相关逻辑。
+# 构建知识库索引transactional。
 def build_kb_index_transactional(
     kb_id: str, source_dir: str, on_commit=None
 ) -> IngestResult:
@@ -624,7 +621,7 @@ def build_kb_index_transactional(
         return _build_transactional_locked(kb_id, source_dir, on_commit)
 
 
-# 构建 build transactional locked 相关逻辑。
+# 构建transactionallocked。
 def _build_transactional_locked(
     kb_id: str, source_dir: str, on_commit=None
 ) -> IngestResult:
@@ -692,7 +689,7 @@ def _build_transactional_locked(
     return IngestResult(kb_id, len(pdf_files), len(all_chunks), doc_results)
 
 
-# 执行事务化 transactional empty 相关逻辑。
+# 完成 transactionalempty 处理。
 def _transactional_empty(kb_id: str, state: KBState, on_commit=None) -> IngestResult:
     gen_id = state.begin_generation(Embedder.MODEL_NAME, INDEX_BUILD_VERSION)
     try:

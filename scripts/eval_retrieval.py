@@ -14,6 +14,7 @@ from cogdoc.graph.subgraphs.qa import RetrieverFactory
 from cogdoc.tools.eval.retrieval_metrics import aggregate, evaluate_query
 
 
+# 返回项目根目录路径。
 def _project_path(path: str) -> Path:
     resolved = Path(path)
     return resolved if resolved.is_absolute() else ROOT / resolved
@@ -26,6 +27,7 @@ EXAMPLE_EVAL_SET = _project_path(_settings.eval_example_set_path)
 DEFAULT_K_VALUES = [1, 3, 5, 9]
 
 
+# 解析 default eval set。
 def resolve_default_eval_set() -> Path:
     if DEFAULT_EVAL_SET.exists():
         return DEFAULT_EVAL_SET
@@ -36,6 +38,7 @@ def resolve_default_eval_set() -> Path:
     return EXAMPLE_EVAL_SET
 
 
+# 加载 eval set。
 def load_eval_set(path: Path) -> List[dict]:
     items = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -45,6 +48,7 @@ def load_eval_set(path: Path) -> List[dict]:
     return items
 
 
+# 检索 sources。
 def retrieve_sources(query: str, doc_id: str, top_k: int, rerank: bool) -> List[str]:
     engine = RetrieverFactory.get_engine(doc_id)
     docs = engine.search(query=query, top_k=top_k)
@@ -55,6 +59,7 @@ def retrieve_sources(query: str, doc_id: str, top_k: int, rerank: bool) -> List[
     return [doc["meta"]["source"] for doc in docs]
 
 
+# 运行 eval。
 def run_eval(items: List[dict], k_values: List[int], rerank: bool) -> dict:
     top_k = max(k_values)
     rows: List[dict] = []
@@ -82,6 +87,7 @@ def run_eval(items: List[dict], k_values: List[int], rerank: bool) -> dict:
     }
 
 
+# 输出 report。
 def print_report(report: dict) -> None:
     cfg = report["config"]
     print(
@@ -102,6 +108,7 @@ def print_report(report: dict) -> None:
     print()
 
 
+# 生成对比 baseline。
 def compare_baseline(report: dict, baseline_path: Path) -> int:
     baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
     base_agg = baseline.get("aggregate", {})
@@ -126,6 +133,7 @@ def compare_baseline(report: dict, baseline_path: Path) -> int:
     return 1 if regressed else 0
 
 
+# 启动入口。
 def main() -> int:
     parser = argparse.ArgumentParser(description="离线检索评测 harness")
     parser.add_argument(
