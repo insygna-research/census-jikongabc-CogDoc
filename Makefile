@@ -6,13 +6,14 @@ MATURIN ?= maturin
 # src-layout：包源码在 src/，入口经 PYTHONPATH 注入，无需先安装即可 run/serve/test。
 export PYTHONPATH := src
 
-.PHONY: help install native check test run debug eval eval-quality serve frontend
+.PHONY: help install native check test smoke-api run debug eval eval-quality serve frontend
 
 help:
 	@echo "make install - 可编辑安装含开发依赖 (pip install -e '.[dev]')"
 	@echo "make native  - 构建 rust_core 原生扩展 (cd rust_core && maturin develop --release)"
 	@echo "make check   - 校验原生扩展是否就绪 (scripts/check_native.py)"
 	@echo "make test    - 运行 pytest 全量测试"
+	@echo "make smoke-api - 运行不依赖真实模型/索引的 API E2E smoke"
 	@echo "make eval    - 离线检索评测 recall@k/MRR (scripts/eval_retrieval.py)"
 	@echo "make eval-quality - 离线质量评测 router/citation/faithfulness (scripts/eval_quality.py)"
 	@echo "make run     - 启动多库多对话控制台 (python -m cogdoc.cli)"
@@ -32,6 +33,9 @@ check:
 
 test:
 	$(PYTHON) -m pytest
+
+smoke-api:
+	$(PYTHON) scripts/smoke_api.py
 
 eval:
 	$(PYTHON) scripts/eval_retrieval.py
