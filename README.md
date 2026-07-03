@@ -2,7 +2,7 @@
 
 > ⭐ **If CogDoc helps you, please drop a star** — it keeps the project moving and new features coming.
 
-[English](README.md) · [简体中文](docs/README_zh-CN.md)
+[English](README.md) · [简体中文](docs/README_zh-CN.md) · [路线图](docs/ROADMAP_zh-CN.md)
 
 A local RAG knowledge-base console for individuals and teams, built on **LangGraph multi-agent orchestration** with a **deterministic Rust core (PyO3 + maturin)** underneath. It answers questions, summarizes a single document, and compares multiple documents over your own PDF knowledge base — and every generated claim is pinned back to a `[source:Pn]` citation that is *checked, not trusted*. Use it from a **CLI console** or a **Streamlit web app** backed by a FastAPI service.
 
@@ -18,7 +18,7 @@ A local RAG knowledge-base console for individuals and teams, built on **LangGra
 - **Multiple knowledge bases · multiple conversations · persistent memory** — each KB runs many parallel conversations; history is persisted to SQLite (long-term memory) and survives refresh/restart for replay. Every question carries a recent window of the dialogue (short-term memory, last 12 messages by default) for multi-turn coreference, and only citation-validated answers enter memory so wrong answers never poison later turns.
 - **Two front ends** — a slash-command CLI console and a Streamlit web UI over a FastAPI backend with streaming, history, citations, and feedback.
 
-> The screenshots below are placeholders — add real images under `docs/images/` to fill them in.
+
 
 1. **Web chat (Streamlit).** Pick a knowledge base, ask in natural language, watch the answer stream, then inspect the citation sources and evidence snippets and leave 👍/👎 feedback.
 
@@ -149,7 +149,7 @@ If `LLM_API_KEY`-style API keys are configured, requests are authenticated and r
             │ hybrid retrieval                     │ native kernels
 ┌───────────▼────────────┐            ┌────────────▼───────────────┐
 │  Chroma (vectors)      │            │  Rust core (PyO3 + maturin) │
-│  BM25 tokenized corpus │ ◄────────► │  tokenize · BM25 · RRF ·    │
+│  BM25 native artifact  │ ◄────────► │  tokenize · BM25 · RRF ·    │
 │  PDFs via PyMuPDF      │            │  SHA-256 · citation check   │
 └────────────────────────┘            └─────────────────────────────┘
 ```
@@ -166,7 +166,7 @@ Driven by `build_kb_index_transactional` whenever a KB's files change (`/add`, `
 2. **Compare** — `manifests_match` reuses the index only if `doc_id`, `chunk_identity_version`, and every `{name, sha256}` match the saved manifest; any mismatch forces a rebuild.
 3. **Parse** — `smart_parse` (PyMuPDF) extracts page text, reflows two-column layouts by block center-x, and flags likely scanned pages (`is_ocr_fallback`). No OCR is performed; flagged pages contribute no text.
 4. **Chunk** — `chunk_paper` keeps each chunk under 600 chars with 60-char overlap (30-char min), preferring paragraph, sentence/semicolon, newline, and whitespace boundaries before falling back to a fixed window for very long unbroken text. Each chunk stores up to 160 chars of surrounding context, maps back to its page span via `bisect`, and receives a stable `chunk_id`.
-5. **Index** — chunks land in Chroma (vector) and a pickled tokenized corpus; on load the native `Bm25Index` is rebuilt from that corpus. `save_index_manifest` persists the manifest. Tokenization uses `tokenize_mixed_text_native` (`jieba-rs` for Chinese, Snowball stemming + stopword removal for English).
+5. **Index** — chunks land in Chroma (vector) and a persisted BM25 artifact that stores a compact chunk registry plus native `Bm25Index` bytes. Loading restores the native index from bytes instead of rebuilding it from a Python tokenized corpus. `save_index_manifest` persists the manifest. Tokenization uses `tokenize_mixed_text_native` / `tokenize_corpus_native` (`jieba-rs` for Chinese, Snowball stemming + stopword removal for English).
 
 **Chunk identity contract:**
 
@@ -190,7 +190,7 @@ chunk_id = sha256:{source_sha256}:src:{source_name}:p{page_start}-p{page_end}:c{
 
 ## Native Core
 
-`rust_core` is a PyO3/maturin extension, loaded via `tools.rust_core_loader.ensure_rust_core`, which fails fast with a `maturin develop` hint if the build is missing or a symbol is stale. It exposes five native symbols, all listed in `scripts/check_native.py` so `make check` fails against a stale build.
+`rust_core` is a PyO3/maturin extension, loaded via `tools.rust_core_loader.ensure_rust_core`, which fails fast with a `maturin develop` hint if the build is missing or a symbol is stale. It exposes six native symbols, all listed in `scripts/check_native.py` so `make check` fails against a stale build.
 
 | Symbol | Module | Purpose |
 | --- | --- | --- |
@@ -198,7 +198,8 @@ chunk_id = sha256:{source_sha256}:src:{source_name}:p{page_start}-p{page_end}:c{
 | `rrf_fusion_native` | `rrf.rs` | Deterministic RRF (`k=60`) merge of vector + BM25 results, keyed on `chunk_id` |
 | `validate_citations_native` | `citation.rs` | Structured citation check → `invalid_sources` / `invalid_pages` / `missing_citations` |
 | `tokenize_mixed_text_native` | `tokenizer.rs` | Mixed CN/EN tokenizer: `jieba-rs` for Chinese, Snowball stemming + stopword removal for English (identifiers/versions kept verbatim); token-for-token aligned with a Python reference |
-| `Bm25Index` (class) | `bm25.rs` | BM25 index + `score_topk`, bit-aligned with `rank_bm25.BM25Okapi`; top-k selected natively |
+| `tokenize_corpus_native` | `tokenizer.rs` | Batch corpus tokenizer used by BM25 indexing to avoid Python-side per-document tokenization loops |
+| `Bm25Index` (class) | `bm25.rs` | BM25 index + `score_topk` + native bytes persistence, bit-aligned with `rank_bm25.BM25Okapi`; top-k selected natively |
 
 ## Project Layout
 
@@ -258,7 +259,7 @@ Test layering: business logic and the Python↔native API contract are tested in
 ## Known Limitations
 
 - **No OCR.** Scanned or image-only PDFs are not supported — `smart_parse` only reads the text layer and flags such pages as `is_ocr_fallback` without extracting their text. Use PDFs with a real text layer.
-- Summary and Compare are single-pass MVPs; their per-section/per-dimension LLM calls run sequentially (not yet parallelized) and the default section/dimension sets are fixed unless passed through graph state.
+- Summary and Compare are fixed-schema MVPs; cloud mode runs independent section/dimension LLM cells concurrently with stable output order, while local Ollama mode stays serial to avoid memory pressure. The default section/dimension sets are fixed unless passed through graph state.
 - Local Compare intentionally supports only two documents, uses four core dimensions, and skips the extra conclusion generation step to reduce Ollama memory pressure.
 - Citation validation checks physical citation legality (`source` and `page`), not whether the surrounding sentence is semantically perfect, nor whether every sentence is cited.
 - The rewrite similarity threshold defaults to `0.5` and should be calibrated on real project data.

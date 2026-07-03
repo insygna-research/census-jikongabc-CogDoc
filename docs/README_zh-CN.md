@@ -2,7 +2,7 @@
 
 > ⭐ **如果 CogDoc 对你有帮助，欢迎点个 Star** — 这是项目持续迭代和加新功能的动力。
 
-[English](../README.md) · [简体中文](README_zh-CN.md)
+[English](../README.md) · [简体中文](README_zh-CN.md) · [路线图](ROADMAP_zh-CN.md)
 
 一个面向个人 / 企业的本地 RAG 知识库控制台，上层是 **LangGraph 多 Agent 编排**，底层是**确定性 Rust 核心（PyO3 + maturin）**。它能在你自己的 PDF 知识库上做问答、总结单篇文档、对比多篇文档——而且每条生成结论都会绑定回 `[source:Pn]` 引用，并且这个引用是**经过校验的，而非默认可信**。你可以用**命令行控制台**，也可以用基于 FastAPI 服务的 **Streamlit 网页端**。
 
@@ -11,14 +11,20 @@
 ## 功能特点
 
 - **带可验证引用的问答** — 生成被约束在召回的文档块内；捏造的文件/页码标签会被 Rust 校验器抓出，并在自愈循环里重新生成。
+
 - **单文档结构化摘要** — 固定章节，引用从 chunk 元数据确定性绑定。
+
 - **多文档对比** — 在固定维度上逐文档建 profile，按维度渲染带引用的对比块。
+
 - **混合检索、native 打分** — 向量（Chroma + 多语言 BGE-M3）与 BM25 两路召回由 Rust RRF kernel 融合；分词与 BM25 均为 native——中文走 `jieba-rs`，英文做小写化 + Snowball 词干化 + 停用词过滤，中英文都召得回。
+
 - **内容寻址的增量缓存** — 逐文件 SHA-256 manifest 加带版本的 chunk 身份契约：未变化的文件直接复用已建索引，只有 PDF 内容或切块方案真正变化时才增量重建。
+
 - **多知识库 · 多对话 · 持久记忆** — 每个知识库可并行开多个对话；历史落 SQLite 持久化（长期记忆），刷新或重启都不丢、可随时回放。每次提问自动带上最近对话窗口（短期记忆，默认末 12 条消息）做多轮对话与指代消解，且只有通过引用校验的回答才写入记忆，避免错误答案污染后续轮次。
+
 - **两套前端** — 斜杠命令的 CLI 控制台，以及基于 FastAPI 后端、支持流式/历史/引用/反馈的 Streamlit 网页端。
 
-> 下面的截图都是占位图——把真实图片放到 `docs/images/` 即可替换。
+  
 
 1. **网页端对话（Streamlit）。** 选一个知识库，自然语言提问，看着答案流式生成，再展开引用来源和证据片段，并打 👍/👎 反馈。
 
@@ -149,7 +155,7 @@ Streamlit 前端只是 FastAPI 服务上的瘦客户端——你也可以直接�
            │ 混合检索                            │ native 调用
 ┌──────────▼─────────────┐          ┌────────────▼───────────────┐
 │  Chroma（向量）         │          │  Rust 核心（PyO3 + maturin）│
-│  BM25 分词语料          │ ◄──────► │  分词 · BM25 · RRF ·        │
+│  BM25 native artifact   │ ◄──────► │  分词 · BM25 · RRF ·        │
 │  PDF 经 PyMuPDF 解析    │          │  SHA-256 · 引用校验         │
 └─────────────────────────┘          └─────────────────────────────┘
 ```
@@ -166,7 +172,7 @@ Python 层负责图编排、Prompt、模型客户端、索引、CLI 控制台以
 2. **比对** — `manifests_match` 仅当 `doc_id`、`chunk_identity_version` 及每个 `{name, sha256}` 都与已存 manifest 一致时才复用索引；任一不匹配都强制重建。
 3. **解析** — `smart_parse`（PyMuPDF）抽取页文本，按文本块中心 x 坐标重排双栏布局，对疑似扫描页打 `is_ocr_fallback` 标记。不做 OCR；被标记的页不贡献任何文字。
 4. **切块** — `chunk_paper` 以 600 字符为硬上限、60 字符 overlap（最小 30）切过页文本流；边界优先按段落、句末标点/分号、换行/空白确定，超长无边界文本才退回固定窗口。每个 chunk 会保存前后最多 160 字符的定位上下文，通过 `bisect` 映射回页跨度，并赋予稳定的 `chunk_id`。
-5. **建索引** — chunk 写入 Chroma（向量）和 pickle 持久化的分词语料；加载时由 native `Bm25Index` 从该语料重建。`save_index_manifest` 落盘 manifest。分词走 `tokenize_mixed_text_native`（中文 `jieba-rs`，英文 Snowball 词干化 + 停用词过滤）。
+5. **建索引** — chunk 写入 Chroma（向量）和 BM25 持久化 artifact；BM25 artifact 保存精简 chunk registry 与 native `Bm25Index` 字节，加载时直接从字节恢复 native 索引，不再从 Python 分词语料重建。`save_index_manifest` 落盘 manifest。分词走 `tokenize_mixed_text_native` / `tokenize_corpus_native`（中文 `jieba-rs`，英文 Snowball 词干化 + 停用词过滤）。
 
 **Chunk 身份契约：**
 
@@ -190,7 +196,7 @@ chunk_id = sha256:{source_sha256}:src:{source_name}:p{page_start}-p{page_end}:c{
 
 ## Rust 原生核心
 
-`rust_core` 是 PyO3/maturin 扩展，通过 `tools.rust_core_loader.ensure_rust_core` 加载；若构建缺失或符号过期，会尽早失败并给出 `maturin develop` 提示。共暴露五个 native 符号，全部登记在 `scripts/check_native.py`，使 `make check` 能对旧构建报错。
+`rust_core` 是 PyO3/maturin 扩展，通过 `tools.rust_core_loader.ensure_rust_core` 加载；若构建缺失或符号过期，会尽早失败并给出 `maturin develop` 提示。共暴露六个 native 符号，全部登记在 `scripts/check_native.py`，使 `make check` 能对旧构建报错。
 
 | 符号 | 模块 | 用途 |
 | --- | --- | --- |
@@ -198,7 +204,8 @@ chunk_id = sha256:{source_sha256}:src:{source_name}:p{page_start}-p{page_end}:c{
 | `rrf_fusion_native` | `rrf.rs` | 对 vector + BM25 结果做确定性 RRF（`k=60`）融合，以 `chunk_id` 为键 |
 | `validate_citations_native` | `citation.rs` | 结构化引用校验 → `invalid_sources` / `invalid_pages` / `missing_citations` |
 | `tokenize_mixed_text_native` | `tokenizer.rs` | 中英混合分词：中文走 `jieba-rs`，英文做 Snowball 词干化 + 停用词过滤（标识符/版本号原样保留），与 Python 参照逐 token 对齐 |
-| `Bm25Index`（类） | `bm25.rs` | BM25 索引 + `score_topk`，与 `rank_bm25.BM25Okapi` 逐位对齐，top-k 在 native 端选出 |
+| `tokenize_corpus_native` | `tokenizer.rs` | BM25 建库使用的批量语料分词，避免 Python 侧逐文档分词循环 |
+| `Bm25Index`（类） | `bm25.rs` | BM25 索引 + `score_topk` + native 字节持久化，与 `rank_bm25.BM25Okapi` 逐位对齐，top-k 在 native 端选出 |
 
 ## 项目结构
 
@@ -258,7 +265,7 @@ CogDoc/
 ## 已知限制
 
 - **未做 OCR。** 不支持扫描版/纯图片 PDF——`smart_parse` 只读文本层，并把这类页面标记为 `is_ocr_fallback`，不抽取其文字。请使用带真实文字层的 PDF。
-- Summary 与 Compare 是单遍 MVP：逐章节/逐维度的 LLM 调用串行执行（尚未并发），默认章节/维度集合固定，除非通过 graph state 传入自定义配置。
+- Summary 与 Compare 是固定 schema MVP：云端模式会并发执行相互独立的章节/维度 LLM cell，并保持输出顺序稳定；本地 Ollama 模式为避免内存压力仍走串行。默认章节/维度集合固定，除非通过 graph state 传入自定义配置。
 - 本地 Compare 有意限制为 2 篇文档、4 个核心维度，并跳过额外结论生成，以降低 Ollama 内存压力。
 - Citation 校验只证明引用的 `source` 和 `page` 物理合法，不证明整句话语义完全正确，也不强制每句都带引用。
 - Rewrite 相似度阈值默认 `0.5`，后续应基于真实数据标定。
