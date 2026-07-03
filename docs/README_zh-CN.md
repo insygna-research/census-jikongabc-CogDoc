@@ -2,7 +2,7 @@
 
 > ⭐ **如果 CogDoc 对你有帮助，欢迎点个 Star** — 这是项目持续迭代和加新功能的动力。
 
-[English](../README.md) · [简体中文](README_zh-CN.md) · [路线图](ROADMAP_zh-CN.md)
+[English](../README.md) · [简体中文](README_zh-CN.md)
 
 一个面向个人 / 企业的本地 RAG 知识库控制台，上层是 **LangGraph 多 Agent 编排**，底层是**确定性 Rust 核心（PyO3 + maturin）**。它能在你自己的 PDF 知识库上做问答、总结单篇文档、对比多篇文档——而且每条生成结论都会绑定回 `[source:Pn]` 引用，并且这个引用是**经过校验的，而非默认可信**。你可以用**命令行控制台**，也可以用基于 FastAPI 服务的 **Streamlit 网页端**。
 
@@ -253,6 +253,9 @@ CogDoc/
 | `make native` | 构建 / 重建 `rust_core`（改过 `.rs` 必跑） |
 | `make check` | 校验扩展可导入且 native 符号齐全 |
 | `make test` | 运行 Python 测试 |
+| `make smoke-api` | 运行不依赖真实模型/索引的 API smoke |
+| `make eval` | 运行离线检索评测（`recall@k`、MRR） |
+| `make eval-quality` | 运行离线质量评测（路由、引用、人工忠实性台账） |
 | `make run` | 启动交互式 CLI 控制台 |
 | `make serve` | 启动 FastAPI 服务（`uvicorn cogdoc.api.app:app`） |
 | `make frontend` | 启动 Streamlit 网页端 |
@@ -261,6 +264,8 @@ CogDoc/
 | `cd rust_core && cargo fmt --check` | 检查 Rust 代码格式 |
 
 测试分层：业务逻辑与 Python↔native API 契约用 Python 覆盖（`tests/`）；纯 Rust 逻辑用 `rust_core/src/` 里的 Rust `#[test]`。依赖 native 的 Python 测试在未构建时会 `importorskip` 跳过，完整回归前请先 `make native`。
+
+离线评测使用 `eval/` 下的本地 JSONL。`make eval` 会基于 `eval/retrieval_eval.jsonl` 统计检索的 `recall@k`、hit rate 和 MRR；干净 checkout 没有本地评测集时会回退到 `eval/retrieval_eval.example.jsonl`。用 `python scripts/eval_retrieval.py --coverage-only` 可以只检查检索评测集是否覆盖单源、多源、无答案场景，不触碰真实索引。`make eval-quality` 会统计路由准确率、引用准确率和人工忠实性台账；加 `--check-coverage` 可检查质量评测集是否覆盖必需 case type 与推荐 layer。`--coverage-only` 有意不允许与 `--json`、`--baseline` 同时使用。
 
 ## 已知限制
 

@@ -2,7 +2,7 @@
 
 > ⭐ **If CogDoc helps you, please drop a star** — it keeps the project moving and new features coming.
 
-[English](README.md) · [简体中文](docs/README_zh-CN.md) · [路线图](docs/ROADMAP_zh-CN.md)
+[English](README.md) · [简体中文](docs/README_zh-CN.md)
 
 A local RAG knowledge-base console for individuals and teams, built on **LangGraph multi-agent orchestration** with a **deterministic Rust core (PyO3 + maturin)** underneath. It answers questions, summarizes a single document, and compares multiple documents over your own PDF knowledge base — and every generated claim is pinned back to a `[source:Pn]` citation that is *checked, not trusted*. Use it from a **CLI console** or a **Streamlit web app** backed by a FastAPI service.
 
@@ -247,6 +247,9 @@ Requirements: Python 3.11+ (developed on 3.13; the extension targets 3.8+), a Ru
 | `make native` | Build / rebuild `rust_core` (required after editing `.rs`) |
 | `make check` | Verify the extension is importable and all native symbols exist |
 | `make test` | Run the Python test suite |
+| `make smoke-api` | Run an in-process API smoke test without real LLM/index work |
+| `make eval` | Run offline retrieval evaluation (`recall@k`, MRR) |
+| `make eval-quality` | Run offline quality evaluation (router, citations, faithfulness ledger) |
 | `make run` | Start the interactive CLI console |
 | `make serve` | Start the FastAPI service (`uvicorn cogdoc.api.app:app`) |
 | `make frontend` | Start the Streamlit web app |
@@ -255,6 +258,8 @@ Requirements: Python 3.11+ (developed on 3.13; the extension targets 3.8+), a Ru
 | `cd rust_core && cargo fmt --check` | Check Rust formatting |
 
 Test layering: business logic and the Python↔native API contract are tested in Python (`tests/`); pure-Rust logic uses Rust `#[test]` in `rust_core/src/`. Native-dependent Python tests `importorskip` when `rust_core` is not built, so run `make native` before a full regression.
+
+Offline evaluation uses local JSONL files under `eval/`. `make eval` measures retrieval (`recall@k`, hit rate, MRR) against `eval/retrieval_eval.jsonl`, falling back to `eval/retrieval_eval.example.jsonl` on a clean checkout. Use `python scripts/eval_retrieval.py --coverage-only` to check whether the retrieval eval set covers single-source, multi-source, and no-answer cases without touching the real index. `make eval-quality` measures router accuracy, citation accuracy, and the manual faithfulness ledger; add `--check-coverage` to ensure the quality eval set covers the required case types and recommended layers. `--coverage-only` is intentionally incompatible with `--json` and `--baseline`.
 
 ## Known Limitations
 
