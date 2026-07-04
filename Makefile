@@ -6,7 +6,7 @@ MATURIN ?= maturin
 # src-layout：包源码在 src/，入口经 PYTHONPATH 注入，无需先安装即可 run/serve/test。
 export PYTHONPATH := src
 
-.PHONY: help install native check test smoke-api run debug eval eval-coverage eval-quality eval-quality-coverage eval-suite serve frontend
+.PHONY: help install native check test smoke-api run debug eval eval-coverage eval-quality eval-quality-coverage eval-suite eval-suite-report eval-suite-baseline eval-suite-update-baseline serve frontend
 
 help:
 	@echo "make install - 可编辑安装含开发依赖 (pip install -e '.[dev]')"
@@ -19,6 +19,9 @@ help:
 	@echo "make eval-quality - 离线质量评测 router/citation/faithfulness (scripts/eval_quality.py)"
 	@echo "make eval-quality-coverage - 检查质量评测集覆盖面"
 	@echo "make eval-suite - 运行组合评测门禁（覆盖审计 + 质量评测）"
+	@echo "make eval-suite-report - 写入 eval/eval_suite_report.json"
+	@echo "make eval-suite-baseline - 对比 eval/eval_suite_baseline.json"
+	@echo "make eval-suite-update-baseline - 更新 eval/eval_suite_baseline.json"
 	@echo "make run     - 启动多库多对话控制台 (python -m cogdoc.cli)"
 	@echo "make debug   - 启动检索可视化/可观测控制台 (python -m cogdoc.debug)"
 	@echo "make serve   - 启动 FastAPI 服务 (uvicorn cogdoc.api.app:app)"
@@ -54,6 +57,15 @@ eval-quality-coverage:
 
 eval-suite:
 	$(PYTHON) scripts/eval_suite.py
+
+eval-suite-report:
+	$(PYTHON) scripts/eval_suite.py --json eval/eval_suite_report.json
+
+eval-suite-baseline:
+	$(PYTHON) scripts/eval_suite.py --baseline eval/eval_suite_baseline.json
+
+eval-suite-update-baseline:
+	$(PYTHON) scripts/eval_suite.py --update-baseline eval/eval_suite_baseline.json
 
 run:
 	$(PYTHON) -m cogdoc.cli

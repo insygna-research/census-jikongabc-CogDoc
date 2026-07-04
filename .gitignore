@@ -31,3 +31,5 @@ your_documents/
 # 真实评测集绑定私有语料名与本机索引 id，不入库；只提交匿名 example。
 eval/*.jsonl
 !eval/*.example.jsonl
+eval/eval_suite_report.json
+eval/eval_suite_baseline.json
