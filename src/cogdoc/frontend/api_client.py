@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Iterable, Iterator
+from typing import Callable, Iterable, Iterator
 import httpx
 
 DEFAULT_TIMEOUT = 180.0
@@ -171,6 +171,7 @@ class CogDocClient:
         mode: str = "auto",
         session_id: str | None = None,
         is_local: bool = False,
+        on_response: Callable[[httpx.Response], None] | None = None,
     ) -> Iterator[tuple[str, dict]]:
         payload = self._chat_payload(kb_id, query, mode, session_id, is_local)
         with httpx.stream(
@@ -180,6 +181,8 @@ class CogDocClient:
             timeout=self.timeout,
             headers=self._headers,
         ) as response:
+            if on_response is not None:
+                on_response(response)
             if response.status_code != 200:
                 # 流式响应非 200 不会抛异常，需读出 body 转成 error 事件，避免静默成空答案。
                 response.read()

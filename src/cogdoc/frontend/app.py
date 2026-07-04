@@ -1,4 +1,6 @@
 import os
+import queue
+import threading
 import time
 import uuid
 import streamlit as st
@@ -22,28 +24,46 @@ def _init_state() -> None:
         st.session_state.session_id = st.query_params.get("sid") or uuid.uuid4().hex
         st.query_params["sid"] = st.session_state.session_id
     st.session_state.setdefault("kb_id", None)
-    st.session_state.setdefault("messages", [])
     st.session_state.setdefault("msg_seq", 0)
-    st.session_state.setdefault("restored_for", None)
-    st.session_state.setdefault("answering", False)
-    st.session_state.setdefault("pending_prompt", None)
-    st.session_state.setdefault("pending_mode", None)
+    st.session_state.setdefault("messages_by_context", {})
+    st.session_state.setdefault("restored_contexts", set())
+    st.session_state.setdefault("pending_streams", {})
+    # 兼容旧状态：升级前只有一份全局 messages，迁移到当前 (kb, session) 桶里。
+    if "messages" in st.session_state:
+        if st.session_state.kb_id and st.session_state.messages:
+            st.session_state.messages_by_context.setdefault(
+                _context_key(st.session_state.kb_id, st.session_state.session_id),
+                st.session_state.messages,
+            )
+        st.session_state.pop("messages", None)
+    for legacy_key in ("restored_for", "answering", "pending_prompt", "pending_mode"):
+        st.session_state.pop(legacy_key, None)
     # 本会话内已知的对话 id（按 kb），与后端列表合并，保证空/新对话也留得住、点得到。
     st.session_state.setdefault("known_sessions", {})
+
+
+def _context_key(kb_id: str, session_id: str | None = None) -> tuple[str, str]:
+    return (kb_id, session_id or st.session_state.session_id)
+
+
+def _messages_for(kb_id: str, session_id: str | None = None) -> list[dict]:
+    return st.session_state.messages_by_context.setdefault(
+        _context_key(kb_id, session_id), []
+    )
 
 
 # 恢复历史记录。
 def _restore_history(kb_id: str) -> None:
     # kb 或 session 变化时重载该 kb 的历史；同一 (kb, session) 内不重复拉，保留实时追加的消息。
-    marker = (kb_id, st.session_state.session_id)
-    if st.session_state.restored_for == marker:
+    marker = _context_key(kb_id)
+    if marker in st.session_state.restored_contexts:
         return
     try:
         resp = _client().get_session_history(st.session_state.session_id, kb_id)
         turns = resp.json().get("messages", []) if resp.status_code == 200 else []
     except Exception:
         turns = []
-    st.session_state.messages = [
+    st.session_state.messages_by_context[marker] = [
         {
             "role": turn.get("role", "assistant"),
             "content": turn.get("content", ""),
@@ -51,7 +71,7 @@ def _restore_history(kb_id: str) -> None:
         }
         for turn in turns
     ]
-    st.session_state.restored_for = marker
+    st.session_state.restored_contexts.add(marker)
 
 
 # 构造label。
@@ -62,11 +82,9 @@ def _page_label(page) -> str:
 
 # 切换会话。
 def _switch_session(session_id: str) -> None:
-    # 切换/新建对话：换 session_id（同步 URL）、清空界面、触发重载历史。
+    # 切换/新建对话：换 session_id（同步 URL）；消息按 (kb, session) 分桶，不清其他对话。
     st.session_state.session_id = session_id
     st.query_params["sid"] = session_id
-    st.session_state.messages = []
-    st.session_state.restored_for = None
     st.rerun()
 
 
@@ -276,14 +294,189 @@ def _poll_job(client: CogDocClient, job_id: str) -> None:
             )
 
 
+def _stream_chat_worker(
+    *,
+    api_url: str,
+    kb_id: str,
+    session_id: str,
+    prompt: str,
+    mode: str,
+    is_local: bool,
+    stop_event: threading.Event,
+    outbox: queue.Queue,
+) -> None:
+    # 后台线程只碰队列和 stop_event，不直接写 Streamlit 状态，避免跨线程 UI 状态竞争。
+    try:
+        client = CogDocClient(api_url)
+        for event, data in client.stream_chat(
+            kb_id,
+            prompt,
+            mode=mode,
+            session_id=session_id,
+            is_local=is_local,
+            on_response=lambda response: outbox.put(
+                ("response", {"response": response})
+            ),
+        ):
+            if stop_event.is_set():
+                break
+            outbox.put((event, data))
+    except Exception as exc:
+        if not stop_event.is_set():
+            outbox.put(("error", {"message": str(exc)}))
+    finally:
+        outbox.put(("done", {"cancelled": stop_event.is_set()}))
+
+
+def _start_stream(kb_id: str, prompt: str, mode: str) -> None:
+    key = _context_key(kb_id)
+    pending = st.session_state.pending_streams.get(key)
+    if pending and not pending.get("done"):
+        return
+
+    user_msg_id = _next_id()
+    _messages_for(kb_id).append({"role": "user", "content": prompt, "id": user_msg_id})
+
+    outbox: queue.Queue = queue.Queue()
+    stop_event = threading.Event()
+    pending = {
+        "kb_id": kb_id,
+        "session_id": st.session_state.session_id,
+        "prompt": prompt,
+        "mode": mode,
+        "is_local": st.session_state.is_local,
+        "user_msg_id": user_msg_id,
+        "answer": "",
+        "final": None,
+        "error": None,
+        "stage": "",
+        "done": False,
+        "cancelled": False,
+        "queue": outbox,
+        "stop_event": stop_event,
+    }
+    worker = threading.Thread(
+        target=_stream_chat_worker,
+        kwargs={
+            "api_url": st.session_state.api_url,
+            "kb_id": kb_id,
+            "session_id": st.session_state.session_id,
+            "prompt": prompt,
+            "mode": mode,
+            "is_local": st.session_state.is_local,
+            "stop_event": stop_event,
+            "outbox": outbox,
+        },
+        daemon=True,
+    )
+    pending["thread"] = worker
+    st.session_state.pending_streams[key] = pending
+    worker.start()
+
+
+def _remove_message(kb_id: str, session_id: str, msg_id: int) -> None:
+    messages = _messages_for(kb_id, session_id)
+    st.session_state.messages_by_context[_context_key(kb_id, session_id)] = [
+        msg for msg in messages if msg.get("id") != msg_id
+    ]
+
+
+def _cancel_stream(key: tuple[str, str]) -> None:
+    pending = st.session_state.pending_streams.get(key)
+    if not pending:
+        return
+    pending["cancelled"] = True
+    pending["done"] = True
+    pending["stop_event"].set()
+    response = pending.get("response")
+    if response is not None:
+        response.close()
+    _remove_message(
+        pending["kb_id"],
+        pending["session_id"],
+        pending["user_msg_id"],
+    )
+
+
+def _finish_stream(key: tuple[str, str], pending: dict) -> None:
+    if pending.get("cancelled"):
+        _remove_message(
+            pending["kb_id"],
+            pending["session_id"],
+            pending["user_msg_id"],
+        )
+        st.session_state.pending_streams.pop(key, None)
+        return
+
+    error = pending.get("error")
+    if error:
+        _messages_for(pending["kb_id"], pending["session_id"]).append(
+            {
+                "role": "assistant",
+                "content": f"[{error.get('error_code', 'ERROR')}] {error.get('message', '')}",
+                "id": _next_id(),
+            }
+        )
+        st.session_state.pending_streams.pop(key, None)
+        return
+
+    final = pending.get("final")
+    answer = (final or {}).get("answer") or pending.get("answer", "")
+    _messages_for(pending["kb_id"], pending["session_id"]).append(
+        {
+            "role": "assistant",
+            "content": answer or "（无答案）",
+            "final": final,
+            "query": pending["prompt"],
+            "id": _next_id(),
+        }
+    )
+    st.session_state.pending_streams.pop(key, None)
+
+
+def _drain_stream_events() -> None:
+    for key, pending in list(st.session_state.pending_streams.items()):
+        outbox = pending["queue"]
+        while True:
+            try:
+                event, data = outbox.get_nowait()
+            except queue.Empty:
+                break
+            if pending.get("cancelled"):
+                continue
+            if event == "token":
+                pending["answer"] += data.get("content", "")
+            elif event == "start":
+                pending["stage"] = "正在启动请求…"
+            elif event == "node":
+                stage = data.get("stage", "")
+                pending["stage"] = f"正在处理：{stage}" if stage else ""
+            elif event == "final":
+                pending["final"] = data
+            elif event == "error":
+                pending["error"] = data
+            elif event == "response":
+                pending["response"] = data.get("response")
+            elif event == "done":
+                pending["cancelled"] = bool(data.get("cancelled"))
+                pending["done"] = True
+        if pending.get("done"):
+            _finish_stream(key, pending)
+
+
 # 完成 chatarea 处理。
 def _chat_area() -> None:
-    # 主对话区：还原历史 + 渲染气泡 + SSE 流式提问，final 帧为权威答案。
+    # 主对话区：按 (kb, session) 还原历史 + 渲染气泡；SSE 在后台线程中归属到发送时上下文。
+    _drain_stream_events()
     kb_id = st.session_state.kb_id
     if kb_id:
         _restore_history(kb_id)
     st.subheader(f"对话 · {kb_id or '未选择知识库'}")
-    answering = bool(st.session_state.answering)
+    current_key = _context_key(kb_id) if kb_id else None
+    current_pending = (
+        st.session_state.pending_streams.get(current_key) if current_key else None
+    )
+    answering = bool(current_pending)
     mode = st.radio(
         "模式",
         ["auto", "qa", "summary", "compare"],
@@ -292,7 +485,8 @@ def _chat_area() -> None:
         disabled=answering,
     )
 
-    for msg in st.session_state.messages:
+    messages = _messages_for(kb_id) if kb_id else []
+    for msg in messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"] or "（无答案）")
             if msg.get("final"):
@@ -300,75 +494,22 @@ def _chat_area() -> None:
                     msg["final"], key=msg["id"], query=msg.get("query", "")
                 )
 
-    prompt = st.chat_input("问点什么…", disabled=not kb_id or answering)
-    if prompt:
-        st.session_state.messages.append(
-            {"role": "user", "content": prompt, "id": _next_id()}
-        )
-        st.session_state.pending_prompt = prompt
-        st.session_state.pending_mode = mode
-        st.session_state.answering = True
+    if current_pending:
+        with st.chat_message("assistant"):
+            answer = current_pending.get("answer", "")
+            st.markdown((answer + "▌") if answer else "正在思考…")
+            if current_pending.get("stage"):
+                st.caption(current_pending["stage"])
+        if st.button("■ 终止问题", type="primary", use_container_width=True):
+            _cancel_stream(current_key)
+            st.rerun()
+        time.sleep(0.1)
         st.rerun()
 
-    pending_prompt = st.session_state.get("pending_prompt")
-    if not pending_prompt:
-        return
-    pending_mode = st.session_state.get("pending_mode") or mode
-
-    with st.chat_message("assistant"):
-        box = st.empty()
-        stage_box = st.empty()
-        answer, final, error = "", None, None
-        try:
-            for event, data in _client().stream_chat(
-                kb_id,
-                pending_prompt,
-                mode=pending_mode,
-                session_id=st.session_state.session_id,
-                is_local=st.session_state.is_local,
-            ):
-                if event == "token":
-                    answer += data.get("content", "")
-                    box.markdown(answer + "▌")
-                elif event == "start":
-                    stage_box.caption("正在启动请求…")
-                elif event == "node":
-                    stage = data.get("stage", "")
-                    if stage:
-                        stage_box.caption(f"正在处理：{stage}")
-                elif event == "final":
-                    final = data
-                elif event == "error":
-                    error = data
-        except Exception as exc:
-            error = {"message": str(exc)}
-        finally:
-            st.session_state.pending_prompt = None
-            st.session_state.pending_mode = None
-            st.session_state.answering = False
-
-        stage_box.empty()
-        if error:
-            box.error(
-                f"[{error.get('error_code', 'ERROR')}] {error.get('message', '')}"
-            )
-            answer = ""
-        else:
-            answer = (final or {}).get("answer", answer)
-            box.markdown(answer or "（无答案）")
-            if final:
-                _render_evidence(final, key=str(_next_id()), query=pending_prompt)
-
-    st.session_state.messages.append(
-        {
-            "role": "assistant",
-            "content": answer,
-            "final": final,
-            "query": pending_prompt,
-            "id": _next_id(),
-        }
-    )
-    st.rerun()
+    prompt = st.chat_input("问点什么…", disabled=not kb_id)
+    if prompt:
+        _start_stream(kb_id, prompt, mode)
+        st.rerun()
 
 
 # 完成 nextid 处理。
