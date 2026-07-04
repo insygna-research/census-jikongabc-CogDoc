@@ -6,7 +6,7 @@ MATURIN ?= maturin
 # src-layout：包源码在 src/，入口经 PYTHONPATH 注入，无需先安装即可 run/serve/test。
 export PYTHONPATH := src
 
-.PHONY: help install native check test smoke-api run debug eval eval-quality serve frontend
+.PHONY: help install native check test smoke-api run debug eval eval-coverage eval-quality eval-quality-coverage serve frontend
 
 help:
 	@echo "make install - 可编辑安装含开发依赖 (pip install -e '.[dev]')"
@@ -15,7 +15,9 @@ help:
 	@echo "make test    - 运行 pytest 全量测试"
 	@echo "make smoke-api - 运行不依赖真实模型/索引的 API E2E smoke"
 	@echo "make eval    - 离线检索评测 recall@k/MRR (scripts/eval_retrieval.py)"
+	@echo "make eval-coverage - 只检查检索评测集覆盖面，不执行真实检索"
 	@echo "make eval-quality - 离线质量评测 router/citation/faithfulness (scripts/eval_quality.py)"
+	@echo "make eval-quality-coverage - 检查质量评测集覆盖面"
 	@echo "make run     - 启动多库多对话控制台 (python -m cogdoc.cli)"
 	@echo "make debug   - 启动检索可视化/可观测控制台 (python -m cogdoc.debug)"
 	@echo "make serve   - 启动 FastAPI 服务 (uvicorn cogdoc.api.app:app)"
@@ -40,8 +42,14 @@ smoke-api:
 eval:
 	$(PYTHON) scripts/eval_retrieval.py
 
+eval-coverage:
+	$(PYTHON) scripts/eval_retrieval.py --coverage-only
+
 eval-quality:
 	$(PYTHON) scripts/eval_quality.py
+
+eval-quality-coverage:
+	$(PYTHON) scripts/eval_quality.py --check-coverage
 
 run:
 	$(PYTHON) -m cogdoc.cli
