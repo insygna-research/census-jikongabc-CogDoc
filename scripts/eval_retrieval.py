@@ -6,7 +6,7 @@ from typing import Dict, List
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "src") not in sys.path:
-    # src-layout：包源码在 src/ 下；ROOT 仍用于解析数据文件相对路径。
+    # 包源码在源码目录下，项目根目录用于解析数据文件相对路径。
     sys.path.insert(0, str(ROOT / "src"))
 
 from cogdoc.config.settings import get_settings
@@ -25,12 +25,12 @@ def _project_path(path: str) -> Path:
 
 _settings = get_settings()
 DEFAULT_EVAL_SET = _project_path(_settings.eval_set_path)
-# 真实评测集不入库；clean checkout 回退到 example，保证零参数命令可运行。
+# 真实评测集不入库，干净检出时回退到示例评测集。
 EXAMPLE_EVAL_SET = _project_path(_settings.eval_example_set_path)
 DEFAULT_K_VALUES = [1, 3, 5, 9]
 
 
-# 解析 default eval set。
+# 解析默认评测集。
 def resolve_default_eval_set() -> Path:
     if DEFAULT_EVAL_SET.exists():
         return DEFAULT_EVAL_SET
@@ -41,7 +41,7 @@ def resolve_default_eval_set() -> Path:
     return EXAMPLE_EVAL_SET
 
 
-# 加载 eval set。
+# 加载评测集。
 def load_eval_set(path: Path) -> List[dict]:
     items = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -51,7 +51,7 @@ def load_eval_set(path: Path) -> List[dict]:
     return items
 
 
-# 检索 sources。
+# 检索来源。
 def retrieve_sources(query: str, doc_id: str, top_k: int, rerank: bool) -> List[str]:
     from cogdoc.graph.subgraphs.qa import RetrieverFactory
 
@@ -64,7 +64,7 @@ def retrieve_sources(query: str, doc_id: str, top_k: int, rerank: bool) -> List[
     return [doc["meta"]["source"] for doc in docs]
 
 
-# 运行 eval。
+# 运行评测。
 def run_eval(items: List[dict], k_values: List[int], rerank: bool) -> dict:
     top_k = max(k_values)
     rows: List[dict] = []
@@ -92,7 +92,7 @@ def run_eval(items: List[dict], k_values: List[int], rerank: bool) -> dict:
     }
 
 
-# 输出 report。
+# 输出报告。
 def print_report(report: dict) -> None:
     cfg = report["config"]
     print(
@@ -124,7 +124,7 @@ def print_coverage(coverage: dict) -> None:
     print()
 
 
-# 生成对比 baseline。
+# 生成基线对比。
 def compare_baseline(report: dict, baseline_path: Path) -> int:
     baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
     base_agg = baseline.get("aggregate", {})
@@ -184,8 +184,8 @@ def main() -> int:
         help="只检查评测集覆盖面，不执行真实检索",
     )
     args = parser.parse_args()
-    if args.coverage_only and (args.json or args.baseline):
-        parser.error("--coverage-only 不能与 --json 或 --baseline 同时使用")
+    if args.coverage_only and (args.check_coverage or args.json or args.baseline):
+        parser.error("--coverage-only 不能与 --check-coverage、--json 或 --baseline 同时使用")
 
     eval_set = args.eval_set or resolve_default_eval_set()
     items = load_eval_set(eval_set)

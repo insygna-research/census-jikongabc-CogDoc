@@ -6,7 +6,7 @@ from typing import List
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "src") not in sys.path:
-    # src-layout：包源码在 src/ 下；ROOT 仍用于解析数据文件相对路径。
+    # 包源码在源码目录下，项目根目录用于解析数据文件相对路径。
     sys.path.insert(0, str(ROOT / "src"))
 
 from cogdoc.config.settings import get_settings
@@ -24,7 +24,7 @@ DEFAULT_EVAL_SET = _project_path(_settings.quality_eval_set_path)
 EXAMPLE_EVAL_SET = _project_path(_settings.quality_eval_example_set_path)
 
 
-# 解析 default eval set。
+# 解析默认评测集。
 def resolve_default_eval_set() -> Path:
     if DEFAULT_EVAL_SET.exists():
         return DEFAULT_EVAL_SET
@@ -35,7 +35,7 @@ def resolve_default_eval_set() -> Path:
     return EXAMPLE_EVAL_SET
 
 
-# 加载 eval set。
+# 加载评测集。
 def load_eval_set(path: Path) -> List[dict]:
     items = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -50,7 +50,7 @@ def _fmt(value: float | None) -> str:
     return "-" if value is None else f"{value:.4f}"
 
 
-# 输出 report。
+# 输出报告。
 def print_report(report: dict) -> None:
     print(f"\n质量评测  |  cases={report['config']['num_cases']}\n")
     print("聚合:")
@@ -103,7 +103,14 @@ def main() -> int:
         action="store_true",
         help="检查评测集是否覆盖必要 case_type 和推荐 layer",
     )
+    parser.add_argument(
+        "--coverage-only",
+        action="store_true",
+        help="只检查评测集覆盖面，不运行质量评测",
+    )
     args = parser.parse_args()
+    if args.coverage_only and (args.check_coverage or args.json or args.baseline):
+        parser.error("--coverage-only 不能与 --check-coverage、--json 或 --baseline 同时使用")
 
     eval_set = args.eval_set or resolve_default_eval_set()
     items = load_eval_set(eval_set)
@@ -112,6 +119,10 @@ def main() -> int:
         return 1
 
     coverage = audit_coverage(items)
+    if args.coverage_only:
+        print_coverage(coverage)
+        return 0 if coverage["is_coverage_complete"] else 1
+
     report = run_eval(items)
     print_report(report)
     if args.check_coverage:
