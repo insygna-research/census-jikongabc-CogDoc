@@ -117,6 +117,7 @@ Streamlit 前端只是 FastAPI 服务上的瘦客户端——你也可以直接�
 | `GET /v1/index-jobs/{job_id}` | 轮询入库进度 |
 | `POST /v1/chat`、`POST /v1/chat/stream` | 提问（JSON 或 SSE 流式） |
 | `GET /v1/sessions`、`GET /v1/sessions/{id}/history` | 列出 / 回放对话历史 |
+| `GET /v1/traces/{trace_id}` | 查询已导出的请求 trace |
 | `POST /v1/feedback` | 按 `trace_id` 提交赞/踩 |
 | `GET /healthz`、`GET /readyz`、`GET /metrics` | 健康、就绪、Prometheus 指标 |
 
@@ -255,7 +256,13 @@ CogDoc/
 | `make test` | 运行 Python 测试 |
 | `make smoke-api` | 运行不依赖真实模型/索引的 API smoke |
 | `make eval` | 运行离线检索评测（`recall@k`、MRR） |
+| `make eval-coverage` | 不执行真实检索，只检查检索评测集覆盖面 |
 | `make eval-quality` | 运行离线质量评测（路由、引用、人工忠实性台账） |
+| `make eval-quality-coverage` | 运行质量指标并检查覆盖维度 |
+| `make eval-suite` | 运行组合评测门禁（覆盖审计 + 质量指标） |
+| `make eval-suite-report` | 写入 `eval/eval_suite_report.json` |
+| `make eval-suite-baseline` | 对比 `eval/eval_suite_baseline.json` |
+| `make eval-suite-update-baseline` | 复核后刷新 `eval/eval_suite_baseline.json` |
 | `make run` | 启动交互式 CLI 控制台 |
 | `make serve` | 启动 FastAPI 服务（`uvicorn cogdoc.api.app:app`） |
 | `make frontend` | 启动 Streamlit 网页端 |
@@ -265,7 +272,9 @@ CogDoc/
 
 测试分层：业务逻辑与 Python↔native API 契约用 Python 覆盖（`tests/`）；纯 Rust 逻辑用 `rust_core/src/` 里的 Rust `#[test]`。依赖 native 的 Python 测试在未构建时会 `importorskip` 跳过，完整回归前请先 `make native`。
 
-离线评测使用 `eval/` 下的本地 JSONL。`make eval` 会基于 `eval/retrieval_eval.jsonl` 统计检索的 `recall@k`、hit rate 和 MRR；干净 checkout 没有本地评测集时会回退到 `eval/retrieval_eval.example.jsonl`。用 `python scripts/eval_retrieval.py --coverage-only` 可以只检查检索评测集是否覆盖单源、多源、无答案场景，不触碰真实索引。`make eval-quality` 会统计路由准确率、引用准确率和人工忠实性台账；加 `--check-coverage` 可检查质量评测集是否覆盖必需 case type 与推荐 layer。`--coverage-only` 有意不允许与 `--json`、`--baseline` 同时使用。
+离线评测使用 `eval/` 下的本地 JSONL。`make eval-suite` 是默认门禁：它会审计检索和质量评测集覆盖，运行轻量质量指标，按用例类型和层级输出质量摘要，默认跳过真实检索。`make eval-suite-report` 写入 `eval/eval_suite_report.json`；`make eval-suite-baseline` 对比 `eval/eval_suite_baseline.json` 的聚合指标、类型指标和分层质量指标；`make eval-suite-update-baseline` 在复核后刷新这份基线。两个生成文件都被 Git 忽略。已有真实索引且需要对比检索指标时再加 `--run-retrieval`。`make eval` 会基于 `eval/retrieval_eval.jsonl` 统计检索的 `recall@k`、hit rate 和 MRR；干净 checkout 没有本地评测集时会回退到 `eval/retrieval_eval.example.jsonl`。用 `make eval-coverage` 可以只检查检索评测集是否覆盖单源、多源、无答案场景，不触碰真实索引。`make eval-quality` 会统计路由准确率、引用准确率和人工忠实性台账；用 `make eval-quality-coverage` 会运行这些质量指标，并在评测集缺少必需 case type 或推荐 layer 时失败。只想检查质量覆盖时运行 `python scripts/eval_quality.py --coverage-only`。`--coverage-only` 有意不允许与 `--check-coverage`、`--json`、`--baseline` 同时使用。
+
+每次对话都会生成 `request_id` / `trace_id`。`COGDOC_TRACE_ENABLED=true` 时，服务会把 JSON trace 写入 `COGDOC_TRACE_DIR`（默认 `logs/traces`），同一份安全载荷也可通过 `GET /v1/traces/{trace_id}` 查询。trace 文件包含 `schema_version`、`status`（`ok`、`degraded` 或 `failed`）、总 `duration_ms`、安全配置快照、步骤摘要、错误摘要，并且只保存截断后的 evidence preview，不写入完整文档正文。
 
 ## 已知限制
 

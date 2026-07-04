@@ -111,6 +111,7 @@ The Streamlit app is a thin client over the FastAPI service — you can hit it d
 | `GET /v1/index-jobs/{job_id}` | Poll ingestion progress |
 | `POST /v1/chat`, `POST /v1/chat/stream` | Ask (JSON or SSE streaming) |
 | `GET /v1/sessions`, `GET /v1/sessions/{id}/history` | List / replay conversation history |
+| `GET /v1/traces/{trace_id}` | Fetch an exported request trace |
 | `POST /v1/feedback` | Submit thumbs-up/down on a `trace_id` |
 | `GET /healthz`, `GET /readyz`, `GET /metrics` | Health, readiness, Prometheus metrics |
 
@@ -249,7 +250,13 @@ Requirements: Python 3.11+ (developed on 3.13; the extension targets 3.8+), a Ru
 | `make test` | Run the Python test suite |
 | `make smoke-api` | Run an in-process API smoke test without real LLM/index work |
 | `make eval` | Run offline retrieval evaluation (`recall@k`, MRR) |
+| `make eval-coverage` | Check retrieval eval coverage without running real retrieval |
 | `make eval-quality` | Run offline quality evaluation (router, citations, faithfulness ledger) |
+| `make eval-quality-coverage` | Run quality metrics and enforce coverage dimensions |
+| `make eval-suite` | Run the combined eval gate (coverage audits + quality metrics) |
+| `make eval-suite-report` | Write `eval/eval_suite_report.json` |
+| `make eval-suite-baseline` | Compare against `eval/eval_suite_baseline.json` |
+| `make eval-suite-update-baseline` | Refresh `eval/eval_suite_baseline.json` after review |
 | `make run` | Start the interactive CLI console |
 | `make serve` | Start the FastAPI service (`uvicorn cogdoc.api.app:app`) |
 | `make frontend` | Start the Streamlit web app |
@@ -259,7 +266,9 @@ Requirements: Python 3.11+ (developed on 3.13; the extension targets 3.8+), a Ru
 
 Test layering: business logic and the Python↔native API contract are tested in Python (`tests/`); pure-Rust logic uses Rust `#[test]` in `rust_core/src/`. Native-dependent Python tests `importorskip` when `rust_core` is not built, so run `make native` before a full regression.
 
-Offline evaluation uses local JSONL files under `eval/`. `make eval` measures retrieval (`recall@k`, hit rate, MRR) against `eval/retrieval_eval.jsonl`, falling back to `eval/retrieval_eval.example.jsonl` on a clean checkout. Use `python scripts/eval_retrieval.py --coverage-only` to check whether the retrieval eval set covers single-source, multi-source, and no-answer cases without touching the real index. `make eval-quality` measures router accuracy, citation accuracy, and the manual faithfulness ledger; add `--check-coverage` to ensure the quality eval set covers the required case types and recommended layers. `--coverage-only` is intentionally incompatible with `--json` and `--baseline`.
+Offline evaluation uses local JSONL files under `eval/`. `make eval-suite` is the default gate: it audits retrieval and quality coverage, runs the cheap quality metrics, prints quality metrics by case type and layer, and skips real retrieval by default. `make eval-suite-report` writes `eval/eval_suite_report.json`; `make eval-suite-baseline` compares aggregate, case-type, and layer-level quality metrics against `eval/eval_suite_baseline.json`; `make eval-suite-update-baseline` refreshes that baseline after review. Both generated files are ignored by Git. Add `--run-retrieval` when a real index is available and retrieval metrics should also be compared. `make eval` measures retrieval (`recall@k`, hit rate, MRR) against `eval/retrieval_eval.jsonl`, falling back to `eval/retrieval_eval.example.jsonl` on a clean checkout. Use `make eval-coverage` to check whether the retrieval eval set covers single-source, multi-source, and no-answer cases without touching the real index. `make eval-quality` measures router accuracy, citation accuracy, and the manual faithfulness ledger; use `make eval-quality-coverage` to run those quality metrics and fail when the eval set misses required case types or recommended layers. For a coverage-only quality check, run `python scripts/eval_quality.py --coverage-only`. `--coverage-only` is intentionally incompatible with `--check-coverage`, `--json`, and `--baseline`.
+
+Every chat request gets a `request_id`/`trace_id`. When `COGDOC_TRACE_ENABLED=true`, the service writes JSON traces under `COGDOC_TRACE_DIR` (default `logs/traces`), and the same safe payload is available through `GET /v1/traces/{trace_id}`. Trace files include `schema_version`, `status` (`ok`, `degraded`, or `failed`), total `duration_ms`, a safe config snapshot, step summaries, error summaries, and only truncated evidence previews rather than full document text.
 
 ## Known Limitations
 
