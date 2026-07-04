@@ -1,9 +1,13 @@
 import json
 from cogdoc.config.settings import Settings
-from cogdoc.observability.trace import build_trace_step, export_trace
+from cogdoc.observability.trace import (
+    build_trace_payload,
+    build_trace_step,
+    export_trace,
+)
 
 
-# 验证 build trace step keeps only safe document preview 场景。
+# 验证跟踪步骤只保留安全正文预览。
 def test_build_trace_step_keeps_only_safe_document_preview():
     output = {
         "retrieved_docs": [
@@ -33,7 +37,7 @@ def test_build_trace_step_keeps_only_safe_document_preview():
     assert "answer" not in step
 
 
-# 验证 build trace step uses explicit retrieval top k 场景。
+# 验证跟踪步骤使用显式检索截断值。
 def test_build_trace_step_uses_explicit_retrieval_top_k():
     output = {"retrieved_docs": [{"text": "x", "meta": {"chunk_id": "c1"}}]}
 
@@ -43,21 +47,60 @@ def test_build_trace_step_uses_explicit_retrieval_top_k():
     assert step["counts"]["retrieved_count"] == 1
 
 
-# 验证 export trace writes json file 场景。
+# 验证跟踪载荷包含审计字段。
+def test_build_trace_payload_includes_audit_fields():
+    step = build_trace_step("intent_router", {"task_type": "qa"}, 1.0)
+
+    payload = build_trace_payload(
+        "trace-1",
+        "req-1",
+        "qa",
+        [step],
+        status="ok",
+        duration_ms=12.3456,
+        config={"doc_id": "kb", "query_length": 4},
+    )
+
+    assert payload["schema_version"] == "v1"
+    assert payload["status"] == "ok"
+    assert payload["duration_ms"] == 12.346
+    assert payload["config"]["doc_id"] == "kb"
+    assert payload["summary"]["step_count"] == 1
+    assert payload["summary"]["node_names"] == ["intent_router"]
+    assert payload["error"] is None
+
+
+# 验证跟踪导出会写入文件。
 def test_export_trace_writes_json_file(tmp_path):
     settings = Settings(cogdoc_trace_dir=str(tmp_path), cogdoc_trace_enabled=True)
     step = build_trace_step("intent_router", {"task_type": "qa"}, 1.0)
 
-    path = export_trace("trace-1", "req-1", "qa", [step], settings)
+    path = export_trace(
+        "trace-1",
+        "req-1",
+        "qa",
+        [step],
+        settings,
+        status="degraded",
+        duration_ms=3.0,
+        error={"stage": "stream", "error_class": "TimeoutError"},
+        config={"doc_id": "kb"},
+    )
 
     payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "v1"
     assert payload["trace_id"] == "trace-1"
     assert payload["request_id"] == "req-1"
     assert payload["task_type"] == "qa"
+    assert payload["status"] == "degraded"
+    assert payload["duration_ms"] == 3.0
+    assert payload["config"]["doc_id"] == "kb"
+    assert payload["summary"]["error_count"] == 0
+    assert payload["error"]["error_class"] == "TimeoutError"
     assert payload["steps"][0]["node_name"] == "intent_router"
 
 
-# 验证 export trace respects disabled flag 场景。
+# 验证跟踪导出尊重关闭开关。
 def test_export_trace_respects_disabled_flag(tmp_path):
     settings = Settings(cogdoc_trace_dir=str(tmp_path), cogdoc_trace_enabled=False)
 

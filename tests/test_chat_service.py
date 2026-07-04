@@ -22,7 +22,7 @@ def _doc() -> dict:
     }
 
 
-# 定义 FakeApp 数据结构。
+# 定义假应用数据结构。
 class FakeApp:
     # 流式返回结果。
     def stream(self, initial_state, config, stream_mode, subgraphs):
@@ -71,7 +71,7 @@ class FakeApp:
         )
 
 
-# 验证 run chat sync returns structured result 场景。
+# 验证同步对话返回结构化结果。
 def test_run_chat_sync_returns_structured_result(monkeypatch):
     monkeypatch.setattr(chat_service, "app", FakeApp())
     monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
@@ -93,7 +93,28 @@ def test_run_chat_sync_returns_structured_result(monkeypatch):
     assert any(step["retrieval_top_k"] == 9 for step in result.steps)
 
 
-# 验证 run chat emits golden event sequence 场景。
+# 验证对话会导出可审计跟踪。
+def test_run_chat_exports_auditable_trace(monkeypatch):
+    exported = []
+    monkeypatch.setattr(chat_service, "app", FakeApp())
+    monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
+    monkeypatch.setattr(chat_service, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        chat_service, "export_trace", lambda **kwargs: exported.append(kwargs)
+    )
+
+    result = run_chat_sync("kb", "报名要求是什么", is_local=False)
+
+    assert result.trace_path is None
+    assert exported[0]["status"] == "ok"
+    assert exported[0]["task_type"] == "qa"
+    assert exported[0]["duration_ms"] >= 0
+    assert exported[0]["config"]["doc_id"] == "kb"
+    assert exported[0]["config"]["query_length"] == len("报名要求是什么")
+    assert exported[0]["error"] is None
+
+
+# 验证流式对话事件顺序稳定。
 def test_run_chat_emits_golden_event_sequence(monkeypatch):
     monkeypatch.setattr(chat_service, "app", FakeApp())
     monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
@@ -123,7 +144,7 @@ class StreamInterruptApp:
         raise TimeoutError("流中断")
 
 
-# 验证 run chat sync raises on stream interrupt without output 场景。
+# 验证无可信输出时流式中断会抛错。
 def test_run_chat_sync_raises_on_stream_interrupt_without_output(monkeypatch):
     monkeypatch.setattr(chat_service, "app", StreamInterruptApp())
     monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
@@ -135,6 +156,24 @@ def test_run_chat_sync_raises_on_stream_interrupt_without_output(monkeypatch):
 
     assert excinfo.value.stage == "stream"
     assert excinfo.value.error_class == "TimeoutError"
+
+
+# 验证无可信输出时跟踪标记失败。
+def test_run_chat_exports_failed_trace_on_stream_interrupt(monkeypatch):
+    exported = []
+    monkeypatch.setattr(chat_service, "app", StreamInterruptApp())
+    monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
+    monkeypatch.setattr(chat_service, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        chat_service, "export_trace", lambda **kwargs: exported.append(kwargs)
+    )
+
+    with pytest.raises(ChatServiceError):
+        run_chat_sync("kb", "报名要求是什么", is_local=False)
+
+    assert exported[0]["status"] == "failed"
+    assert exported[0]["error"]["stage"] == "stream"
+    assert exported[0]["error"]["error_class"] == "TimeoutError"
 
 
 # 父子图输出已落地后流才中断，属于可降级返回而非彻底失败。
@@ -160,7 +199,7 @@ class StreamInterruptWithPartialApp:
         raise TimeoutError("流中断")
 
 
-# 验证 run chat sync returns degraded result when partial output 场景。
+# 验证部分输出已落地时可降级返回。
 def test_run_chat_sync_returns_degraded_result_when_partial_output(monkeypatch):
     monkeypatch.setattr(chat_service, "app", StreamInterruptWithPartialApp())
     monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
@@ -170,3 +209,20 @@ def test_run_chat_sync_returns_degraded_result_when_partial_output(monkeypatch):
     result = run_chat_sync("kb", "报名要求是什么", is_local=False)
 
     assert result.raw_output.get("answer") == "部分答案"
+
+
+# 验证部分输出已落地时跟踪标记降级。
+def test_run_chat_exports_degraded_trace_when_partial_output(monkeypatch):
+    exported = []
+    monkeypatch.setattr(chat_service, "app", StreamInterruptWithPartialApp())
+    monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
+    monkeypatch.setattr(chat_service, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        chat_service, "export_trace", lambda **kwargs: exported.append(kwargs)
+    )
+
+    result = run_chat_sync("kb", "报名要求是什么", is_local=False)
+
+    assert result.raw_output.get("answer") == "部分答案"
+    assert exported[0]["status"] == "degraded"
+    assert exported[0]["error"]["stage"] == "stream"

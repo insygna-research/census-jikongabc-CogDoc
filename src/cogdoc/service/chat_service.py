@@ -6,14 +6,14 @@ from cogdoc.agents.conversation_memory import extract_chat_turn, extract_final_a
 from cogdoc.agents.router import FORCED_TASK_TYPES
 from cogdoc.observability.logger import configure_logging, log_event, new_trace_id
 
-# 编译后的工作流图，首次调用惰性载入：断开 service ↔ graph.workflow 的模块级循环依赖（否则 run.py 冷启动 ImportError），同时保留模块属性供测试 monkeypatch。
+# 编译后的工作流图首次调用时惰性载入，避免模块级循环依赖。
 app = None
 from cogdoc.observability.trace import build_trace_step, export_trace, monotonic_ms
 
 
-# 服务层灾难失败时携带稳定的错误归因，交付层据此映射 error_code，不漏栈。
+# 服务层灾难失败时携带稳定的错误归因，交付层据此映射错误码。
 class ChatServiceError(Exception):
-    # 服务层灾难失败时携带稳定的错误归因，交付层据此映射 error_code，不漏栈。
+    # 服务层灾难失败时携带稳定的错误归因，交付层据此映射错误码。
     def __init__(
         self,
         stage: str,
@@ -28,14 +28,14 @@ class ChatServiceError(Exception):
         self.trace_id = trace_id
 
 
-# 定义 ChatEvent 数据结构。
+# 定义对话事件数据结构。
 @dataclass(frozen=True)
 class ChatEvent:
     type: str
     payload: dict[str, Any] = field(default_factory=dict)
 
 
-# 定义 ChatResult 数据结构。
+# 定义对话结果数据结构。
 @dataclass(frozen=True)
 class ChatResult:
     answer: str
@@ -59,7 +59,7 @@ def _extract_token(data: Any) -> str:
     return content if isinstance(content, str) else ""
 
 
-# 构建 result。
+# 构建对话结果。
 def _build_result(
     task_type: str,
     task_output: dict[str, Any],
@@ -86,7 +86,7 @@ def _build_result(
     )
 
 
-# 完成 运行时错误step 处理。
+# 构建运行时错误步骤。
 def _runtime_error_step(node_name: str, exc: Exception) -> dict[str, Any]:
     return {
         "node_name": node_name,
@@ -101,7 +101,35 @@ def _runtime_error_step(node_name: str, exc: Exception) -> dict[str, Any]:
     }
 
 
-# 运行 chat。
+# 构建跟踪配置摘要。
+def _trace_config(
+    doc_id: str,
+    query: str,
+    is_local: bool,
+    forced_task: str | None,
+    settings: Any,
+) -> dict[str, Any]:
+    return {
+        "doc_id": doc_id,
+        "query_length": len(query),
+        "is_local": is_local,
+        "forced_task": forced_task,
+        "qa_retrieval_top_k": settings.qa_retrieval_top_k,
+        "qa_rerank_top_n": settings.qa_rerank_top_n,
+        "model": settings.ollama_model_name if is_local else settings.llm_model_name,
+    }
+
+
+# 构建跟踪错误摘要。
+def _trace_error(stage: str, exc: Exception) -> dict[str, Any]:
+    return {
+        "stage": stage,
+        "error_class": type(exc).__name__,
+        "message_preview": str(exc)[:200],
+    }
+
+
+# 运行对话。
 def run_chat(
     doc_id: str,
     query: str,
@@ -121,6 +149,8 @@ def run_chat(
     trace_steps: list[dict[str, Any]] = []
     request_start_ms = monotonic_ms()
     last_trace_ms = None
+    trace_config = _trace_config(doc_id, query, is_local, forced_task, settings)
+    stream_error: dict[str, Any] | None = None
     initial_state = {
         "messages": [],
         "chat_history": list(chat_history or []),
@@ -316,6 +346,7 @@ def run_chat(
                     final_outputs[current_task] = task_output
 
         except Exception as stream_err:
+            stream_error = _trace_error("stream", stream_err)
             trace_steps.append(_runtime_error_step("runtime.stream", stream_err))
             log_event(
                 "runtime",
@@ -335,12 +366,19 @@ def run_chat(
             )
 
         task_output = final_outputs.get(current_task, {})
+        trace_status = "failed" if stream_error and not task_output else "ok"
+        if stream_error and task_output:
+            trace_status = "degraded"
         exported = export_trace(
             trace_id=trace_id,
             request_id=trace_id,
             task_type=current_task,
             steps=trace_steps,
             settings=settings,
+            status=trace_status,
+            duration_ms=monotonic_ms() - request_start_ms,
+            error=stream_error,
+            config=trace_config,
         )
         trace_path = str(exported) if exported else None
         result = _build_result(
@@ -362,6 +400,7 @@ def run_chat(
         yield ChatEvent("final", {"result": result, "output": task_output})
 
     except Exception as exc:
+        trace_error = _trace_error("runtime", exc)
         trace_steps.append(_runtime_error_step("runtime.failed", exc))
         export_trace(
             trace_id=trace_id,
@@ -369,6 +408,10 @@ def run_chat(
             task_type="unknown",
             steps=trace_steps,
             settings=settings,
+            status="failed",
+            duration_ms=monotonic_ms() - request_start_ms,
+            error=trace_error,
+            config=trace_config,
         )
         log_event(
             "runtime",
@@ -388,7 +431,7 @@ def run_chat(
         )
 
 
-# 运行 chat sync。
+# 同步运行对话。
 def run_chat_sync(*args: Any, **kwargs: Any) -> ChatResult:
     result = None
     last_error: dict[str, Any] | None = None
@@ -397,7 +440,7 @@ def run_chat_sync(*args: Any, **kwargs: Any) -> ChatResult:
             result = event.payload["result"]
         elif event.type == "error":
             last_error = event.payload
-    # 出现 error 事件且最终无可信输出（raw_output 为空）即视为失败，不把空答案当成功返回。
+    # 出现错误事件且最终无可信输出即视为失败，不把空答案当成功返回。
     has_trustworthy_output = result is not None and bool(result.raw_output)
     if last_error is not None and not has_trustworthy_output:
         raise ChatServiceError(

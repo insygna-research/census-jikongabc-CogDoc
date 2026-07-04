@@ -7,12 +7,12 @@ from cogdoc.config.settings import get_settings
 API_SCHEMA_VERSION = "v1"
 
 
-# 所有 API 模型的基类，统一严格契约与枚举字符串化；extra=forbid 拒绝未知字段（契约严格）；use_enum_values 让字段存枚举的字符串值。
+# 所有接口模型的基类，统一严格契约与枚举字符串化。
 class ApiModel(BaseModel):
     model_config = ConfigDict(extra="forbid", use_enum_values=True)
 
 
-# 对话请求模式：自动路由或强制 qa/summary/compare。
+# 对话请求模式，支持自动路由或强制指定任务。
 class ChatMode(str, Enum):
     AUTO = "auto"
     QA = "qa"
@@ -20,7 +20,7 @@ class ChatMode(str, Enum):
     COMPARE = "compare"
 
 
-# 实际执行的任务类型，响应里回显（含 unknown）。
+# 实际执行的任务类型，响应里回显。
 class ChatTask(str, Enum):
     QA = "qa"
     SUMMARY = "summary"
@@ -49,9 +49,10 @@ class ErrorCode(str, Enum):
     JOB_NOT_FOUND = "JOB_NOT_FOUND"
     INGEST_FAILED = "INGEST_FAILED"
     KB_CLEANUP_FAILED = "KB_CLEANUP_FAILED"
+    TRACE_NOT_FOUND = "TRACE_NOT_FOUND"
 
 
-# /v1/chat 与 /v1/chat/stream 的请求体。
+# 对话接口请求体。
 class ChatRequest(ApiModel):
     schema_version: Literal["v1"] = API_SCHEMA_VERSION
     query: str = Field(min_length=1)
@@ -60,7 +61,7 @@ class ChatRequest(ApiModel):
     mode: ChatMode = ChatMode.AUTO
     is_local: bool = False
 
-    # 完成 striprequired文本 处理。
+    # 清理必填文本。
     @field_validator("query", "doc_id")
     @classmethod
     def _strip_required_text(cls, value: str) -> str:
@@ -69,14 +70,14 @@ class ChatRequest(ApiModel):
             raise ValueError("must not be blank")
         return stripped
 
-    # 完成 强制模式task 处理。
+    # 解析强制任务模式。
     @property
     def forced_task(self) -> str | None:
-        # use_enum_values 下 self.mode 已是字符串，str() 得 "qa"/"summary"/"compare"。
+        # 枚举值已转成字符串，自动模式不强制任务。
         return None if self.mode == ChatMode.AUTO else str(self.mode)
 
 
-# 引用来源，取自 doc meta，不含正文。
+# 引用来源取自文档元数据，不含正文。
 class Citation(ApiModel):
     chunk_id: str = ""
     source: str = ""
@@ -85,7 +86,7 @@ class Citation(ApiModel):
     page_end: int | None = None
 
 
-# 证据片段，带截断 preview，供前端 evidence 面板展示。
+# 证据片段带截断预览，供前端证据面板展示。
 class Evidence(ApiModel):
     chunk_id: str = ""
     chunk_index: int | None = None
@@ -98,7 +99,7 @@ class Evidence(ApiModel):
     text_preview: str = ""
 
 
-# /v1/chat 结构化响应。
+# 对话接口结构化响应。
 class ChatResponse(ApiModel):
     schema_version: Literal["v1"] = API_SCHEMA_VERSION
     request_id: str
@@ -131,7 +132,7 @@ class JobStatus(str, Enum):
     FAILED = "failed"
 
 
-# 建知识库请求体；上限 56：VectorRetriever 把 collection 名截到 f"col-{kb_id}"[:60]，超长会撞库。
+# 建知识库请求体，限制长度避免集合名截断后碰撞。
 class KnowledgeBaseCreate(ApiModel):
     kb_id: str = Field(min_length=1, max_length=56)
 
@@ -139,7 +140,7 @@ class KnowledgeBaseCreate(ApiModel):
     @field_validator("kb_id")
     @classmethod
     def _slug(cls, value: str) -> str:
-        # kb_id 进路径，禁止分隔符与空白，避免目录穿越。
+        # 标识符会进入路径，禁止分隔符与空白，避免目录穿越。
         stripped = value.strip()
         if (
             not stripped
@@ -150,7 +151,7 @@ class KnowledgeBaseCreate(ApiModel):
         return stripped
 
 
-# 知识库元数据；tenant_id/owner_id 预留多租户。
+# 知识库元数据，预留多租户字段。
 class KnowledgeBase(ApiModel):
     kb_id: str
     created_at: str
@@ -159,7 +160,7 @@ class KnowledgeBase(ApiModel):
     owner_id: str = "default"
 
 
-# 知识库内的一篇文档，来自 manifest。
+# 知识库内的一篇文档，来自清单。
 class Document(ApiModel):
     name: str
     sha256: str = ""
@@ -185,7 +186,7 @@ class FeedbackType(str, Enum):
     CORRECTION = "correction"
 
 
-# /v1/feedback 请求体，trace_id 关联被反馈的那次回答。
+# 反馈请求体，跟踪标识关联被反馈的那次回答。
 class FeedbackRequest(ApiModel):
     schema_version: Literal["v1"] = API_SCHEMA_VERSION
     trace_id: str = Field(min_length=1)
@@ -197,7 +198,7 @@ class FeedbackRequest(ApiModel):
     correction: str | None = None
 
 
-# 反馈落盘结果，is_bad_case 表示是否进了坏样本集。
+# 反馈落盘结果，标记是否进入坏样本集。
 class FeedbackResponse(ApiModel):
     schema_version: Literal["v1"] = API_SCHEMA_VERSION
     feedback_id: str
@@ -213,7 +214,7 @@ class SessionHistoryResponse(ApiModel):
     messages: list[dict[str, Any]] = Field(default_factory=list)
 
 
-# 会话列表里的一条，title 取首条用户消息。
+# 会话列表里的一条，标题取首条用户消息。
 class SessionSummary(ApiModel):
     session_id: str
     title: str
@@ -227,6 +228,28 @@ class SessionListResponse(ApiModel):
     sessions: list[SessionSummary] = Field(default_factory=list)
 
 
+# 跟踪文件步骤摘要。
+class TraceSummary(ApiModel):
+    step_count: int = 0
+    error_count: int = 0
+    evidence_ref_count: int = 0
+    node_names: list[str] = Field(default_factory=list)
+
+
+# 跟踪文件响应体。
+class TraceResponse(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    trace_id: str
+    request_id: str
+    task_type: str
+    status: str
+    duration_ms: float | None = None
+    config: dict[str, Any] = Field(default_factory=dict)
+    summary: TraceSummary = Field(default_factory=TraceSummary)
+    error: dict[str, Any] | None = None
+    steps: list[dict[str, Any]] = Field(default_factory=list)
+
+
 # 转换为映射。
 def _as_mapping(value: Any) -> Mapping[str, Any]:
     if isinstance(value, Mapping):
@@ -238,7 +261,7 @@ def _as_mapping(value: Any) -> Mapping[str, Any]:
     return {}
 
 
-# 解析or空值。
+# 解析整数或空值。
 def _int_or_none(value: Any) -> int | None:
     if value is None:
         return None
@@ -248,7 +271,7 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
-# 解析or空值。
+# 解析浮点数或空值。
 def _float_or_none(value: Any) -> float | None:
     if value is None:
         return None
@@ -258,14 +281,14 @@ def _float_or_none(value: Any) -> float | None:
         return None
 
 
-# 规范化 task type。
+# 规范化任务类型。
 def _normalize_task_type(value: Any) -> str:
-    # 上游意外/缺失 task_type 一律归一到 unknown，契约不因字段漂移崩。
+    # 上游意外或缺失时一律归一到未知任务，契约不因字段漂移崩。
     task = str(value or ChatTask.UNKNOWN.value)
     return task if task in {item.value for item in ChatTask} else ChatTask.UNKNOWN.value
 
 
-# 完成 引用from映射 处理。
+# 从映射构建引用。
 def _citation_from_mapping(item: Any) -> Citation:
     data = _as_mapping(item)
     page = _int_or_none(data.get("page"))
@@ -278,7 +301,7 @@ def _citation_from_mapping(item: Any) -> Citation:
     )
 
 
-# 完成 证据from映射 处理。
+# 从映射构建证据。
 def _evidence_from_mapping(item: Any) -> Evidence:
     data = _as_mapping(item)
     page = _int_or_none(data.get("page"))
@@ -295,14 +318,14 @@ def _evidence_from_mapping(item: Any) -> Evidence:
     )
 
 
-# 完成 chat结果to响应 处理。
+# 把对话结果转换成响应。
 def chat_result_to_response(
     result: Any,
     *,
     doc_id: str,
     session_id: str | None = None,
 ) -> ChatResponse:
-    # 服务层 ChatResult → 前端契约；防御式取值，且不暴露 raw_output/steps/trace_path 与证据全文。
+    # 防御式取值，且不暴露原始输出、步骤和证据全文。
     return ChatResponse(
         request_id=str(getattr(result, "request_id", "") or ""),
         trace_id=str(getattr(result, "trace_id", "") or ""),

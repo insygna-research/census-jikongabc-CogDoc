@@ -1,4 +1,4 @@
-# 契约层零 web 框架依赖：不急加载 api.app，避免 import api.schemas 被迫拉起 fastapi。
+# 契约层零框架依赖，避免导入契约时拉起服务应用。
 from cogdoc.api.schemas import (
     API_SCHEMA_VERSION,
     ChatMode,
@@ -9,6 +9,8 @@ from cogdoc.api.schemas import (
     ErrorCode,
     ErrorResponse,
     Evidence,
+    TraceResponse,
+    TraceSummary,
     build_error_response,
     chat_result_to_response,
 )
@@ -23,6 +25,8 @@ __all__ = [
     "ErrorCode",
     "ErrorResponse",
     "Evidence",
+    "TraceResponse",
+    "TraceSummary",
     "build_error_response",
     "chat_result_to_response",
 ]

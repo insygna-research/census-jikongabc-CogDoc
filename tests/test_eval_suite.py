@@ -80,6 +80,8 @@ def test_eval_suite_builds_gate_without_retrieval(tmp_path):
 
     assert report["gate"]["passed"] is True
     assert report["quality_report"]["coverage"]["is_coverage_complete"] is True
+    assert report["quality_case_types"][0]["case_type"] == "router"
+    assert report["quality_layers"][0]["layer"] == "easy"
     assert report["retrieval_report"]["skipped"] is True
     assert report["retrieval_report"]["coverage"]["is_coverage_complete"] is True
 
@@ -178,6 +180,80 @@ def test_eval_suite_baseline_detects_quality_regression(tmp_path):
     assert result["retrieval"]["skipped"] is True
 
 
+# 验证组合基线能识别质量类型回退。
+def test_eval_suite_baseline_detects_quality_case_type_regression(tmp_path):
+    quality_path = tmp_path / "quality.jsonl"
+    retrieval_path = tmp_path / "retrieval.jsonl"
+    baseline_path = tmp_path / "baseline.json"
+    _write_quality_eval(quality_path)
+    _write_retrieval_eval(retrieval_path)
+    report = eval_suite.build_report(
+        quality_eval_set=quality_path,
+        retrieval_eval_set=retrieval_path,
+        run_retrieval=False,
+        k_values=[1, 3],
+        rerank=False,
+    )
+    baseline = {
+        "quality_report": {"aggregate": report["quality_report"]["aggregate"]},
+        "quality_case_types": [
+            {
+                "case_type": "router",
+                "count": 3,
+                "gated_metrics": ["router_rule_accuracy"],
+                "metrics": {"router_rule_accuracy": 1.0},
+            }
+        ],
+    }
+    report["quality_case_types"][0]["metrics"]["router_rule_accuracy"] = 0.0
+    baseline_path.write_text(
+        json.dumps(baseline, ensure_ascii=False), encoding="utf-8"
+    )
+
+    result = eval_suite.compare_baseline(report, baseline_path)
+
+    assert result["regressed"] is True
+    assert result["quality_case_types"]["rows"][0]["case_type"] == "router"
+    assert result["quality_case_types"]["rows"][0]["rows"][0]["status"] == "regressed"
+
+
+# 验证组合基线能识别质量分层回退。
+def test_eval_suite_baseline_detects_quality_layer_regression(tmp_path):
+    quality_path = tmp_path / "quality.jsonl"
+    retrieval_path = tmp_path / "retrieval.jsonl"
+    baseline_path = tmp_path / "baseline.json"
+    _write_quality_eval(quality_path)
+    _write_retrieval_eval(retrieval_path)
+    report = eval_suite.build_report(
+        quality_eval_set=quality_path,
+        retrieval_eval_set=retrieval_path,
+        run_retrieval=False,
+        k_values=[1, 3],
+        rerank=False,
+    )
+    baseline = {
+        "quality_report": {"aggregate": report["quality_report"]["aggregate"]},
+        "quality_layers": [
+            {
+                "layer": "easy",
+                "count": 1,
+                "gated_metrics": ["router_rule_accuracy"],
+                "metrics": {"router_rule_accuracy": 1.0},
+            }
+        ],
+    }
+    report["quality_layers"][0]["metrics"]["router_rule_accuracy"] = 0.0
+    baseline_path.write_text(
+        json.dumps(baseline, ensure_ascii=False), encoding="utf-8"
+    )
+
+    result = eval_suite.compare_baseline(report, baseline_path)
+
+    assert result["regressed"] is True
+    assert result["quality_layers"]["rows"][0]["layer"] == "easy"
+    assert result["quality_layers"]["rows"][0]["rows"][0]["status"] == "regressed"
+
+
 # 验证组合基线忽略旧报告缺失的新门禁指标。
 def test_eval_suite_baseline_ignores_new_metric_missing_from_old_baseline(tmp_path):
     baseline_path = tmp_path / "baseline.json"
@@ -197,6 +273,154 @@ def test_eval_suite_baseline_ignores_new_metric_missing_from_old_baseline(tmp_pa
 
     assert result["regressed"] is False
     assert [row["metric"] for row in result["quality"]["rows"]] == ["old_metric"]
+
+
+# 验证组合基线忽略旧类型缺失的新指标。
+def test_eval_suite_baseline_ignores_new_case_type_metric_missing_from_old_baseline(
+    tmp_path,
+):
+    baseline_path = tmp_path / "baseline.json"
+    report = {
+        "quality_report": {"aggregate": {}},
+        "quality_case_types": [
+            {
+                "case_type": "router",
+                "gated_metrics": ["old_metric", "new_metric"],
+                "metrics": {"old_metric": 1.0, "new_metric": 0.0},
+            }
+        ],
+        "retrieval_report": {"skipped": True},
+    }
+    baseline = {
+        "quality_report": {"aggregate": {}},
+        "quality_case_types": [
+            {"case_type": "router", "metrics": {"old_metric": 1.0}},
+        ],
+    }
+    baseline_path.write_text(
+        json.dumps(baseline, ensure_ascii=False), encoding="utf-8"
+    )
+
+    result = eval_suite.compare_baseline(report, baseline_path)
+
+    assert result["regressed"] is False
+    type_rows = result["quality_case_types"]["rows"][0]["rows"]
+    assert [row["metric"] for row in type_rows] == ["old_metric"]
+
+
+# 验证组合基线忽略旧分层缺失的新指标。
+def test_eval_suite_baseline_ignores_new_layer_metric_missing_from_old_baseline(
+    tmp_path,
+):
+    baseline_path = tmp_path / "baseline.json"
+    report = {
+        "quality_report": {"aggregate": {}},
+        "quality_layers": [
+            {
+                "layer": "easy",
+                "gated_metrics": ["old_metric", "new_metric"],
+                "metrics": {"old_metric": 1.0, "new_metric": 0.0},
+            }
+        ],
+        "retrieval_report": {"skipped": True},
+    }
+    baseline = {
+        "quality_report": {"aggregate": {}},
+        "quality_layers": [
+            {"layer": "easy", "metrics": {"old_metric": 1.0}},
+        ],
+    }
+    baseline_path.write_text(
+        json.dumps(baseline, ensure_ascii=False), encoding="utf-8"
+    )
+
+    result = eval_suite.compare_baseline(report, baseline_path)
+
+    assert result["regressed"] is False
+    layer_rows = result["quality_layers"]["rows"][0]["rows"]
+    assert [row["metric"] for row in layer_rows] == ["old_metric"]
+
+
+# 验证组合基线忽略类型中不适用的空指标。
+def test_eval_suite_baseline_ignores_empty_case_type_metrics(tmp_path):
+    baseline_path = tmp_path / "baseline.json"
+    report = {
+        "quality_report": {"aggregate": {}},
+        "quality_case_types": [
+            {
+                "case_type": "citation",
+                "gated_metrics": ["router_rule_accuracy", "citation_accuracy"],
+                "metrics": {
+                    "router_rule_accuracy": None,
+                    "citation_accuracy": 1.0,
+                },
+            }
+        ],
+        "retrieval_report": {"skipped": True},
+    }
+    baseline = {
+        "quality_report": {"aggregate": {}},
+        "quality_case_types": [
+            {
+                "case_type": "citation",
+                "gated_metrics": ["router_rule_accuracy", "citation_accuracy"],
+                "metrics": {
+                    "router_rule_accuracy": None,
+                    "citation_accuracy": 1.0,
+                },
+            },
+        ],
+    }
+    baseline_path.write_text(
+        json.dumps(baseline, ensure_ascii=False), encoding="utf-8"
+    )
+
+    result = eval_suite.compare_baseline(report, baseline_path)
+
+    assert result["regressed"] is False
+    type_rows = result["quality_case_types"]["rows"][0]["rows"]
+    assert [row["metric"] for row in type_rows] == ["citation_accuracy"]
+
+
+# 验证组合基线忽略分层中不适用的空指标。
+def test_eval_suite_baseline_ignores_empty_layer_metrics(tmp_path):
+    baseline_path = tmp_path / "baseline.json"
+    report = {
+        "quality_report": {"aggregate": {}},
+        "quality_layers": [
+            {
+                "layer": "hard",
+                "gated_metrics": ["router_rule_accuracy", "citation_accuracy"],
+                "metrics": {
+                    "router_rule_accuracy": None,
+                    "citation_accuracy": 1.0,
+                },
+            }
+        ],
+        "retrieval_report": {"skipped": True},
+    }
+    baseline = {
+        "quality_report": {"aggregate": {}},
+        "quality_layers": [
+            {
+                "layer": "hard",
+                "gated_metrics": ["router_rule_accuracy", "citation_accuracy"],
+                "metrics": {
+                    "router_rule_accuracy": None,
+                    "citation_accuracy": 1.0,
+                },
+            },
+        ],
+    }
+    baseline_path.write_text(
+        json.dumps(baseline, ensure_ascii=False), encoding="utf-8"
+    )
+
+    result = eval_suite.compare_baseline(report, baseline_path)
+
+    assert result["regressed"] is False
+    layer_rows = result["quality_layers"]["rows"][0]["rows"]
+    assert [row["metric"] for row in layer_rows] == ["citation_accuracy"]
 
 
 # 验证组合基线按双方门禁指标交集对比。

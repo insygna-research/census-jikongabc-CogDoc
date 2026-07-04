@@ -5,21 +5,22 @@ from typing import Any, Mapping
 from cogdoc.config.settings import Settings, get_settings
 
 
+TRACE_SCHEMA_VERSION = "v1"
 TRACE_PREVIEW_CHARS = 120
 
 
-# 完成 monotonicms 处理。
+# 返回单调毫秒时间。
 def monotonic_ms() -> float:
     return time.monotonic() * 1000
 
 
-# 完成 preview 处理。
+# 构建短文本预览。
 def _preview(text: Any, limit: int = TRACE_PREVIEW_CHARS) -> str:
     compact = " ".join(str(text or "").split())
     return compact[:limit]
 
 
-# 构造ref。
+# 构建文档引用摘要。
 def _doc_ref(doc: Mapping[str, Any]) -> dict:
     meta = doc.get("meta", {})
     return {
@@ -32,7 +33,7 @@ def _doc_ref(doc: Mapping[str, Any]) -> dict:
     }
 
 
-# 完成 证据ref 处理。
+# 构建证据引用摘要。
 def _evidence_ref(item: Mapping[str, Any]) -> dict:
     return {
         "chunk_id": item.get("chunk_id", ""),
@@ -44,7 +45,7 @@ def _evidence_ref(item: Mapping[str, Any]) -> dict:
     }
 
 
-# 构建 trace step。
+# 构建跟踪步骤。
 def build_trace_step(
     node_name: str,
     output: Mapping[str, Any],
@@ -99,7 +100,7 @@ def build_trace_step(
     return step
 
 
-# 完成 trace路径 处理。
+# 构建跟踪文件路径。
 def trace_path(trace_id: str, settings: Settings | None = None) -> Path:
     settings = settings or get_settings()
     base_dir = Path(settings.cogdoc_trace_dir)
@@ -108,13 +109,60 @@ def trace_path(trace_id: str, settings: Settings | None = None) -> Path:
     return base_dir / f"{trace_id}.json"
 
 
-# 导出 trace。
+# 汇总跟踪步骤。
+def summarize_trace_steps(steps: list[dict]) -> dict:
+    error_steps = [
+        step
+        for step in steps
+        if step.get("error_class") or step.get("critique")
+    ]
+    evidence_count = sum(len(step.get("evidence", [])) for step in steps)
+    return {
+        "step_count": len(steps),
+        "error_count": len(error_steps),
+        "evidence_ref_count": evidence_count,
+        "node_names": [step.get("node_name", "") for step in steps],
+    }
+
+
+# 构建跟踪导出载荷。
+def build_trace_payload(
+    trace_id: str,
+    request_id: str,
+    task_type: str,
+    steps: list[dict],
+    status: str = "ok",
+    duration_ms: float | None = None,
+    error: Mapping[str, Any] | None = None,
+    config: Mapping[str, Any] | None = None,
+) -> dict:
+    return {
+        "schema_version": TRACE_SCHEMA_VERSION,
+        "trace_id": trace_id,
+        "request_id": request_id,
+        "task_type": task_type,
+        "status": status,
+        "duration_ms": None
+        if duration_ms is None
+        else round(max(duration_ms, 0.0), 3),
+        "config": dict(config or {}),
+        "summary": summarize_trace_steps(steps),
+        "error": dict(error or {}) or None,
+        "steps": steps,
+    }
+
+
+# 导出跟踪文件。
 def export_trace(
     trace_id: str,
     request_id: str,
     task_type: str,
     steps: list[dict],
     settings: Settings | None = None,
+    status: str = "ok",
+    duration_ms: float | None = None,
+    error: Mapping[str, Any] | None = None,
+    config: Mapping[str, Any] | None = None,
 ) -> Path | None:
     settings = settings or get_settings()
     if not settings.cogdoc_trace_enabled:
@@ -122,11 +170,15 @@ def export_trace(
 
     path = trace_path(trace_id, settings)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "trace_id": trace_id,
-        "request_id": request_id,
-        "task_type": task_type,
-        "steps": steps,
-    }
+    payload = build_trace_payload(
+        trace_id=trace_id,
+        request_id=request_id,
+        task_type=task_type,
+        steps=steps,
+        status=status,
+        duration_ms=duration_ms,
+        error=error,
+        config=config,
+    )
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
