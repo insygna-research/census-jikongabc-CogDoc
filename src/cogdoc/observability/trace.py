@@ -100,12 +100,18 @@ def build_trace_step(
     return step
 
 
-# 构建跟踪文件路径。
-def trace_path(trace_id: str, settings: Settings | None = None) -> Path:
+# 构建跟踪目录路径。
+def trace_dir(settings: Settings | None = None) -> Path:
     settings = settings or get_settings()
     base_dir = Path(settings.cogdoc_trace_dir)
     if not base_dir.is_absolute():
         base_dir = settings.project_root / base_dir
+    return base_dir
+
+
+# 构建跟踪文件路径。
+def trace_path(trace_id: str, settings: Settings | None = None) -> Path:
+    base_dir = trace_dir(settings)
     return base_dir / f"{trace_id}.json"
 
 

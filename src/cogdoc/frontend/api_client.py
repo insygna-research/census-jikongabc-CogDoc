@@ -167,6 +167,23 @@ class CogDocClient:
             headers=self._headers,
         )
 
+    # 获取 trace。
+    def get_trace(self, trace_id: str) -> httpx.Response:
+        return httpx.get(
+            self._url(f"/v1/traces/{trace_id}"),
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    # 列出 traces。
+    def list_traces(self, limit: int = 20) -> httpx.Response:
+        return httpx.get(
+            self._url("/v1/traces"),
+            params={"limit": limit},
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
     # 获取 session history。
     def get_session_history(self, session_id: str, kb_id: str) -> httpx.Response:
         return httpx.get(

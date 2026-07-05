@@ -58,6 +58,61 @@ async def test_trace_endpoint_returns_exported_trace(tmp_path, monkeypatch):
     assert body["steps"][0]["node_name"] == "intent_router"
 
 
+# 验证接口返回最近跟踪文件列表。
+@pytest.mark.anyio
+async def test_trace_endpoint_lists_recent_traces(tmp_path, monkeypatch):
+    import os
+    import cogdoc.api.app as app_module
+    import cogdoc.api.routes.traces as traces_module
+
+    monkeypatch.setattr(app_module, "configure_logging", lambda: None)
+    monkeypatch.setattr(
+        traces_module, "trace_path", lambda trace_id: tmp_path / f"{trace_id}.json"
+    )
+    monkeypatch.setattr(traces_module, "trace_dir", lambda: tmp_path)
+    first = build_trace_payload(
+        "trace-old",
+        "req-old",
+        "qa",
+        [build_trace_step("intent_router", {"task_type": "qa"}, 1.0)],
+        status="ok",
+    )
+    second = build_trace_payload(
+        "trace-new",
+        "req-new",
+        "summary",
+        [build_trace_step("summary", {"task_type": "summary"}, 2.0)],
+        status="degraded",
+        duration_ms=3.0,
+    )
+    (tmp_path / "trace-old.json").write_text(
+        json.dumps(first, ensure_ascii=False), encoding="utf-8"
+    )
+    (tmp_path / "trace-new.json").write_text(
+        json.dumps(second, ensure_ascii=False), encoding="utf-8"
+    )
+    (tmp_path / "broken.json").write_text("{", encoding="utf-8")
+    os.utime(tmp_path / "trace-old.json", (1000, 1000))
+    os.utime(tmp_path / "trace-new.json", (2000, 2000))
+    app = create_app()
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            response = await client.get("/v1/traces?limit=10")
+
+    body = response.json()
+    assert response.status_code == 200
+    assert [trace["trace_id"] for trace in body["traces"]] == [
+        "trace-new",
+        "trace-old",
+    ]
+    assert body["traces"][0]["status"] == "degraded"
+    assert body["traces"][0]["summary"]["step_count"] == 1
+
+
 # 验证缺失跟踪文件返回稳定错误。
 @pytest.mark.anyio
 async def test_trace_endpoint_returns_not_found_for_missing_trace(tmp_path, monkeypatch):

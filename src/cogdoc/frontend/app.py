@@ -38,6 +38,10 @@ def _init_state() -> None:
     st.session_state.setdefault("messages_by_context", {})
     st.session_state.setdefault("restored_contexts", set())
     st.session_state.setdefault("pending_streams", {})
+    st.session_state.setdefault("trace_cache", {})
+    st.session_state.setdefault("active_trace_id", "")
+    st.session_state.setdefault("trace_list", [])
+    st.session_state.setdefault("trace_list_error", "")
     # 兼容旧状态：升级前只有一份全局 messages，迁移到当前 (kb, session) 桶里。
     if "messages" in st.session_state:
         if st.session_state.kb_id and st.session_state.messages:
@@ -169,6 +173,155 @@ def _send_feedback(final: dict, query: str, feedback: str) -> None:
     )
 
 
+def _load_trace(trace_id: str, force: bool = False) -> None:
+    trace_id = trace_id.strip()
+    if not trace_id:
+        return
+    if force:
+        st.session_state.trace_cache.pop(trace_id, None)
+    elif trace_id in st.session_state.trace_cache:
+        return
+    try:
+        resp = _client().get_trace(trace_id)
+        if resp.status_code == 200:
+            st.session_state.trace_cache[trace_id] = response_payload(resp)
+        else:
+            st.session_state.trace_cache[trace_id] = {
+                "error": _response_error(resp, "读取 trace 失败")
+            }
+    except Exception as exc:
+        st.session_state.trace_cache[trace_id] = {"error": str(exc)}
+
+
+def _load_trace_list() -> None:
+    try:
+        resp = _client().list_traces(limit=30)
+        if resp.status_code != 200:
+            st.session_state.trace_list_error = _response_error(
+                resp, "读取 trace 列表失败"
+            )
+            st.session_state.trace_list = []
+            return
+        payload = response_payload(resp)
+        traces = payload.get("traces", []) if isinstance(payload, Mapping) else []
+        st.session_state.trace_list = [
+            trace
+            for trace in traces
+            if isinstance(trace, Mapping) and isinstance(trace.get("trace_id"), str)
+        ]
+        st.session_state.trace_list_error = ""
+    except Exception as exc:
+        st.session_state.trace_list = []
+        st.session_state.trace_list_error = str(exc)
+
+
+def _trace_option_label(trace_id: str) -> str:
+    if not trace_id:
+        return "选择最近 trace"
+    for trace in st.session_state.trace_list:
+        if trace.get("trace_id") == trace_id:
+            status = trace.get("status", "-")
+            task = trace.get("task_type", "-")
+            duration = trace.get("duration_ms")
+            suffix = f" · {duration} ms" if duration is not None else ""
+            return f"{trace_id[:8]} · {task} · {status}{suffix}"
+    return trace_id
+
+
+def _render_trace_step(step: Mapping, idx: int) -> None:
+    node = step.get("node_name") or f"step-{idx + 1}"
+    duration = step.get("duration_ms")
+    label = f"{idx + 1}. {node}"
+    if duration is not None:
+        label += f" · {duration} ms"
+    with st.expander(label):
+        cols = st.columns(4)
+        cols[0].caption(f"任务: {step.get('task_type') or '-'}")
+        cols[1].caption(f"模型: {step.get('model') or '-'}")
+        cols[2].caption(f"top_k: {step.get('retrieval_top_k') or '-'}")
+        cols[3].caption(f"错误: {step.get('error_class') or '-'}")
+
+        if step.get("router_reason"):
+            st.markdown("**路由理由**")
+            st.write(step["router_reason"])
+        if step.get("critique"):
+            st.markdown("**校验反馈**")
+            st.write(step["critique"])
+        counts = step.get("counts") or {}
+        if counts:
+            st.markdown("**计数**")
+            st.json(counts)
+        evidence = step.get("evidence") or []
+        if evidence:
+            st.markdown("**证据预览**")
+            for item in evidence:
+                source = item.get("source", "")
+                chunk_id = item.get("chunk_id", "")
+                st.caption(
+                    f"{source}{_page_label(item.get('page'))} · `{chunk_id}`"
+                )
+                st.write(item.get("text_preview", ""))
+
+
+def _render_trace_debug(trace: dict) -> None:
+    trace_error = trace.get("error")
+    if isinstance(trace_error, str):
+        st.error(trace["error"])
+        return
+    summary = trace.get("summary") or {}
+    meta = st.columns(4)
+    meta[0].caption(f"状态: {trace.get('status') or '-'}")
+    meta[1].caption(f"任务: {trace.get('task_type') or '-'}")
+    meta[2].caption(f"耗时: {trace.get('duration_ms') or '-'} ms")
+    meta[3].caption(f"步骤: {summary.get('step_count', 0)}")
+    if trace.get("config"):
+        with st.expander("请求配置"):
+            st.json(trace["config"])
+    if trace_error:
+        with st.expander("运行错误", expanded=True):
+            st.json(trace_error)
+    for idx, step in enumerate(trace.get("steps") or []):
+        if isinstance(step, Mapping):
+            _render_trace_step(step, idx)
+
+
+def _render_trace_lookup() -> None:
+    with st.expander("Trace 调试"):
+        list_cols = st.columns([1, 1, 3])
+        if list_cols[0].button("最近 trace", key="trace-list-load"):
+            _load_trace_list()
+        if list_cols[1].button("刷新列表", key="trace-list-refresh"):
+            _load_trace_list()
+        if st.session_state.trace_list_error:
+            st.warning(f"读取 trace 列表失败: {st.session_state.trace_list_error}")
+        if st.session_state.trace_list:
+            options = [""] + [trace["trace_id"] for trace in st.session_state.trace_list]
+            selected = st.selectbox(
+                "最近请求",
+                options,
+                format_func=_trace_option_label,
+                key="trace_recent_select",
+            )
+            if selected and st.button("打开选中 trace", key="trace-open-selected"):
+                st.session_state.active_trace_id = selected
+                _load_trace(selected)
+
+        with st.form("trace_lookup"):
+            trace_id = st.text_input(
+                "trace_id", value=st.session_state.active_trace_id
+            ).strip()
+            submitted = st.form_submit_button("查询")
+        if submitted and trace_id:
+            st.session_state.active_trace_id = trace_id
+            _load_trace(trace_id)
+        active = st.session_state.active_trace_id
+        if active and st.button("刷新 trace", key="trace-refresh"):
+            _load_trace(active, force=True)
+        if active and active in st.session_state.trace_cache:
+            st.caption(f"trace_id: {active}")
+            _render_trace_debug(st.session_state.trace_cache[active])
+
+
 # 渲染 evidence。
 def _render_evidence(final: dict, key: str, query: str = "") -> None:
     # 渲染一条回答的元信息 + 引用/证据面板 + 赞踩按钮（消费结构化字段）。
@@ -196,6 +349,16 @@ def _render_evidence(final: dict, key: str, query: str = "") -> None:
         _send_feedback(final, query, "thumbs_up")
     if fb[1].button("👎", key=f"down-{key}"):
         _send_feedback(final, query, "thumbs_down")
+
+    trace_id = final.get("trace_id")
+    if trace_id:
+        if st.button("查看 trace", key=f"trace-load-{key}"):
+            st.session_state.active_trace_id = trace_id
+            _load_trace(trace_id)
+        if trace_id in st.session_state.trace_cache:
+            with st.expander("Trace 调试", expanded=True):
+                st.caption(f"trace_id: {trace_id}")
+                _render_trace_debug(st.session_state.trace_cache[trace_id])
 
 
 # 完成 侧边栏 处理。
@@ -525,6 +688,7 @@ def _chat_area() -> None:
         key="chat_mode",
         disabled=answering,
     )
+    _render_trace_lookup()
 
     messages = _messages_for(kb_id) if kb_id else []
     for msg in messages:

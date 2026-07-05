@@ -250,6 +250,23 @@ class TraceResponse(ApiModel):
     steps: list[dict[str, Any]] = Field(default_factory=list)
 
 
+# 跟踪列表项，供调试控制台浏览最近请求。
+class TraceListItem(ApiModel):
+    trace_id: str
+    request_id: str
+    task_type: str
+    status: str
+    duration_ms: float | None = None
+    modified_at: str
+    summary: TraceSummary = Field(default_factory=TraceSummary)
+
+
+# 最近跟踪文件列表响应。
+class TraceListResponse(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    traces: list[TraceListItem] = Field(default_factory=list)
+
+
 # 转换为映射。
 def _as_mapping(value: Any) -> Mapping[str, Any]:
     if isinstance(value, Mapping):

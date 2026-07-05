@@ -13,11 +13,14 @@ _EXEMPT_PATHS = frozenset(
     {"/healthz", "/readyz", "/metrics", "/docs", "/redoc", "/openapi.json"}
 )
 # 仅豁免限流（仍走鉴权）：前端刷新/轮询会高频读取这些轻量状态接口。
-_RATE_LIMIT_EXEMPT_GET_PATHS = frozenset(("/v1/knowledge-bases", "/v1/sessions"))
+_RATE_LIMIT_EXEMPT_GET_PATHS = frozenset(
+    ("/v1/knowledge-bases", "/v1/sessions", "/v1/traces")
+)
 _RATE_LIMIT_EXEMPT_GET_PREFIXES = (
     "/v1/index-jobs/",
     "/v1/knowledge-bases/",
     "/v1/sessions/",
+    "/v1/traces/",
 )
 
 
