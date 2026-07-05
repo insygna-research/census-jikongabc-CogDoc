@@ -34,7 +34,7 @@ dependencies = [
 [project.scripts]
 # 安装后可直接 `cogdoc` 启动多库多对话控制台（等价 python -m cogdoc.cli）。
 cogdoc = "cogdoc.cli:main"
-# `cogdoc-debug` 启动检索可视化/可观测控制台（等价 python -m cogdoc.debug）。
+# `cogdoc-debug` 启动独立 Debug 控制台（等价 python -m cogdoc.debug）。
 cogdoc-debug = "cogdoc.debug:main"
 
 [project.optional-dependencies]

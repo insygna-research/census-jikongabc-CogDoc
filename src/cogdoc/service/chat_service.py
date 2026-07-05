@@ -168,6 +168,7 @@ def run_chat(
         "max_iteration_count": 2,
         "request_id": trace_id,
         "trace_id": trace_id,
+        "session_id": session_id,
     }
 
     configurable = {
@@ -176,6 +177,7 @@ def run_chat(
         "is_local": is_local,
         "request_id": trace_id,
         "trace_id": trace_id,
+        "session_id": session_id,
     }
     if forced_task in FORCED_TASK_TYPES:
         configurable["forced_task"] = forced_task

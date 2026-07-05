@@ -23,12 +23,14 @@ def _preview(text: Any, limit: int = TRACE_PREVIEW_CHARS) -> str:
 # 构建文档引用摘要。
 def _doc_ref(doc: Mapping[str, Any]) -> dict:
     meta = doc.get("meta", {})
+    retrieval = doc.get("retrieval") or {}
     return {
         "chunk_id": meta.get("chunk_id", ""),
         "source": meta.get("source", ""),
         "page": meta.get("page", 0),
         "page_start": meta.get("page_start", meta.get("page", 0)),
         "page_end": meta.get("page_end", meta.get("page", 0)),
+        "rewrite_query": retrieval.get("rewrite_query", ""),
         "text_preview": _preview(doc.get("text", "")),
     }
 
@@ -78,6 +80,16 @@ def build_trace_step(
         step["rewritten_queries"] = [
             _preview(query, 120)
             for query in list(output.get("rewritten_queries") or [])[:5]
+        ]
+    if output.get("steps_trace"):
+        step["steps_trace"] = [
+            {
+                "step_name": _preview(item.get("step_name", ""), 80),
+                "input_summary": _preview(item.get("input_summary", ""), 400),
+                "output_summary": _preview(item.get("output_summary", ""), 800),
+            }
+            for item in list(output.get("steps_trace") or [])[:5]
+            if isinstance(item, Mapping)
         ]
 
     count_fields = {

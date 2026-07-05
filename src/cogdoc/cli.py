@@ -1,6 +1,5 @@
 import atexit
 import os
-import re
 import shutil
 import signal
 import sys
@@ -12,9 +11,9 @@ except ImportError:
     readline = None
 
 from cogdoc.agents.conversation_memory import extract_final_answer
-from cogdoc.agents.router import FORCED_TASK_TYPES
 from cogdoc.api.ingest import KBExistsError, KnowledgeBaseRegistry
 from cogdoc.api.persistence import SqliteSessionStore
+from cogdoc.command_modes import parse_forced_mode
 from cogdoc.config.settings import get_settings
 from cogdoc.graph.subgraphs.qa import RetrieverFactory
 from cogdoc.graph.workflow import UNKNOWN_RESPONSE
@@ -41,11 +40,6 @@ from cogdoc.tools.embedder import Embedder
 from cogdoc.tools.manifest import load_index_manifest
 from cogdoc.tools.reranker import BGEReranker
 from cogdoc.tools.rust_core_loader import ensure_rust_core
-
-FORCED_MODE_PATTERN = re.compile(
-    rf"^/({'|'.join(re.escape(task) for task in FORCED_TASK_TYPES)})(?:\s+(.*))?$",
-    re.I,
-)
 
 # Tab 补全的命令与 /kb 子命令候选。
 COMPLETION_COMMANDS = [
@@ -86,14 +80,6 @@ def get_rust_core():
     if rust_core is None:
         rust_core = ensure_rust_core("scan_pdf_manifest_native", "rrf_fusion_native")
     return rust_core
-
-
-# 解析用户指定的强制任务模式。
-def parse_forced_mode(user_input: str) -> tuple[str | None, str]:
-    match = FORCED_MODE_PATTERN.match(user_input.strip())
-    if not match:
-        return None, user_input
-    return match.group(1).lower(), (match.group(2) or "").strip()
 
 
 # 在中断信号期间安全输出提示。
@@ -162,7 +148,6 @@ HELP_TEXT = """\
     exit / quit            退出
 直接输入文本 = 在当前对话里向当前知识库提问。\
 """
-
 
 # 对话历史落 SqliteSessionStore，重启不丢。
 class Console:
@@ -509,6 +494,7 @@ class Console:
                 is_local=self.is_local,
                 chat_history=chat_history,
                 forced_task=forced_task,
+                session_id=sid,
             ):
                 if event.type == "error":
                     print(f"\n⚠️ 执行中断: {event.payload.get('message', '')}")
@@ -527,7 +513,13 @@ class Console:
                 final_result.chat_messages,
                 [
                     {"role": "user", "content": query},
-                    {"role": "assistant", "content": final_result.answer},
+                    {
+                        "role": "assistant",
+                        "content": final_result.answer,
+                        "trace_id": final_result.trace_id,
+                        "query": query,
+                        "task_type": final_result.task_type,
+                    },
                 ],
             )
 
@@ -665,7 +657,6 @@ class Console:
 
         self.do_chat(text, None)
         return True
-
 
 # 配置补全。
 def _setup_completion(console: "Console") -> None:

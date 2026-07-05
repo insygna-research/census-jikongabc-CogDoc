@@ -1,8 +1,11 @@
 import argparse
 import atexit
+import json
 import os
+import re
 import signal
 import sys
+from uuid import uuid4
 
 try:
     import readline
@@ -14,10 +17,12 @@ from cogdoc.agents.conversation_memory import (
     extract_final_answer,
 )
 from cogdoc.api.ingest import KnowledgeBaseRegistry
+from cogdoc.command_modes import parse_forced_mode
 from cogdoc.config.settings import get_settings
 from cogdoc.graph.subgraphs.qa import RetrieverFactory
 from cogdoc.graph.workflow import UNKNOWN_RESPONSE
 from cogdoc.observability.logger import configure_logging
+from cogdoc.observability.trace import trace_dir, trace_path
 from cogdoc.service.chat_service import ChatEvent, ChatResult, run_chat
 from cogdoc.service.ingest_service import (
     build_kb_index_transactional,
@@ -43,6 +48,51 @@ from cogdoc.tools.reranker import BGEReranker
 from cogdoc.tools.rust_core_loader import ensure_rust_core
 
 rust_core = None
+DEBUG_COMMANDS = [
+    "/trace",
+    "/steps",
+    "/rewrite",
+    "/evidence",
+    "/config",
+    "/ls",
+    "/local",
+    "/cloud",
+    "/qa",
+    "/summary",
+    "/compare",
+    "/help",
+    "exit",
+    "quit",
+]
+DEBUG_HELP_TEXT = """\
+调试模式命令：
+    /trace [trace_id]       查看最近一次或指定 trace 的摘要
+    /steps                  查看最近一次 trace 的节点耗时
+    /rewrite                查看最近一次问题改写结果
+    /evidence               查看最近一次检索/重排证据摘要
+    /config                 查看最近一次请求配置
+    /ls                     查看当前知识库 PDF
+    /local  /cloud          切换本地 Ollama / 云端 API
+    /qa <问题>              调试模式下强制问答
+    /summary <文件名>       调试模式下强制总结
+    /compare <A> <B> ...    调试模式下强制对比
+    /help                   显示本帮助
+直接输入文本 = 继续问答，并在答案后显示本次 trace 摘要。\
+"""
+TRACE_NODE_LABELS = {
+    "runtime.setup": "运行准备",
+    "intent_router": "意图路由",
+    "rewrite_node": "问题改写",
+    "verify_rewrite_node": "改写校验",
+    "retrieve_node": "召回检索",
+    "rerank_node": "重排",
+    "generate_node": "答案生成",
+    "citation_node": "引用校验",
+    "qa_subgraph": "问答流程",
+    "summary_subgraph": "摘要流程",
+    "compare_subgraph": "对比流程",
+}
+TRACE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
 # 释放运行时锁。
@@ -71,14 +121,421 @@ def safe_print_on_interrupt(message: str) -> None:
         signal.signal(signal.SIGINT, previous_handler)
 
 
-# 解析用户指定的强制任务模式。
-def parse_forced_mode(user_input: str) -> tuple[str | None, str]:
-    from cogdoc.cli import FORCED_MODE_PATTERN
+class DebugSession:
+    # 独立 debug 控制台的 trace 命令和展示逻辑。
+    def __init__(self):
+        self.last_trace: dict | None = None
 
-    match = FORCED_MODE_PATTERN.match(user_input.strip())
-    if not match:
-        return None, user_input
-    return match.group(1).lower(), (match.group(2) or "").strip()
+    # 格式化耗时。
+    def format_duration(self, duration_ms) -> str:
+        if duration_ms is None:
+            return ""
+        try:
+            value = float(duration_ms)
+        except (TypeError, ValueError):
+            return str(duration_ms)
+        if value >= 1000:
+            return f"{value / 1000:.1f}s"
+        return f"{value:.0f}ms"
+
+    # 提取 trace 节点短名。
+    def trace_node_key(self, node_name: str) -> str:
+        tail = (node_name or "").rsplit(".", 1)[-1]
+        return tail.split(":", 1)[0] if ":" in tail else tail
+
+    # 构建 trace 步骤展示名。
+    def trace_step_title(self, step: dict, idx: int) -> str:
+        node_name = str(step.get("node_name") or f"step-{idx + 1}")
+        node_key = self.trace_node_key(node_name)
+        title = TRACE_NODE_LABELS.get(node_key, node_key)
+        duration = self.format_duration(step.get("duration_ms"))
+        suffix = f" · {duration}" if duration else ""
+        return f"{idx + 1}. {title} · {node_key}{suffix}"
+
+    # 从运行结果构造 debug 控制台可打印的 trace 载荷。
+    def trace_from_result(
+        self,
+        result: ChatResult,
+        query: str = "",
+        doc_id: str = "",
+        is_local: bool = False,
+        forced_task: str | None = None,
+        session_id: str | None = None,
+    ) -> dict:
+        return {
+            "trace_id": result.trace_id,
+            "request_id": result.request_id,
+            "task_type": result.task_type,
+            "status": "ok" if result.is_valid else "blocked",
+            "config": {
+                "doc_id": doc_id,
+                "session_id": session_id or "",
+                "query_preview": " ".join((query or "").split())[:80],
+                "is_local": is_local,
+                "forced_task": forced_task,
+            },
+            "steps": list(result.steps or []),
+            "trace_path": result.trace_path,
+        }
+
+    # 记录最近一次请求。
+    def remember_result(
+        self,
+        result: ChatResult,
+        query: str = "",
+        doc_id: str = "",
+        is_local: bool = False,
+        forced_task: str | None = None,
+        session_id: str | None = None,
+    ) -> dict:
+        if result.trace_path:
+            payload = self.load_trace_file(result.trace_path)
+            if payload is not None:
+                self.last_trace = payload
+                return self.last_trace
+        self.last_trace = self.trace_from_result(
+            result,
+            query=query,
+            doc_id=doc_id,
+            is_local=is_local,
+            forced_task=forced_task,
+            session_id=session_id,
+        )
+        return self.last_trace
+
+    # 加载指定 trace 文件路径。
+    def load_trace_file(self, path_text: str) -> dict | None:
+        try:
+            with open(path_text, encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"⚠️ trace 文件读取失败: {exc}")
+            return None
+        payload.setdefault("trace_path", path_text)
+        return payload
+
+    # 加载指定 trace 文件。
+    def load_trace_payload(self, trace_id: str) -> dict | None:
+        if not TRACE_ID_PATTERN.fullmatch(trace_id):
+            print(f"⚠️ trace_id 不合法: {trace_id}")
+            return None
+        path = trace_path(trace_id)
+        if not path.exists() or not path.is_file():
+            print(f"⚠️ trace 不存在: {trace_id}")
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"⚠️ trace 文件读取失败: {exc}")
+            return None
+        payload.setdefault("trace_path", str(path))
+        return payload
+
+    # 当前可用 trace。
+    def current_trace(self) -> dict | None:
+        if self.last_trace is None:
+            print("（还没有 trace。先在 debug 控制台里问一个问题。）")
+            return None
+        return self.last_trace
+
+    # 打印 trace 摘要。
+    def print_trace_summary(self, trace: dict | None = None) -> None:
+        trace = trace or self.current_trace()
+        if trace is None:
+            return
+        steps = list(trace.get("steps") or [])
+        summary = trace.get("summary") or {}
+        config = trace.get("config") or {}
+        duration = self.format_duration(trace.get("duration_ms"))
+        duration_text = f" · {duration}" if duration else ""
+        trace_id = str(trace.get("trace_id") or "-")[:8]
+        print(
+            f"\nTrace: {trace_id} · "
+            f"{trace.get('task_type', '-')} · {trace.get('status', '-')}"
+            f"{duration_text} · {summary.get('step_count', len(steps))} 步"
+        )
+        query = str(config.get("query_preview") or "").strip()
+        if query:
+            print(f"问题: {query}")
+        if config:
+            doc_id = config.get("doc_id") or "-"
+            session_id = config.get("session_id") or "-"
+            model = config.get("model") or "-"
+            mode = "本地" if config.get("is_local") else "云端"
+            forced = config.get("forced_task") or "-"
+            print(
+                f"配置: kb={doc_id} · session={session_id} · "
+                f"mode={mode} · forced={forced} · model={model}"
+            )
+        if trace.get("trace_path"):
+            print(f"文件: {trace['trace_path']}")
+        for idx, step in enumerate(steps[:12]):
+            print(f"  {self.trace_step_title(step, idx)}")
+        if len(steps) > 12:
+            print(f"  ... 还有 {len(steps) - 12} 步，输入 /steps 查看全部")
+        print("继续输入 /steps 查看节点，/rewrite 看改写，/evidence 看证据，/config 看配置，exit 退出。")
+
+    # 打印 trace 全部步骤。
+    def print_trace_steps(self) -> None:
+        trace = self.current_trace()
+        if trace is None:
+            return
+        steps = list(trace.get("steps") or [])
+        if not steps:
+            print("（当前 trace 没有步骤。）")
+            return
+        print("\nTrace steps:")
+        for idx, step in enumerate(steps):
+            print(f"  {self.trace_step_title(step, idx)}")
+            if step.get("node_name"):
+                print(f"     原始节点: {step.get('node_name')}")
+            details = []
+            if step.get("task_type"):
+                details.append(f"task={step.get('task_type')}")
+            if step.get("model"):
+                details.append(f"model={step.get('model')}")
+            if step.get("retrieval_top_k") is not None:
+                details.append(f"top_k={step.get('retrieval_top_k')}")
+            if step.get("error_class"):
+                details.append(f"error={step.get('error_class')}")
+            if details:
+                print(f"     {' | '.join(details)}")
+            if step.get("router_reason"):
+                print(f"     路由理由: {step.get('router_reason')}")
+            rewritten = step.get("rewritten_queries") or []
+            if rewritten:
+                print("     改写查询:")
+                for query in rewritten:
+                    print(f"       - {query}")
+            elif (step.get("counts") or {}).get("rewritten_query_count"):
+                print("     改写查询: 此 trace 只记录了数量，未保存具体内容。")
+            if step.get("critique"):
+                print(f"     校验反馈: {step.get('critique')}")
+            counts = step.get("counts") or {}
+            if counts:
+                print(f"     计数: {json.dumps(counts, ensure_ascii=False)}")
+            step_traces = step.get("steps_trace") or []
+            if step_traces:
+                print("     调试摘要:")
+                for item in step_traces[:3]:
+                    name = item.get("step_name") or "-"
+                    input_summary = item.get("input_summary") or ""
+                    output_summary = item.get("output_summary") or ""
+                    print(f"       - {name}")
+                    if input_summary:
+                        print(f"         input: {input_summary}")
+                    if output_summary:
+                        print(f"         output: {output_summary}")
+            evidence = step.get("evidence") or []
+            if evidence:
+                print("     证据预览:")
+                for item in evidence[:5]:
+                    source = item.get("source") or "-"
+                    page = item.get("page") or item.get("page_start") or "-"
+                    chunk_id = item.get("chunk_id") or "-"
+                    preview = item.get("text_preview") or ""
+                    print(f"       - {source}:P{page} · {chunk_id}")
+                    if preview:
+                        print(f"         {preview}")
+
+    # 解析 JSON 字段，失败时返回原文本。
+    def _parse_json_summary(self, value):
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+
+    # 打印问题改写。
+    def print_trace_rewrite(self) -> None:
+        trace = self.current_trace()
+        if trace is None:
+            return
+        rewrites: list[str] = []
+        candidates: list[str] = []
+        kept: list[str] = []
+        dropped: list[dict] = []
+        threshold = None
+        only_count = False
+        for step in trace.get("steps") or []:
+            rewrites.extend(step.get("rewritten_queries") or [])
+            only_count = only_count or bool(
+                (step.get("counts") or {}).get("rewritten_query_count")
+            )
+            for item in step.get("steps_trace") or []:
+                input_summary = self._parse_json_summary(item.get("input_summary"))
+                output_summary = self._parse_json_summary(item.get("output_summary"))
+                if isinstance(input_summary, list):
+                    candidates.extend(str(query) for query in input_summary)
+                if isinstance(output_summary, dict):
+                    threshold = output_summary.get("threshold", threshold)
+                    kept.extend(str(query) for query in output_summary.get("kept", []))
+                    dropped.extend(output_summary.get("dropped", []) or [])
+        rewrites = list(dict.fromkeys(rewrites))
+        candidates = list(dict.fromkeys(candidates))
+        kept = list(dict.fromkeys(kept))
+        if rewrites:
+            print("\n改写查询:")
+            for query in rewrites:
+                print(f"  - {query}")
+        if candidates:
+            print("\n校验前候选:")
+            for query in candidates:
+                print(f"  - {query}")
+        if kept:
+            print("\n校验后保留:")
+            for query in kept:
+                print(f"  - {query}")
+        if dropped:
+            print("\n相似度过滤:")
+            if threshold is not None:
+                print(f"  阈值: {threshold}")
+            for item in dropped:
+                if isinstance(item, dict):
+                    print(
+                        f"  - {item.get('query', '-')} "
+                        f"(similarity={item.get('similarity', '-')})"
+                    )
+                else:
+                    print(f"  - {item}")
+        if not any((rewrites, candidates, kept, dropped)) and only_count:
+            print("当前 trace 只记录了改写数量，未保存具体改写查询。")
+        elif not any((rewrites, candidates, kept, dropped)):
+            print("（当前 trace 没有问题改写记录。）")
+
+    # 打印证据摘要。
+    def print_trace_evidence(self) -> None:
+        trace = self.current_trace()
+        if trace is None:
+            return
+        evidence = []
+        for step in trace.get("steps") or []:
+            for item in step.get("evidence") or []:
+                evidence.append((step.get("node_name", ""), item))
+        if not evidence:
+            print("（当前 trace 没有证据摘要。）")
+            return
+        print("\n证据摘要:")
+        for idx, (node, item) in enumerate(evidence[:20], start=1):
+            source = item.get("source") or "-"
+            page = item.get("page") or item.get("page_start") or "-"
+            chunk_id = item.get("chunk_id") or "-"
+            preview = item.get("text_preview") or ""
+            rewrite_query = item.get("rewrite_query")
+            suffix = f" · rewrite={rewrite_query}" if rewrite_query else ""
+            print(
+                f"  {idx}. {source}:P{page} · {chunk_id} · "
+                f"{self.trace_node_key(node)}{suffix}"
+            )
+            if preview:
+                print(f"     {preview}")
+
+    # 打印请求配置。
+    def print_trace_config(self) -> None:
+        trace = self.current_trace()
+        if trace is None:
+            return
+        config = trace.get("config") or {}
+        if not config:
+            print("（当前 trace 没有请求配置。）")
+            return
+        print("\n请求配置:")
+        print(json.dumps(config, ensure_ascii=False, indent=2))
+
+    # 打印 debug 帮助。
+    def print_help(self) -> None:
+        print(DEBUG_HELP_TEXT)
+
+    # 执行带 debug 输出的问答。
+    def ask(
+        self,
+        doc_id: str,
+        query: str,
+        is_local: bool = False,
+        chat_history: list | None = None,
+        forced_task: str | None = None,
+        session_id: str | None = None,
+        render_event=None,
+        show_trace_summary: bool = True,
+    ) -> ChatResult | None:
+        final_result = None
+        for event in run_chat(
+            doc_id=doc_id,
+            query=query,
+            is_local=is_local,
+            chat_history=chat_history,
+            forced_task=forced_task,
+            session_id=session_id,
+        ):
+            if render_event is not None:
+                rendered = render_event(event)
+                if rendered is not None:
+                    final_result = rendered
+                elif event.type == "final":
+                    final_result = event.payload["result"]
+            elif event.type == "error":
+                print(f"\n⚠️ 执行中断: {event.payload.get('message', '')}")
+            elif event.type == "final":
+                final_result = event.payload["result"]
+
+        if final_result is not None:
+            self.remember_result(
+                final_result,
+                query=query,
+                doc_id=doc_id,
+                is_local=is_local,
+                forced_task=forced_task,
+                session_id=session_id,
+            )
+            if show_trace_summary:
+                self.print_trace_summary()
+        return final_result
+
+    # 分发 debug 命令。
+    def dispatch(self, text: str, ask_callback) -> str:
+        low = text.lower()
+        if low == "/help":
+            self.print_help()
+            return "handled"
+
+        parts = text.split(maxsplit=1)
+        cmd = parts[0].lower()
+        arg = parts[1].strip() if len(parts) > 1 else ""
+        if cmd == "/trace":
+            trace = self.load_trace_payload(arg) if arg else self.current_trace()
+            if trace is not None:
+                if arg:
+                    self.last_trace = trace
+                self.print_trace_summary(trace)
+            return "handled"
+        if cmd == "/steps":
+            self.print_trace_steps()
+            return "handled"
+        if cmd == "/rewrite":
+            self.print_trace_rewrite()
+            return "handled"
+        if cmd == "/evidence":
+            self.print_trace_evidence()
+            return "handled"
+        if cmd == "/config":
+            self.print_trace_config()
+            return "handled"
+
+        forced_task, cleaned_query = parse_forced_mode(text)
+        if forced_task:
+            if not cleaned_query:
+                print(f"⚠️ 请输入 /{forced_task} 后面的具体问题或文档指令。")
+                return "handled"
+            ask_callback(cleaned_query, forced_task)
+            return "handled"
+
+        if text.startswith("/"):
+            print("❓ debug 控制台不处理这个命令。输入 /help 查看 debug 命令。")
+            return "handled"
+
+        ask_callback(text, None)
+        return "handled"
 
 
 # 写入索引 is current。
@@ -296,20 +753,22 @@ def ask(
     is_local: bool = False,
     chat_history: list = None,
     forced_task: str | None = None,
+    session_id: str | None = None,
+    debug_session: DebugSession | None = None,
 ):
     # 输出检索全过程与最终答案。
     print(f"\n[运行模式]: {'本地 Ollama' if is_local else '云端 API'}")
-    final_result = None
-    for event in run_chat(
+    debug_session = debug_session or DebugSession()
+    final_result = debug_session.ask(
         doc_id=doc_id,
         query=query,
         is_local=is_local,
         chat_history=chat_history,
         forced_task=forced_task,
-    ):
-        rendered = render_chat_event(event)
-        if rendered is not None:
-            final_result = rendered
+        session_id=session_id,
+        render_event=render_chat_event,
+        show_trace_summary=True,
+    )
     if final_result is not None:
         return final_result.chat_messages
     return []
@@ -356,6 +815,52 @@ def print_kb_pdfs(kb_id: str, source_dir: str) -> None:
     print(f"📄 知识库 【{kb_id}】 PDF:")
     for name in pdfs:
         print(f"   • {name}")
+
+
+# 配置独立 debug 控制台补全与方向键编辑。
+def _setup_debug_completion(
+    kb_id: str, source_dir: str, debug_session: DebugSession
+) -> None:
+    if readline is None:
+        print("⚠️ 当前 Python 环境没有 readline，方向键编辑和 Tab 补全不可用。")
+        return
+
+    def _candidates(tokens: list[str]) -> list[str]:
+        if not tokens:
+            return DEBUG_COMMANDS
+        cmd = tokens[0].lower()
+        if cmd in ("/summary", "/compare"):
+            return _list_kb_pdfs(kb_id, source_dir)
+        if cmd == "/trace":
+            trace = debug_session.last_trace or {}
+            trace_id = trace.get("trace_id")
+            return [str(trace_id)] if trace_id else []
+        return []
+
+    matches: list[str] = []
+
+    def _complete(text: str, state: int) -> str | None:
+        nonlocal matches
+        try:
+            if state == 0:
+                buffer = readline.get_line_buffer()
+                tokens = buffer[: readline.get_begidx()].split()
+                matches = [
+                    item
+                    for item in _candidates(tokens)
+                    if item and item.startswith(text)
+                ]
+            return matches[state] if state < len(matches) else None
+        except Exception:
+            return None
+
+    readline.set_completer_delims(" \t\n")
+    readline.set_completer(_complete)
+    doc = getattr(readline, "__doc__", "") or ""
+    if "libedit" in doc:
+        readline.parse_and_bind("bind ^I rl_complete")
+    else:
+        readline.parse_and_bind("tab: complete")
 
 
 # 启动入口。
@@ -423,24 +928,49 @@ def main():
     except Exception as e:
         print(f"⚠️ 预热阶段失败，稍后提问时仍会尝试按需加载: {e}")
 
+    is_local = True
+    chat_history = []
+    debug_session_id = uuid4().hex
+    debug_session = DebugSession()
+
     print("=" * 60)
-    print(f"🔬 CogDoc 检索可视化 Debug 控制台 | 隔离域: {TARGET_DOC_ID}")
-    print("   - 打印路由判别 / 多路改写 / 召回精排切块(含 RRF 分) / 引证审计全过程")
+    print(f"🔬 CogDoc Debug 控制台 | 隔离域: {TARGET_DOC_ID}")
+    print(f"   - 知识库 ID: {TARGET_DOC_ID}")
+    print(f"   - Debug 会话 ID: {debug_session_id}")
+    print(f"   - 知识库源目录: {os.path.abspath(TARGET_DOC_DIR)}")
+    print(f"   - Trace 目录: {trace_dir()}")
+    print("   - 直接提问会打印回答、路由/改写/检索/引用审计过程，并保存本次 trace")
     print("       · /qa <问题>            强制问答")
     print("       · /summary <文件名>     强制总结指定文档")
     print("       · /compare <文件A> <文件B> ...  强制对比多篇文档（≥2，本地模式限 2）")
+    print("       · /trace /steps /rewrite /evidence /config  查看最近一次请求 trace")
     print("       · /ls                  查看当前知识库 PDF")
     print("   - 输入 '/local' / '/cloud' 切换运行模式")
     print("   - 输入 'exit' 或 'quit' 退出")
     print("=" * 60)
 
-    is_local = True
-    chat_history = []
+    _setup_debug_completion(TARGET_DOC_ID, TARGET_DOC_DIR, debug_session)
+
+    def _ask_debug(query: str, forced_task: str | None) -> None:
+        nonlocal chat_history
+        new_messages = ask(
+            doc_id=TARGET_DOC_ID,
+            query=query,
+            is_local=is_local,
+            chat_history=chat_history,
+            forced_task=forced_task,
+            session_id=debug_session_id,
+            debug_session=debug_session,
+        )
+        chat_history.extend(new_messages)
+        chat_history = chat_history[-CHAT_HISTORY_MESSAGE_LIMIT:]
 
     while True:
         try:
             mode_str = "本地Ollama" if is_local else "云端API"
-            user_input = input(f"[{mode_str}] 请输入您的问题 >>> ").strip()
+            user_input = input(
+                f"[debug|{TARGET_DOC_ID}|{debug_session_id[:8]}|{mode_str}] >>> "
+            ).strip()
 
             if not user_input:
                 continue
@@ -463,23 +993,13 @@ def main():
                 print_kb_pdfs(TARGET_DOC_ID, TARGET_DOC_DIR)
                 continue
 
-            forced_task, cleaned_query = parse_forced_mode(user_input)
-            if forced_task and not cleaned_query:
-                print(f"⚠️ 请输入 /{forced_task} 后面的具体问题或文档指令。")
-                continue
-
-            new_messages = ask(
-                doc_id=TARGET_DOC_ID,
-                query=cleaned_query,
-                is_local=is_local,
-                chat_history=chat_history,
-                forced_task=forced_task,
-            )
-            chat_history.extend(new_messages)
-            chat_history = chat_history[-CHAT_HISTORY_MESSAGE_LIMIT:]
+            debug_session.dispatch(user_input, _ask_debug)
 
         except KeyboardInterrupt:
             safe_print_on_interrupt("\n👋 检测到系统中断信号（Ctrl+C），安全关闭。")
+            break
+        except EOFError:
+            print("\n👋 输入流结束，控制台正在释放资源，再见。")
             break
         except Exception as e:
             print(f"⚠️ [控制台内部异常捕获]: {e}")

@@ -23,7 +23,7 @@ help:
 	@echo "make eval-suite-baseline - 对比 eval/eval_suite_baseline.json"
 	@echo "make eval-suite-update-baseline - 更新 eval/eval_suite_baseline.json"
 	@echo "make run     - 启动多库多对话控制台 (python -m cogdoc.cli)"
-	@echo "make debug   - 启动检索可视化/可观测控制台 (python -m cogdoc.debug)"
+	@echo "make debug   - 启动独立 Debug 控制台 (python -m cogdoc.debug)"
 	@echo "make serve   - 启动 FastAPI 服务 (uvicorn cogdoc.api.app:app)"
 	@echo "make frontend - 启动 Streamlit 前端 (src/cogdoc/frontend/app.py)"
 
