@@ -43,7 +43,7 @@ async def _client(app):
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver")
 
 
-# ---- 限流器单元 ----
+# 限流器单元。
 
 
 # 验证 token bucket allows burst then throttles 场景。
@@ -100,7 +100,7 @@ def test_build_rate_limiter_converts_per_minute():
     assert limiter.refill_per_second == pytest.approx(2.0)
 
 
-# ---- 鉴权 ----
+# 鉴权。
 
 
 # 验证 auth disabled when no keys 场景。
@@ -200,7 +200,7 @@ async def test_health_endpoints_exempt_from_auth(monkeypatch):
     assert readyz.status_code in (200, 503)
 
 
-# ---- 限流（端到端）----
+# 端到端限流。
 
 
 # 验证 rate limit returns 429 after capacity 场景。

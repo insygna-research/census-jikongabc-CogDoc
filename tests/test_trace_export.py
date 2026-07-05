@@ -78,7 +78,9 @@ def test_build_trace_payload_includes_audit_fields():
 
 # 验证跟踪目录与文件路径使用同一根目录解析。
 def test_trace_dir_and_path_share_resolved_base(tmp_path):
-    settings = Settings(cogdoc_trace_dir="relative-traces", cogdoc_data_dir=str(tmp_path))
+    settings = Settings(
+        cogdoc_trace_dir="relative-traces", cogdoc_data_dir=str(tmp_path)
+    )
 
     base = trace_dir(settings)
     path = trace_path("trace-1", settings)

@@ -29,7 +29,7 @@ def _make_state(tmp_path, kb_id="kb"):
     return KBState(kb_id, path=str(tmp_path / kb_id / "state.json"), epochs=epochs)
 
 
-# ---- _hardlink_snapshot ----
+# 测试硬链接快照。
 
 
 # 验证 hardlink snapshot creates hardlinks。
@@ -75,7 +75,7 @@ def test_hardlink_snapshot_immutable_from_source_write(tmp_path):
     assert open(os.path.join(gen_dir, "doc.pdf"), "rb").read() == b"%PDF-1.4 content"
 
 
-# ---- _cleanup_generation_storage ----
+# 测试清理代际存储。
 
 
 # 验证 cleanup removes gen dir。
@@ -120,7 +120,7 @@ def test_cleanup_tolerates_missing_resources(tmp_path):
         _cleanup_generation_storage("kb", "g001")  # 不应抛错
 
 
-# ---- build_kb_index_transactional：正常路径 ----
+# 事务化构建正常路径。
 
 
 # _patch_transactional：处理对应功能。
@@ -223,7 +223,7 @@ def test_transactional_build_schedules_old_gen_cleanup(tmp_path, monkeypatch):
     assert old_gen in cleaned
 
 
-# ---- build_kb_index_transactional：失败路径 ----
+# 事务化构建失败路径。
 
 
 # 验证 transactional build marks failed on index error。
@@ -295,7 +295,7 @@ def test_transactional_build_stale_cleans_and_reraises(tmp_path, monkeypatch):
         assert state.get(g)["status"] == GENERATION_FAILED
 
 
-# ---- _transactional_empty ----
+# 测试空目录事务构建。
 
 
 # 验证 transactional empty creates active gen。
@@ -359,7 +359,7 @@ def test_transactional_empty_stale_marks_failed(tmp_path, monkeypatch):
         assert state.get(g)["status"] == GENERATION_FAILED
 
 
-# ---- _verify_staging ----
+# 测试校验暂存目录。
 
 
 # 验证 verify staging passes for matching。
@@ -391,7 +391,7 @@ def test_verify_staging_chunk_id_mismatch_raises():
         _verify_staging(staging, chunks)
 
 
-# ---- _schedule_generation_cleanup：grace period ----
+# 测试延迟清理代际目录。
 
 
 # 验证 schedule cleanup uses tracked daemon timer。
@@ -430,7 +430,7 @@ def test_external_purge_waits_for_reader_lease(monkeypatch):
             ingest_service._purge_generation_external("kb", "g1")
 
 
-# ---- post-commit 异常不触发 mark_failed ----
+# 提交后异常不标记失败。
 
 
 # 验证 post commit exception does not mark failed。
@@ -453,7 +453,7 @@ def test_post_commit_exception_does_not_mark_failed(tmp_path, monkeypatch):
     assert result is not None
 
 
-# ---- _cleanup_generation_storage：partial failure 保留 state 记录 ----
+# 清理代际存储部分失败时保留状态。
 
 
 # 验证 cleanup keeps state record on partial failure。

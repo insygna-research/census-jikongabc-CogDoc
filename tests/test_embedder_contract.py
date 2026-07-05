@@ -81,7 +81,7 @@ def test_embed_query_rejects_wrong_dim(monkeypatch):
         Embedder.embed_query("x")
 
 
-# ---- validate_embeddings：整批校验 ----
+# 整批校验嵌入向量。
 
 
 # 验证 validate checks every vector not only first。
@@ -111,7 +111,7 @@ def test_validate_accepts_finite_correct_dim():
     Embedder.validate_embeddings(_good(3))  # 不应抛错
 
 
-# ---- add_with_embeddings：写入前守卫（在触达 collection 前生效） ----
+# 写入前校验嵌入向量。
 
 
 # 验证 add with embeddings rejects length mismatch。

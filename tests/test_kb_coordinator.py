@@ -16,7 +16,7 @@ def _make_state(tmp_path, kb_id="kb"):
     ), epochs
 
 
-# ---- IndexJobManager：per-KB executor ----
+# 测试单知识库执行器。
 
 
 # 验证 different kbs get different executors。
@@ -104,10 +104,10 @@ def test_shutdown_stops_all_executors():
     assert len(mgr._executors) == 0
 
 
-# ---- delete_kb_index_transactional ----
+# 测试事务化删除知识库索引。
 
 
-# 验证 delete transactional bumps epoch。
+# 验证事务化删除会推进纪元。
 def test_delete_transactional_bumps_epoch(tmp_path):
     epochs = EpochStore(path=str(tmp_path / "epochs.json"))
     mock_state = MagicMock()
@@ -148,7 +148,7 @@ def test_delete_schedules_purge_for_all_generations(tmp_path):
     assert set(scheduled) == {"g1", "g2"}
 
 
-# 验证 delete transactional invalidates engine cache。
+# 验证事务化删除会失效引擎缓存。
 def test_delete_transactional_invalidates_engine_cache(tmp_path):
     epochs = EpochStore(path=str(tmp_path / "epochs.json"))
     mock_state = MagicMock()
@@ -202,7 +202,9 @@ def test_drain_purge_queue_retries_and_dequeues_on_success(tmp_path, monkeypatch
         if gid == "g1":
             raise RuntimeError("chroma down")  # g1 失败保留
 
-    monkeypatch.setattr("cogdoc.service.ingest_service._purge_generation_external", purge)
+    monkeypatch.setattr(
+        "cogdoc.service.ingest_service._purge_generation_external", purge
+    )
     done = ingest_service.drain_purge_queue(now=100)
 
     assert done == 1  # 仅 g2 成功出队
@@ -228,9 +230,9 @@ def test_drain_purge_queue_skips_not_yet_due(tmp_path, monkeypatch):
     assert called == []
 
 
-# 验证 delete transactional rejects inflight staging。
+# 验证事务化删除拒绝在途暂存代。
 def test_delete_transactional_rejects_inflight_staging(tmp_path):
-    # epoch 自增后，在途 staging 的 switch_active 因 base_epoch 不符被拒。
+    # 纪元自增后，在途暂存代因基准纪元不符被拒。
     state, epochs = _make_state(tmp_path, "kb-del")
     gen_id = state.begin_generation("m", "v")
     state.mark_ready(gen_id, expected_count=1, documents=[])
@@ -294,7 +296,7 @@ def test_submit_compat_path_aborts_on_stale_epoch(tmp_path, monkeypatch):
     )
     gate = threading.Event()
     mgr._get_executor("kb").submit(gate.wait)
-    job = mgr.submit("kb")  # base_epoch=0
+    job = mgr.submit("kb")  # 基准纪元为零
     epochs.bump("kb")
     gate.set()
     mgr.run_blocking("kb", lambda: None)
@@ -328,7 +330,7 @@ def test_run_blocking_rejects_same_kb_executor_thread():
     assert isinstance(captured.get("err"), RuntimeError)
 
 
-# ---- IndexJobManager：submit_upload / submit_delete_doc ----
+# 测试上传和删除文档任务。
 
 
 # 验证 submit upload writes file before ingest。
@@ -405,7 +407,7 @@ def test_submit_delete_doc_removes_file_before_ingest(tmp_path):
     assert not os.path.exists(path)
 
 
-# ---- 构建失败回滚源文件 ----
+# 构建失败回滚源文件。
 
 
 # _boom_ingest：处理对应功能。
@@ -485,7 +487,7 @@ def test_delete_doc_build_failure_restores_file(tmp_path):
     assert store.get(job["job_id"])["status"] == "failed"
 
 
-# ---- epoch 守卫：删库后重建 incarnation 安全 ----
+# 删除后重建的纪元守卫。
 
 
 # 验证 upload stale epoch aborts。
@@ -512,7 +514,7 @@ def test_upload_stale_epoch_aborts(tmp_path, monkeypatch):
     gate = threading.Event()
     # 占住单线程 executor，保证 upload 入队后、执行前能 bump epoch
     mgr._get_executor("kb").submit(gate.wait)
-    job = mgr.submit_upload("kb", source_dir, "a.pdf", b"NEW")  # base_epoch=0
+    job = mgr.submit_upload("kb", source_dir, "a.pdf", b"NEW")  # 基准纪元为零
     epochs.bump("kb")  # 模拟删库：epoch 0→1
     gate.set()
     mgr.run_blocking("kb", lambda: None)
@@ -525,7 +527,7 @@ def test_upload_stale_epoch_aborts(tmp_path, monkeypatch):
     assert "已被删除或重建" in rec["message"]
 
 
-# ---- _closed 与上限保护 ----
+# 关闭状态和上限保护。
 
 
 # 验证 get executor raises after shutdown。
@@ -591,7 +593,7 @@ def test_upload_aborted_when_kb_deleted(tmp_path):
     assert "已被删除" in record["message"]
 
 
-# ---- #8 lifecycle / tombstone 读写门控 ----
+# 生命周期和删除标记读写门控。
 
 
 # 验证 get engine returns empty when deleting。
@@ -658,7 +660,7 @@ def test_create_resets_lifecycle_to_active(tmp_path):
     assert shared_lifecycle_store().status("kb") == LIFECYCLE_ACTIVE
 
 
-# 验证 delete transactional sets deleting。
+# 验证事务化删除会设置删除中状态。
 def test_delete_transactional_sets_deleting(tmp_path):
     # delete_kb_index_transactional 一进入即落 deleting 门控读路径。
     from cogdoc.service.kb_lifecycle import shared_lifecycle_store, LIFECYCLE_DELETING
@@ -677,7 +679,7 @@ def test_delete_transactional_sets_deleting(tmp_path):
     assert shared_lifecycle_store().status("kb-del") == LIFECYCLE_DELETING
 
 
-# ---- #5 journal 在正常/失败路径都清空 ----
+# 日志在正常和失败路径都清空。
 
 
 # 验证 successful upload clears journal。

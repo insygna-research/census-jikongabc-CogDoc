@@ -38,6 +38,7 @@ _ERROR_RESPONSES = {
 }
 
 
+# 处理runneraccepts会话编号。
 def _runner_accepts_session_id(runner: Callable[..., object]) -> bool:
     try:
         signature = inspect.signature(runner)
@@ -49,6 +50,7 @@ def _runner_accepts_session_id(runner: Callable[..., object]) -> bool:
     )
 
 
+# 运行withoptional会话。
 def _run_with_optional_session(
     runner: Callable[..., object],
     doc_id: str,

@@ -106,6 +106,7 @@ def _query_preview(query: str, limit: int = 80) -> str:
     return " ".join((query or "").split())[:limit]
 
 
+# 处理跟踪配置。
 def _trace_config(
     doc_id: str,
     query: str,

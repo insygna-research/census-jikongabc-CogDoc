@@ -83,7 +83,7 @@ class KBState:
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(tmp_path, self._path)
 
-    # ---- epoch / tombstone（dir-independent）----
+    # 维护纪元和删除标记。
 
     # epoch：处理对应功能。
     @property
@@ -94,7 +94,7 @@ class KBState:
     def bump_epoch(self) -> int:
         return self._epochs.bump(self.kb_id)
 
-    # ---- generation 生命周期 ----
+    # 代际生命周期。
 
     # begin_generation：处理对应功能。
     def begin_generation(self, embedding_model: str, index_build_version: str) -> str:
@@ -165,7 +165,7 @@ class KBState:
 
     # 切换活跃代。
     def switch_active(self, gen_id: str) -> str | None:
-        # 事务提交点：generation 必须 ready，且 base_epoch 仍等于当前 epoch（同一锁内校验）。 旧 active 标记 superseded 后即可被精确回收；返回旧 active id 供调用方清理。 注意：epoch 锁与 state 锁是两套，调用方必须持 kb_write_lock(kb_id) 才构成真正的提交原子区。
+        # 仅允许基准纪元仍匹配的就绪代切换为活跃代。
         with self._lock:
             data = self._load()
             gen = data["generations"].get(gen_id)
@@ -186,7 +186,7 @@ class KBState:
             self._save(data)
             return previous if previous != gen_id else None
 
-    # ---- 查询 / 回收 ----
+    # 查询和回收。
 
     # active：处理对应功能。
     def active(self) -> dict | None:

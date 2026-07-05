@@ -57,6 +57,7 @@ def test_format_api_error_prefers_structured_error_body():
 
 # 验证 list knowledge bases raises on structured error 场景。
 def test_list_knowledge_bases_raises_on_structured_error(monkeypatch):
+    # 测试fakeGET。
     def fake_get(*args, **kwargs):
         return httpx.Response(
             429,
@@ -101,6 +102,7 @@ def test_response_payload_falls_back_to_text_for_non_json_response():
 def test_trace_client_methods_call_expected_endpoints(monkeypatch):
     calls = []
 
+    # 测试fakeGET。
     def fake_get(url, **kwargs):
         calls.append((url, kwargs))
         return httpx.Response(200, json={"ok": True})

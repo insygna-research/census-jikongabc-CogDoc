@@ -1,5 +1,8 @@
 from cogdoc.agents import rewrite_verifier
-from cogdoc.agents.rewrite_verifier import RewriteVerifyAgent, filter_rewrites_by_similarity
+from cogdoc.agents.rewrite_verifier import (
+    RewriteVerifyAgent,
+    filter_rewrites_by_similarity,
+)
 
 
 # 验证 keeps above threshold drops below 场景。

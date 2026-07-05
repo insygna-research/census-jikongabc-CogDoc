@@ -325,7 +325,7 @@ def _recover_entry(entry: dict) -> bool:
         # 明确记过移动却找不到备份时无法证明源文件一致，保留 journal 等人工/后续恢复。
         return not source_moved
 
-    # upload
+    # 上传。
     if committed:
         if had_old and os.path.exists(backup):
             _silent_remove(

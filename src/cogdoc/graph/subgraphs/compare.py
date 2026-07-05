@@ -1,7 +1,10 @@
 from langchain_core.messages import AIMessage
 from langgraph.graph import StateGraph, START, END
 from cogdoc.agents.compare_generator import CompareGeneratorAgent
-from cogdoc.agents.compare_profile import DocumentProfileAgent, default_compare_dimensions
+from cogdoc.agents.compare_profile import (
+    DocumentProfileAgent,
+    default_compare_dimensions,
+)
 from cogdoc.agents.source_resolver import resolve_compare_sources
 from cogdoc.graph.state import GraphState
 from cogdoc.graph.subgraphs.qa import RetrieverFactory

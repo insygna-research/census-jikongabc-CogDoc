@@ -149,6 +149,7 @@ HELP_TEXT = """\
 直接输入文本 = 在当前对话里向当前知识库提问。\
 """
 
+
 # 对话历史落 SqliteSessionStore，重启不丢。
 class Console:
     # 对话历史落 SqliteSessionStore，重启不丢。
@@ -164,7 +165,7 @@ class Console:
         self._completion_matches: list[str] = []
         os.makedirs(self.inbox_dir, exist_ok=True)
 
-    # ---- 工具 ----
+    # 工具。
 
     # 确认结果。
     def _confirm(self, prompt: str) -> bool:
@@ -173,7 +174,9 @@ class Console:
     # 校验知识库。
     def _require_kb(self) -> bool:
         if self.active_kb is None:
-            print("⚠️ 还没有选择知识库。用 /kb 查看、/kb new <名> 创建、/kb use <名> 切换。")
+            print(
+                "⚠️ 还没有选择知识库。用 /kb 查看、/kb new <名> 创建、/kb use <名> 切换。"
+            )
             return False
         return True
 
@@ -223,7 +226,7 @@ class Console:
             print(f"✅ 重建完成，共 {result.chunk_count} 个知识片段。")
         _warm_kb(kb)
 
-    # ---- 知识库命令 ----
+    # 知识库命令。
 
     # 切换到知识库。
     def _use_kb(self, name: str) -> None:
@@ -300,7 +303,7 @@ class Console:
             return
         print(f"❓ 未知 /kb 子命令: {sub}。可用: new / use / rm（或不带参数列出）。")
 
-    # ---- 文档命令 ----
+    # 文档命令。
 
     # 完成 cmd收件箱 处理。
     def cmd_inbox(self) -> None:
@@ -373,7 +376,7 @@ class Console:
         print(f"🗑️ 已移除文档 {name}，开始同步重建索引...")
         self._rebuild()
 
-    # ---- 对话命令 ----
+    # 对话命令。
 
     # 完成 cmdnew 处理。
     def cmd_new(self) -> None:
@@ -428,7 +431,7 @@ class Console:
             self.active_session_id = None
         print(f"🗑️ 已删除对话 {sid[:8]}。")
 
-    # ---- 云端配置 ----
+    # 云端配置。
 
     # 配置云端配置。
     def _configure_cloud(self, first_time: bool) -> bool:
@@ -437,7 +440,9 @@ class Console:
 
         settings = get_settings()
         if first_time:
-            print("⚠️ 还没有配置云端 API Key，无法使用云端模式。现在配置（回车保留当前值）：")
+            print(
+                "⚠️ 还没有配置云端 API Key，无法使用云端模式。现在配置（回车保留当前值）："
+            )
         else:
             print("✏️ 修改云端模型配置（回车保留当前值）：")
         base = input(f"  云端 Base URL [{settings.llm_base_url}]: ").strip()
@@ -457,7 +462,7 @@ class Console:
         print("✅ 云端配置已写入 .env 并即时生效。")
         return True
 
-    # ---- 问答 ----
+    # 问答。
 
     # 输出回答。
     def _print_answer(self, task_type: str, output: dict) -> None:
@@ -523,7 +528,7 @@ class Console:
                 ],
             )
 
-    # ---- Tab 补全 ----
+    # 补全。
 
     # 构造names。
     def _doc_names(self) -> list[str]:
@@ -535,7 +540,9 @@ class Console:
     def _session_prefixes(self) -> list[str]:
         if self.active_kb is None:
             return []
-        return [s["session_id"][:8] for s in self.sessions.list_sessions(self.active_kb)]
+        return [
+            s["session_id"][:8] for s in self.sessions.list_sessions(self.active_kb)
+        ]
 
     # 完成 补全候选项 处理。
     def _completion_candidates(self, tokens: list[str]) -> list[str]:
@@ -578,7 +585,7 @@ class Console:
         except Exception:
             return None
 
-    # ---- 分发 ----
+    # 分发。
 
     # 分发结果。
     def dispatch(self, raw: str) -> bool:
@@ -657,6 +664,7 @@ class Console:
 
         self.do_chat(text, None)
         return True
+
 
 # 配置补全。
 def _setup_completion(console: "Console") -> None:

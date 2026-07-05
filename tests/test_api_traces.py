@@ -153,9 +153,7 @@ async def test_trace_endpoint_filters_by_doc_and_session(tmp_path, monkeypatch):
         async with AsyncClient(
             transport=transport, base_url="http://testserver"
         ) as client:
-            response = await client.get(
-                "/v1/traces?limit=10&doc_id=kb&session_id=s1"
-            )
+            response = await client.get("/v1/traces?limit=10&doc_id=kb&session_id=s1")
 
     body = response.json()
     assert response.status_code == 200
@@ -165,7 +163,9 @@ async def test_trace_endpoint_filters_by_doc_and_session(tmp_path, monkeypatch):
 
 # 验证缺失跟踪文件返回稳定错误。
 @pytest.mark.anyio
-async def test_trace_endpoint_returns_not_found_for_missing_trace(tmp_path, monkeypatch):
+async def test_trace_endpoint_returns_not_found_for_missing_trace(
+    tmp_path, monkeypatch
+):
     import cogdoc.api.app as app_module
     import cogdoc.api.routes.traces as traces_module
 

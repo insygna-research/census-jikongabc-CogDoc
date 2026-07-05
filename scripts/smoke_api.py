@@ -94,7 +94,10 @@ def _build_app(data_dir: Path):
 
     # 写入最小清单，让文档接口可读到模拟入库结果。
     def fake_ingest(kb_id: str, source_dir: str, on_commit=None):
-        from cogdoc.tools.manifest import save_index_manifest, stamp_chunk_identity_contract
+        from cogdoc.tools.manifest import (
+            save_index_manifest,
+            stamp_chunk_identity_contract,
+        )
 
         if on_commit is not None:
             on_commit(f"smoke-{int(time.time() * 1000)}")
@@ -126,7 +129,9 @@ def _build_app(data_dir: Path):
         result = _fake_chat_result(
             f"streamed smoke answer for {query}", "trace-smoke-stream", task_type
         )
-        yield ChatEvent("request_started", {"trace_id": result.trace_id, "doc_id": doc_id})
+        yield ChatEvent(
+            "request_started", {"trace_id": result.trace_id, "doc_id": doc_id}
+        )
         yield ChatEvent("token", {"content": "streamed"})
         yield ChatEvent("final", {"result": result, "output": result.raw_output})
 
@@ -199,7 +204,9 @@ async def _run_smoke(data_dir: Path, timeout: float, verbose: bool) -> None:
     transport = ASGITransport(app=app)
 
     try:
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        async with AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
             kb_id = "smoke-kb"
             session_id = "smoke-session"
 
@@ -214,7 +221,9 @@ async def _run_smoke(data_dir: Path, timeout: float, verbose: bool) -> None:
 
             uploaded = await client.post(
                 f"/v1/knowledge-bases/{kb_id}/documents",
-                files={"file": ("a.pdf", b"%PDF-1.4 smoke\n%%EOF\n", "application/pdf")},
+                files={
+                    "file": ("a.pdf", b"%PDF-1.4 smoke\n%%EOF\n", "application/pdf")
+                },
             )
             _assert_status(uploaded, 202, "upload document")
             upload_job = await _wait_job(client, uploaded.json()["job_id"], timeout)
@@ -278,7 +287,9 @@ async def _run_smoke(data_dir: Path, timeout: float, verbose: bool) -> None:
             assert feedback.json()["is_bad_case"] is True, feedback.text
             _print_step(verbose, "feedback", feedback.json())
 
-            deleted_doc = await client.delete(f"/v1/knowledge-bases/{kb_id}/documents/a.pdf")
+            deleted_doc = await client.delete(
+                f"/v1/knowledge-bases/{kb_id}/documents/a.pdf"
+            )
             _assert_status(deleted_doc, 202, "delete document")
             delete_job = await _wait_job(client, deleted_doc.json()["job_id"], timeout)
             assert delete_job["status"] == "succeeded", delete_job
@@ -303,8 +314,12 @@ def main() -> int:
         )
     )
     parser.add_argument("--data-dir", help="Directory for isolated smoke state.")
-    parser.add_argument("--timeout", type=float, default=5.0, help="Job timeout seconds.")
-    parser.add_argument("-q", "--quiet", action="store_true", help="Only print final result.")
+    parser.add_argument(
+        "--timeout", type=float, default=5.0, help="Job timeout seconds."
+    )
+    parser.add_argument(
+        "-q", "--quiet", action="store_true", help="Only print final result."
+    )
     args = parser.parse_args()
 
     if args.data_dir:

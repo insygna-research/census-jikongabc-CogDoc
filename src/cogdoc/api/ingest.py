@@ -450,7 +450,7 @@ class IndexJobManager:
             ex.shutdown(wait=False)
         return [kb_id for kb_id, _ in evicted]
 
-    # ---- executor commands ----
+    # 执行器命令。
 
     # _stale：处理对应功能。
     def _stale(self, kb_id: str, base_epoch: int) -> bool:

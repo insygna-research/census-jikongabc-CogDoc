@@ -135,9 +135,7 @@ def trace_path(trace_id: str, settings: Settings | None = None) -> Path:
 # 汇总跟踪步骤。
 def summarize_trace_steps(steps: list[dict]) -> dict:
     error_steps = [
-        step
-        for step in steps
-        if step.get("error_class") or step.get("critique")
+        step for step in steps if step.get("error_class") or step.get("critique")
     ]
     evidence_count = sum(len(step.get("evidence", [])) for step in steps)
     return {
@@ -165,9 +163,7 @@ def build_trace_payload(
         "request_id": request_id,
         "task_type": task_type,
         "status": status,
-        "duration_ms": None
-        if duration_ms is None
-        else round(max(duration_ms, 0.0), 3),
+        "duration_ms": None if duration_ms is None else round(max(duration_ms, 0.0), 3),
         "config": dict(config or {}),
         "summary": summarize_trace_steps(steps),
         "error": dict(error or {}) or None,

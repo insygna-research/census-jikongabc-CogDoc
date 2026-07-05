@@ -152,7 +152,6 @@ class SqliteSessionStore:
     # 删库时连带清掉该 KB 下所有会话，避免同名新库复用 doc_id 后捡到旧历史。
     def clear_kb(self, doc_id: str) -> None:
         with self._lock:
-
             # 执行内部回调。
             def _do():
                 self._conn.execute("DELETE FROM sessions WHERE doc_id=?", (doc_id,))

@@ -121,6 +121,7 @@ def safe_print_on_interrupt(message: str) -> None:
         signal.signal(signal.SIGINT, previous_handler)
 
 
+# 定义DebugSession。
 class DebugSession:
     # 独立 debug 控制台的 trace 命令和展示逻辑。
     def __init__(self):
@@ -273,7 +274,9 @@ class DebugSession:
             print(f"  {self.trace_step_title(step, idx)}")
         if len(steps) > 12:
             print(f"  ... 还有 {len(steps) - 12} 步，输入 /steps 查看全部")
-        print("继续输入 /steps 查看节点，/rewrite 看改写，/evidence 看证据，/config 看配置，exit 退出。")
+        print(
+            "继续输入 /steps 查看节点，/rewrite 看改写，/evidence 看证据，/config 看配置，exit 退出。"
+        )
 
     # 打印 trace 全部步骤。
     def print_trace_steps(self) -> None:
@@ -825,6 +828,7 @@ def _setup_debug_completion(
         print("⚠️ 当前 Python 环境没有 readline，方向键编辑和 Tab 补全不可用。")
         return
 
+    # 处理candidates。
     def _candidates(tokens: list[str]) -> list[str]:
         if not tokens:
             return DEBUG_COMMANDS
@@ -839,6 +843,7 @@ def _setup_debug_completion(
 
     matches: list[str] = []
 
+    # 补全_complete。
     def _complete(text: str, state: int) -> str | None:
         nonlocal matches
         try:
@@ -865,9 +870,7 @@ def _setup_debug_completion(
 
 # 启动入口。
 def main():
-    parser = argparse.ArgumentParser(
-        description="CogDoc 检索可视化 / 可观测控制台"
-    )
+    parser = argparse.ArgumentParser(description="CogDoc 检索可视化 / 可观测控制台")
     parser.add_argument(
         "--kb",
         default=get_settings().cogdoc_default_doc_id,
@@ -951,6 +954,7 @@ def main():
 
     _setup_debug_completion(TARGET_DOC_ID, TARGET_DOC_DIR, debug_session)
 
+    # 执行问答调试。
     def _ask_debug(query: str, forced_task: str | None) -> None:
         nonlocal chat_history
         new_messages = ask(

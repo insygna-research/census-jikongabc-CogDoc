@@ -6,6 +6,7 @@ import httpx
 DEFAULT_TIMEOUT = 180.0
 
 
+# 定义CogDocAPIError。
 class CogDocAPIError(RuntimeError):
     # 后端返回结构化错误体或非预期响应时抛出，供 UI 直接展示。
     def __init__(
@@ -16,6 +17,7 @@ class CogDocAPIError(RuntimeError):
         self.payload = payload
 
 
+# 格式化接口错误。
 def format_api_error(
     payload: Any, status_code: int | None = None, fallback: str = "请求失败"
 ) -> str:
@@ -32,6 +34,7 @@ def format_api_error(
     return f"{status}{fallback}"
 
 
+# 处理响应载荷。
 def response_payload(response: httpx.Response) -> Any:
     try:
         return response.json()
@@ -39,6 +42,7 @@ def response_payload(response: httpx.Response) -> Any:
         return response.text[:200]
 
 
+# 处理响应JSON。
 def _response_json(response: httpx.Response) -> Any:
     try:
         return response.json()
@@ -49,6 +53,7 @@ def _response_json(response: httpx.Response) -> Any:
         ) from exc
 
 
+# 处理checkedJSON。
 def _checked_json(response: httpx.Response) -> Any:
     payload = _response_json(response)
     if response.status_code >= 400:
@@ -60,6 +65,7 @@ def _checked_json(response: httpx.Response) -> Any:
     return payload
 
 
+# 处理expectlist。
 def _expect_list(payload: Any, label: str) -> list[dict]:
     if isinstance(payload, list):
         return payload

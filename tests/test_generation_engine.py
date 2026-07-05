@@ -22,7 +22,7 @@ def _fresh_factory():
     RetrieverFactory._engines = OrderedDict()
 
 
-# ---- NullRetriever 契约 ----
+# 空检索器契约。
 
 
 # 验证 null retriever read safe。
@@ -60,7 +60,7 @@ def test_null_hybrid_engine_not_corrupt():
     assert engine.search("q") == []
 
 
-# ---- collection_id hash 命名 ----
+# 集合编号哈希命名。
 
 
 # 验证 collection id deterministic。
@@ -79,7 +79,7 @@ def test_collection_id_within_chroma_limit():
     assert len(f"col-{collection_id}") <= 60
 
 
-# ---- _resolve_gen_id ----
+# 解析生成编号。
 
 
 # 验证 resolve gen id no active。
@@ -109,7 +109,7 @@ def test_resolve_gen_id_returns_active_id(tmp_path):
         assert RetrieverFactory._resolve_gen_id("kb") == gen_id
 
 
-# ---- _build_engine ----
+# 构建引擎。
 
 
 # 验证 build engine null when gen id none。
@@ -138,7 +138,9 @@ def test_build_engine_uses_settings_collection_id(tmp_path):
         mock_engine = MagicMock(spec=HybridRetriever)
         mock_engine.count.return_value = 2
         mock_engine.is_consistent.return_value = True
-        with patch("cogdoc.graph.subgraphs.qa.HybridRetriever", return_value=mock_engine):
+        with patch(
+            "cogdoc.graph.subgraphs.qa.HybridRetriever", return_value=mock_engine
+        ):
             RetrieverFactory._build_engine(kb_id, gen_id)
 
     MockVec.assert_called_once_with(collection_id=expected_cid)
@@ -181,7 +183,9 @@ def test_build_engine_count_mismatch_raises(tmp_path):
         mock_engine = MagicMock(spec=HybridRetriever)
         mock_engine.count.return_value = 0  # 磁盘数据丢失，count 为 0
         mock_engine.is_consistent.return_value = True
-        with patch("cogdoc.graph.subgraphs.qa.HybridRetriever", return_value=mock_engine):
+        with patch(
+            "cogdoc.graph.subgraphs.qa.HybridRetriever", return_value=mock_engine
+        ):
             with pytest.raises(IndexCorruptError):
                 RetrieverFactory._build_engine("kb", gen_id)
 
@@ -220,12 +224,14 @@ def test_build_engine_inconsistent_raises(tmp_path):
         mock_engine = MagicMock(spec=HybridRetriever)
         mock_engine.count.return_value = 3  # count 正确
         mock_engine.is_consistent.return_value = False  # 但 chunk_id 集合不等
-        with patch("cogdoc.graph.subgraphs.qa.HybridRetriever", return_value=mock_engine):
+        with patch(
+            "cogdoc.graph.subgraphs.qa.HybridRetriever", return_value=mock_engine
+        ):
             with pytest.raises(IndexCorruptError):
                 RetrieverFactory._build_engine("kb", gen_id)
 
 
-# ---- 缓存：(kb_id, gen_id) 键、invalidate、竞态保护 ----
+# 缓存键和失效竞态保护。
 
 
 # 验证 cache hit returns same instance。

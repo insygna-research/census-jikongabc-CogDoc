@@ -36,6 +36,7 @@ def _client() -> CogDocClient:
     return CogDocClient(st.session_state.api_url)
 
 
+# 处理响应错误。
 def _response_error(response, fallback: str = "请求失败") -> str:
     return format_api_error(response_payload(response), response.status_code, fallback)
 
@@ -74,16 +75,19 @@ def _init_state() -> None:
     st.session_state.setdefault("known_sessions", {})
 
 
+# 处理context键。
 def _context_key(kb_id: str, session_id: str | None = None) -> tuple[str, str]:
     return (kb_id, session_id or st.session_state.session_id)
 
 
+# 处理消息FOR。
 def _messages_for(kb_id: str, session_id: str | None = None) -> list[dict]:
     return st.session_state.messages_by_context.setdefault(
         _context_key(kb_id, session_id), []
     )
 
 
+# 处理消息from历史。
 def _message_from_history(turn: Mapping, fallback_query: str = "") -> dict:
     metadata = turn.get("metadata") if isinstance(turn.get("metadata"), Mapping) else {}
     trace_id = turn.get("trace_id") or metadata.get("trace_id")
@@ -105,6 +109,7 @@ def _message_from_history(turn: Mapping, fallback_query: str = "") -> dict:
     return msg
 
 
+# 处理消息from历史。
 def _messages_from_history(turns: list[Mapping]) -> list[dict]:
     messages = []
     last_user_query = ""
@@ -167,7 +172,9 @@ def _conversations(client: CogDocClient, kb_id: str) -> None:
         resp = client.list_sessions(kb_id)
         if resp.status_code == 200:
             payload = response_payload(resp)
-            sessions = payload.get("sessions", []) if isinstance(payload, Mapping) else []
+            sessions = (
+                payload.get("sessions", []) if isinstance(payload, Mapping) else []
+            )
             backend = {
                 s["session_id"]: s
                 for s in sessions
@@ -220,6 +227,7 @@ def _send_feedback(final: dict, query: str, feedback: str) -> None:
     )
 
 
+# 加载跟踪。
 def _load_trace(trace_id: str, force: bool = False) -> None:
     trace_id = trace_id.strip()
     if not trace_id:
@@ -245,6 +253,7 @@ def _load_trace(trace_id: str, force: bool = False) -> None:
         st.session_state.trace_cache[trace_id] = {"error": str(exc)}
 
 
+# 加载会话跟踪。
 def _load_session_traces(kb_id: str | None, force: bool = False) -> None:
     if not kb_id:
         return
@@ -284,6 +293,7 @@ def _load_session_traces(kb_id: str | None, force: bool = False) -> None:
         st.session_state.trace_session_loaded.add(marker)
 
 
+# 处理跟踪optionlabel。
 def _trace_option_label(trace_id: str) -> str:
     if not trace_id:
         return "选择最近 trace"
@@ -298,6 +308,7 @@ def _trace_option_label(trace_id: str) -> str:
     return _trace_query_title(trace_id, {})
 
 
+# 处理跟踪查询title。
 def _trace_query_title(trace_id: str, trace: Mapping) -> str:
     query = str(trace.get("query_preview") or "").strip()
     if not query:
@@ -305,6 +316,7 @@ def _trace_query_title(trace_id: str, trace: Mapping) -> str:
     return query or "未记录问题"
 
 
+# 格式化耗时。
 def _format_duration(duration_ms) -> str:
     if duration_ms is None:
         return ""
@@ -317,6 +329,7 @@ def _format_duration(duration_ms) -> str:
     return f"{value:.0f} ms"
 
 
+# 处理current跟踪items。
 def _current_trace_items(kb_id: str | None) -> list[dict]:
     items = []
     seen = set()
@@ -354,6 +367,7 @@ def _current_trace_items(kb_id: str | None) -> list[dict]:
     return items
 
 
+# 处理跟踪node键。
 def _trace_node_key(node_name: str) -> str:
     tail = (node_name or "").rsplit(".", 1)[-1]
     if ":" in tail:
@@ -361,6 +375,7 @@ def _trace_node_key(node_name: str) -> str:
     return tail
 
 
+# 处理跟踪steplabel。
 def _trace_step_label(step: Mapping, idx: int) -> str:
     node_name = str(step.get("node_name") or f"step-{idx + 1}")
     node_key = _trace_node_key(node_name)
@@ -375,6 +390,7 @@ def _trace_step_label(step: Mapping, idx: int) -> str:
     return label
 
 
+# 渲染跟踪step。
 def _render_trace_step(step: Mapping, idx: int) -> None:
     with st.expander(_trace_step_label(step, idx)):
         if step.get("node_name"):
@@ -416,12 +432,11 @@ def _render_trace_step(step: Mapping, idx: int) -> None:
             for item in evidence:
                 source = item.get("source", "")
                 chunk_id = item.get("chunk_id", "")
-                st.caption(
-                    f"{source}{_page_label(item.get('page'))} · `{chunk_id}`"
-                )
+                st.caption(f"{source}{_page_label(item.get('page'))} · `{chunk_id}`")
                 st.write(item.get("text_preview", ""))
 
 
+# 渲染跟踪调试。
 def _render_trace_debug(trace: dict) -> None:
     trace_error = trace.get("error")
     if isinstance(trace_error, str):
@@ -444,6 +459,7 @@ def _render_trace_debug(trace: dict) -> None:
             _render_trace_step(step, idx)
 
 
+# 渲染跟踪lookup。
 def _render_trace_lookup(kb_id: str | None) -> None:
     st.subheader("Trace 调试")
     _load_session_traces(kb_id)
@@ -499,9 +515,7 @@ def _render_trace_lookup(kb_id: str | None) -> None:
         top = st.columns([3, 1])
         top[0].markdown(f"**{_trace_query_title(active, {})}**")
         top[0].caption(f"trace_id: {active}")
-        if top[1].button(
-            "刷新 trace", key="trace-refresh", use_container_width=True
-        ):
+        if top[1].button("刷新 trace", key="trace-refresh", use_container_width=True):
             _load_session_traces(kb_id, force=True)
             _load_trace(active, force=True)
         if active in st.session_state.trace_cache:
@@ -679,6 +693,7 @@ def _poll_job(client: CogDocClient, job_id: str) -> None:
             )
 
 
+# 流式处理对话worker。
 def _stream_chat_worker(
     *,
     api_url: str,
@@ -713,6 +728,7 @@ def _stream_chat_worker(
         outbox.put(("done", {"cancelled": stop_event.is_set()}))
 
 
+# 处理startstream。
 def _start_stream(kb_id: str, prompt: str, mode: str) -> None:
     key = _context_key(kb_id)
     pending = st.session_state.pending_streams.get(key)
@@ -759,6 +775,7 @@ def _start_stream(kb_id: str, prompt: str, mode: str) -> None:
     worker.start()
 
 
+# 移除消息。
 def _remove_message(kb_id: str, session_id: str, msg_id: int) -> None:
     messages = _messages_for(kb_id, session_id)
     st.session_state.messages_by_context[_context_key(kb_id, session_id)] = [
@@ -766,6 +783,7 @@ def _remove_message(kb_id: str, session_id: str, msg_id: int) -> None:
     ]
 
 
+# 处理cancelstream。
 def _cancel_stream(key: tuple[str, str]) -> None:
     pending = st.session_state.pending_streams.get(key)
     if not pending:
@@ -783,6 +801,7 @@ def _cancel_stream(key: tuple[str, str]) -> None:
     )
 
 
+# 处理finishstream。
 def _finish_stream(key: tuple[str, str], pending: dict) -> None:
     if pending.get("cancelled"):
         _remove_message(
@@ -822,6 +841,7 @@ def _finish_stream(key: tuple[str, str], pending: dict) -> None:
     st.session_state.pending_streams.pop(key, None)
 
 
+# 处理drainstreamevents。
 def _drain_stream_events() -> None:
     for key, pending in list(st.session_state.pending_streams.items()):
         outbox = pending["queue"]

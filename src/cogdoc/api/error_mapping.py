@@ -21,8 +21,7 @@ def classify_error_code(stage: str, error_class: str, message: str) -> ErrorCode
     # stream 阶段维持既有契约（流中断即 STREAM_INTERRUPTED，不论底层成因）。
     if stage == "stream":
         return ErrorCode.STREAM_INTERRUPTED
-    # runtime/其余阶段细分上游成因：超时与限流值得不同的客户端处置。
-    # 类名+文案一起匹配：文案用于召回被包装的异常（如 RuntimeError("...timeout...")），代价是文案本地化时有误判风险。
+    # runtime/其余阶段细分上游成因：超时与限流值得不同的客户端处置；类名+文案一起匹配：文案用于召回被包装的异常（如 RuntimeError("...timeout...")），代价是文案本地化时有误判风险。
     haystack = f"{error_class} {message}".lower()
     if any(token in haystack for token in _TIMEOUT_TOKENS):
         return ErrorCode.LLM_TIMEOUT

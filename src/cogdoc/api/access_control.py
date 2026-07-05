@@ -24,6 +24,7 @@ _RATE_LIMIT_EXEMPT_GET_PREFIXES = (
 )
 
 
+# 判断ratelimitexempt。
 def _is_rate_limit_exempt(request: Request) -> bool:
     if request.method != "GET":
         return False

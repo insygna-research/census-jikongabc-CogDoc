@@ -169,9 +169,7 @@ def test_eval_suite_baseline_detects_quality_regression(tmp_path):
         "retrieval_report": {"aggregate": {"mrr": 1.0}},
     }
     report["quality_report"]["aggregate"]["router_rule_accuracy"] = 0.0
-    baseline_path.write_text(
-        json.dumps(baseline, ensure_ascii=False), encoding="utf-8"
-    )
+    baseline_path.write_text(json.dumps(baseline, ensure_ascii=False), encoding="utf-8")
 
     result = eval_suite.compare_baseline(report, baseline_path)
 
@@ -206,9 +204,7 @@ def test_eval_suite_baseline_detects_quality_case_type_regression(tmp_path):
         ],
     }
     report["quality_case_types"][0]["metrics"]["router_rule_accuracy"] = 0.0
-    baseline_path.write_text(
-        json.dumps(baseline, ensure_ascii=False), encoding="utf-8"
-    )
+    baseline_path.write_text(json.dumps(baseline, ensure_ascii=False), encoding="utf-8")
 
     result = eval_suite.compare_baseline(report, baseline_path)
 
@@ -243,9 +239,7 @@ def test_eval_suite_baseline_detects_quality_layer_regression(tmp_path):
         ],
     }
     report["quality_layers"][0]["metrics"]["router_rule_accuracy"] = 0.0
-    baseline_path.write_text(
-        json.dumps(baseline, ensure_ascii=False), encoding="utf-8"
-    )
+    baseline_path.write_text(json.dumps(baseline, ensure_ascii=False), encoding="utf-8")
 
     result = eval_suite.compare_baseline(report, baseline_path)
 
@@ -265,9 +259,7 @@ def test_eval_suite_baseline_ignores_new_metric_missing_from_old_baseline(tmp_pa
         "retrieval_report": {"skipped": True},
     }
     baseline = {"quality_report": {"aggregate": {"old_metric": 1.0}}}
-    baseline_path.write_text(
-        json.dumps(baseline, ensure_ascii=False), encoding="utf-8"
-    )
+    baseline_path.write_text(json.dumps(baseline, ensure_ascii=False), encoding="utf-8")
 
     result = eval_suite.compare_baseline(report, baseline_path)
 
@@ -297,9 +289,7 @@ def test_eval_suite_baseline_ignores_new_case_type_metric_missing_from_old_basel
             {"case_type": "router", "metrics": {"old_metric": 1.0}},
         ],
     }
-    baseline_path.write_text(
-        json.dumps(baseline, ensure_ascii=False), encoding="utf-8"
-    )
+    baseline_path.write_text(json.dumps(baseline, ensure_ascii=False), encoding="utf-8")
 
     result = eval_suite.compare_baseline(report, baseline_path)
 
@@ -330,9 +320,7 @@ def test_eval_suite_baseline_ignores_new_layer_metric_missing_from_old_baseline(
             {"layer": "easy", "metrics": {"old_metric": 1.0}},
         ],
     }
-    baseline_path.write_text(
-        json.dumps(baseline, ensure_ascii=False), encoding="utf-8"
-    )
+    baseline_path.write_text(json.dumps(baseline, ensure_ascii=False), encoding="utf-8")
 
     result = eval_suite.compare_baseline(report, baseline_path)
 
@@ -371,9 +359,7 @@ def test_eval_suite_baseline_ignores_empty_case_type_metrics(tmp_path):
             },
         ],
     }
-    baseline_path.write_text(
-        json.dumps(baseline, ensure_ascii=False), encoding="utf-8"
-    )
+    baseline_path.write_text(json.dumps(baseline, ensure_ascii=False), encoding="utf-8")
 
     result = eval_suite.compare_baseline(report, baseline_path)
 
@@ -412,9 +398,7 @@ def test_eval_suite_baseline_ignores_empty_layer_metrics(tmp_path):
             },
         ],
     }
-    baseline_path.write_text(
-        json.dumps(baseline, ensure_ascii=False), encoding="utf-8"
-    )
+    baseline_path.write_text(json.dumps(baseline, ensure_ascii=False), encoding="utf-8")
 
     result = eval_suite.compare_baseline(report, baseline_path)
 
@@ -439,9 +423,7 @@ def test_eval_suite_baseline_uses_gated_metric_intersection(tmp_path):
             "baseline_gated_metrics": ["old_metric"],
         }
     }
-    baseline_path.write_text(
-        json.dumps(baseline, ensure_ascii=False), encoding="utf-8"
-    )
+    baseline_path.write_text(json.dumps(baseline, ensure_ascii=False), encoding="utf-8")
 
     result = eval_suite.compare_baseline(report, baseline_path)
 
@@ -450,9 +432,7 @@ def test_eval_suite_baseline_uses_gated_metric_intersection(tmp_path):
 
 
 # 验证组合入口基线回退返回非零。
-def test_eval_suite_main_returns_nonzero_on_baseline_regression(
-    tmp_path, monkeypatch
-):
+def test_eval_suite_main_returns_nonzero_on_baseline_regression(tmp_path, monkeypatch):
     quality_path = tmp_path / "quality.jsonl"
     retrieval_path = tmp_path / "retrieval.jsonl"
     baseline_path = tmp_path / "baseline.json"
@@ -466,9 +446,7 @@ def test_eval_suite_main_returns_nonzero_on_baseline_regression(
             }
         }
     }
-    baseline_path.write_text(
-        json.dumps(baseline, ensure_ascii=False), encoding="utf-8"
-    )
+    baseline_path.write_text(json.dumps(baseline, ensure_ascii=False), encoding="utf-8")
     monkeypatch.setattr(
         sys,
         "argv",

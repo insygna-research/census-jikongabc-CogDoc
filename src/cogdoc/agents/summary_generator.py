@@ -6,7 +6,12 @@ from cogdoc.config.settings import get_settings
 from cogdoc.agents.answer_markers import CITATION_WARNING_HEADING
 from cogdoc.agents.citation_validator import CitationValidatorAgent
 from cogdoc.agents.qa_generator import Generator
-from cogdoc.graph.state import Evidence, RetrievedDoc, SummarySectionPlan, SummarySectionResult
+from cogdoc.graph.state import (
+    Evidence,
+    RetrievedDoc,
+    SummarySectionPlan,
+    SummarySectionResult,
+)
 from cogdoc.tools.tokenizer import tokenize_mixed_text
 
 

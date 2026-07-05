@@ -1,7 +1,10 @@
 from datetime import datetime
 from collections.abc import Mapping, Sequence
 from typing import Any
-from cogdoc.agents.answer_markers import CITATION_WARNING_HEADING, NO_RELEVANT_CONTENT_MARKER
+from cogdoc.agents.answer_markers import (
+    CITATION_WARNING_HEADING,
+    NO_RELEVANT_CONTENT_MARKER,
+)
 
 
 CHAT_HISTORY_MESSAGE_LIMIT = 12

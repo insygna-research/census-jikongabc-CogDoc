@@ -110,7 +110,9 @@ def main() -> int:
     )
     args = parser.parse_args()
     if args.coverage_only and (args.check_coverage or args.json or args.baseline):
-        parser.error("--coverage-only 不能与 --check-coverage、--json 或 --baseline 同时使用")
+        parser.error(
+            "--coverage-only 不能与 --check-coverage、--json 或 --baseline 同时使用"
+        )
 
     eval_set = args.eval_set or resolve_default_eval_set()
     items = load_eval_set(eval_set)

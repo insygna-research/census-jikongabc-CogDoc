@@ -3,7 +3,11 @@ import pytest
 from cogdoc.api.ingest import IndexJobManager
 from cogdoc.api.persistence import InMemoryJobStore
 from cogdoc.service.mutation_journal import MutationJournal, MutationJournalError
-from cogdoc.service.kb_lifecycle import LifecycleStore, LIFECYCLE_DELETING, LIFECYCLE_ACTIVE
+from cogdoc.service.kb_lifecycle import (
+    LifecycleStore,
+    LIFECYCLE_DELETING,
+    LIFECYCLE_ACTIVE,
+)
 from cogdoc.service.purge_queue import PurgeQueue, PurgeQueueCorruptError
 
 
@@ -12,7 +16,7 @@ def _boom_ingest(kb_id, source_dir):
     raise ValueError("build failed")
 
 
-# ---- #1/#2 上传回滚失败时保留 journal ----
+# 测试上传回滚失败时保留日志。
 
 
 # 验证 upload build failure restore fail keeps journal。
@@ -89,7 +93,9 @@ def test_journal_recover_remove_fail_keeps_entry(tmp_path):
     state.active.return_value = None  # 未提交
     with (
         patch("cogdoc.service.kb_state.KBState", return_value=state),
-        patch("cogdoc.service.mutation_journal.os.remove", side_effect=OSError("locked")),
+        patch(
+            "cogdoc.service.mutation_journal.os.remove", side_effect=OSError("locked")
+        ),
     ):
         with pytest.raises(MutationJournalError, match="未恢复"):
             j.recover_all()
@@ -97,7 +103,7 @@ def test_journal_recover_remove_fail_keeps_entry(tmp_path):
     assert (tmp_path / "j" / "job1.json").exists()
 
 
-# ---- #4 lifecycle 损坏不静默丢 tombstone ----
+# 测试生命周期损坏时保留删除标记。
 
 
 # 验证 lifecycle corrupt read fail closed。
@@ -124,7 +130,7 @@ def test_lifecycle_corrupt_set_quarantines(tmp_path):
         store.set("kbC", LIFECYCLE_ACTIVE)
 
 
-# ---- #5 purge 队列损坏不静默丢清理任务 ----
+# 测试清理队列损坏时保留任务。
 
 
 # 验证 purge queue corrupt quarantines。
@@ -141,7 +147,7 @@ def test_purge_queue_corrupt_quarantines(tmp_path):
         q.due(now=100)
 
 
-# ---- #1 不可逆 committed 标记：切代后旧 journal 不误回滚 ----
+# 测试切代后旧日志不误回滚。
 
 
 # 验证 committed marker prevents rollback after gen switch。
@@ -204,7 +210,7 @@ def test_journal_struct_corrupt_quarantined(tmp_path):
     assert (jdir / ".degraded").exists()
 
 
-# ---- #3 lifecycle 损坏后全局 fail-closed 常驻 ----
+# 测试生命周期损坏后保持全局关闭。
 
 
 # 验证 lifecycle degraded persists global fail closed。
@@ -219,7 +225,7 @@ def test_lifecycle_degraded_persists_global_fail_closed(tmp_path):
     assert store.status("other-kb") == LIFECYCLE_DELETING
 
 
-# ---- #6 epoch 损坏 fail-closed ----
+# 测试纪元损坏后关闭写入。
 
 
 # 验证 epoch corrupt quarantines and raises。

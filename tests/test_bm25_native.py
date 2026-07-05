@@ -97,9 +97,7 @@ def test_native_bm25_rebuild_from_kept_matches_full_rebuild():
     full = _rust_core.Bm25Index(expected_corpus)
 
     query = ["模型", "检索", "摘要"]
-    assert list(incremental.score_topk(query, 10)) == list(
-        full.score_topk(query, 10)
-    )
+    assert list(incremental.score_topk(query, 10)) == list(full.score_topk(query, 10))
 
 
 # 验证 native bm25 rebuild rejects out of range index 场景。

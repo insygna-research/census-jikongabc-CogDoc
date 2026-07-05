@@ -40,17 +40,21 @@ def _normalize_trace_payload(trace_id: str, payload: dict) -> dict:
         return payload
     return build_trace_payload(
         trace_id=str(payload.get("trace_id") or trace_id),
-        request_id=str(payload.get("request_id") or payload.get("trace_id") or trace_id),
+        request_id=str(
+            payload.get("request_id") or payload.get("trace_id") or trace_id
+        ),
         task_type=str(payload.get("task_type") or "unknown"),
         steps=list(payload.get("steps") or []),
         status="ok",
     )
 
 
+# 处理modifiedAT。
 def _modified_at(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
 
 
+# 处理跟踪listitem。
 def _trace_list_item(
     path: Path, doc_id: str = "", session_id: str = ""
 ) -> TraceListItem | None:
@@ -59,7 +63,9 @@ def _trace_list_item(
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        trace = TraceResponse.model_validate(_normalize_trace_payload(trace_id, payload))
+        trace = TraceResponse.model_validate(
+            _normalize_trace_payload(trace_id, payload)
+        )
         if doc_id and str(trace.config.get("doc_id") or "") != doc_id:
             return None
         if session_id and str(trace.config.get("session_id") or "") != session_id:
@@ -119,5 +125,7 @@ async def get_trace(trace_id: str):
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except JSONDecodeError:
-        return _trace_error(ErrorCode.INTERNAL_ERROR, f"trace 文件损坏: {trace_id}", 500)
+        return _trace_error(
+            ErrorCode.INTERNAL_ERROR, f"trace 文件损坏: {trace_id}", 500
+        )
     return TraceResponse.model_validate(_normalize_trace_payload(trace_id, payload))

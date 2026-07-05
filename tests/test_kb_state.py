@@ -70,10 +70,10 @@ def test_active_generation_cannot_be_failed_or_removed(tmp_path):
         st.remove_generation(g)
 
 
-# 验证 switch rejects stale generation after epoch bump。
+# 验证纪元变更后拒绝过期代际。
 def test_switch_rejects_stale_generation_after_epoch_bump(tmp_path):
     st = _state(tmp_path)
-    g = st.begin_generation("m1", "v1")  # base_epoch = 0
+    g = st.begin_generation("m1", "v1")  # 基准纪元为零
     st.mark_ready(g, 1, [])
     st.bump_epoch()  # 模拟构建期间删库
     with pytest.raises(StaleGenerationError):
@@ -94,7 +94,7 @@ def test_epoch_survives_separate_store(tmp_path):
     shutil.rmtree(tmp_path / "kb", ignore_errors=True)
     fresh = KBState("kb", path=str(tmp_path / "kb" / "state.json"), epochs=epochs)
     assert fresh.epoch == 2  # 没归零
-    # 删库前的旧 generation（base_epoch=2）若现在才提交，会因 epoch 不匹配被拒。
+    # 删库前的旧代际若现在才提交，会因纪元不匹配被拒。
     g = fresh.begin_generation("m1", "v1")
     fresh.mark_ready(g, 0, [])
     fresh.bump_epoch()  # 又一次删库

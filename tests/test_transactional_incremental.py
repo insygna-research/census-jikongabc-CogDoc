@@ -82,7 +82,7 @@ def _manifest(kb_id, documents, build_version=INDEX_BUILD_VERSION):
     }
 
 
-# ---- 未修改文档：复用向量，绝不重算 embedding ----
+# 未修改文档复用向量。
 
 
 # 验证 unchanged docs reuse without embedding。
@@ -114,7 +114,7 @@ def test_unchanged_docs_reuse_without_embedding(tmp_path, monkeypatch):
     }
 
 
-# ---- 仅新增/修改文档调用 embedding ----
+# 仅新增和修改文档调用嵌入。
 
 
 # 验证 new doc goes through embedding。
@@ -158,7 +158,7 @@ def test_new_doc_goes_through_embedding(tmp_path, monkeypatch):
     assert {c["meta"]["chunk_id"] for c in added} == {"c-new"}
 
 
-# ---- 纯删除：零 embedding ----
+# 纯删除不调用嵌入。
 
 
 # 验证 pure delete zero embedding。
@@ -190,7 +190,7 @@ def test_pure_delete_zero_embedding(tmp_path, monkeypatch):
     }
 
 
-# ---- 旧 Vector/BM25 同数量但 ID 不同：识破并回退全量 ----
+# 索引编号不一致时回退全量。
 
 
 # 验证 diverged stores fallback to full。
@@ -234,7 +234,7 @@ def test_diverged_stores_raise_in_fill(tmp_path, monkeypatch):
         )
 
 
-# ---- BM25 同 ID 同数量但内容损坏：source/hash/metadata 自洽校验识破 ----
+# 关键词索引内容损坏时回退全量。
 
 
 # 验证 reuse rejects source not in active。
@@ -290,7 +290,7 @@ def test_reuse_rejects_chunk_id_metadata_mismatch(tmp_path, monkeypatch):
         )
 
 
-# ---- 复用部分写入失败：清空并全量回退 ----
+# 复用写入失败时回退全量。
 
 
 # 验证 partial write clears and full rebuild。
@@ -318,7 +318,7 @@ def test_partial_write_clears_and_full_rebuild(tmp_path, monkeypatch):
     assert all_chunks == full
 
 
-# ---- 模型契约变化强制全量构建 ----
+# 模型契约变化强制全量构建。
 
 
 # 验证 contract change forces full build。
@@ -342,7 +342,7 @@ def test_contract_change_forces_full_build(tmp_path, monkeypatch):
     staging.vector_retriever.add_with_embeddings.assert_not_called()
 
 
-# ---- 嵌入契约版本进入构建门控 ----
+# 嵌入契约版本参与构建门控。
 
 
 # 验证 embedding contract in build version。

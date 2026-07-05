@@ -71,9 +71,7 @@ def infer_retrieval_layer(item: dict) -> str:
 
 # 审计检索评测集覆盖面。
 def audit_coverage(items: List[dict]) -> dict:
-    layers = {
-        str(item.get("layer") or infer_retrieval_layer(item)) for item in items
-    }
+    layers = {str(item.get("layer") or infer_retrieval_layer(item)) for item in items}
     missing_layers = [
         layer for layer in RECOMMENDED_RETRIEVAL_LAYERS if layer not in layers
     ]

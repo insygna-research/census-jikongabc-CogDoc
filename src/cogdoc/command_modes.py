@@ -9,6 +9,7 @@ FORCED_MODE_PATTERN = re.compile(
 )
 
 
+# 解析强制模式模式。
 def parse_forced_mode(user_input: str) -> tuple[str | None, str]:
     match = FORCED_MODE_PATTERN.match(user_input.strip())
     if not match:

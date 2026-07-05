@@ -15,7 +15,7 @@ def _manifest(doc_id, docs, version="v1"):
     }
 
 
-# ---- plan_incremental 单元 ----
+# 增量计划单元。
 
 
 # 验证 plan none without previous。
@@ -78,7 +78,7 @@ def test_plan_same_content_files_deleted_independently():
     assert plan.removed_sources == {"a.pdf"}
 
 
-# ---- ingest_service 增量编排（FakeEngine）----
+# 增量入库编排。
 
 
 # 初始化实例状态。
@@ -291,7 +291,7 @@ def test_falls_back_to_full_rebuild_on_version_change(tmp_path, monkeypatch):
     assert engine.upserts == []
 
 
-# ---- BM25 黄金等价：增量结果 == 全量重建 ----
+# 校验关键词索引增量等价。
 
 
 # _chunk：处理对应功能。
@@ -374,7 +374,7 @@ def test_bm25_upsert_to_empty_clears_index(tmp_path):
     assert inc.exists() is False
 
 
-# ---- 向量层黄金等价（真 Chroma + patch 掉嵌入）----
+# 校验向量索引增量等价。
 
 
 # 验证 vector incremental equals full rebuild。
@@ -409,7 +409,7 @@ def test_vector_incremental_equals_full_rebuild(tmp_path, monkeypatch):
     assert inc.count() == full.count() == 3
 
 
-# ---- Hybrid 委托与一致性 ----
+# 混合检索委托一致性。
 
 
 # 验证 hybrid upsert delegates delete then add。

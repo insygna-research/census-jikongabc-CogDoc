@@ -179,17 +179,15 @@ def build_quality_group_summary(
 ) -> List[Dict[str, Any]]:
     groups = quality_report.get(source_key, {})
     gated_metrics = list(quality_report.get("baseline_gated_metrics", []))
-    ordered_names = [
-        name for name in preferred_order if name in groups
-    ] + sorted(name for name in groups if name not in preferred_order)
+    ordered_names = [name for name in preferred_order if name in groups] + sorted(
+        name for name in groups if name not in preferred_order
+    )
     return [
         {
             name_key: name,
             "count": groups[name]["count"],
             "gated_metrics": gated_metrics,
-            "metrics": {
-                metric: groups[name].get(metric) for metric in gated_metrics
-            },
+            "metrics": {metric: groups[name].get(metric) for metric in gated_metrics},
         }
         for name in ordered_names
     ]
