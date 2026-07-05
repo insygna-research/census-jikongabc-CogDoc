@@ -1,9 +1,71 @@
 import json
 import os
-from typing import Callable, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator, Mapping
 import httpx
 
 DEFAULT_TIMEOUT = 180.0
+
+
+class CogDocAPIError(RuntimeError):
+    # 后端返回结构化错误体或非预期响应时抛出，供 UI 直接展示。
+    def __init__(
+        self, message: str, status_code: int | None = None, payload: Any = None
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.payload = payload
+
+
+def format_api_error(
+    payload: Any, status_code: int | None = None, fallback: str = "请求失败"
+) -> str:
+    status = f"HTTP {status_code}: " if status_code is not None else ""
+    if isinstance(payload, Mapping):
+        code = payload.get("error_code")
+        message = payload.get("message")
+        if code and message:
+            return f"{status}[{code}] {message}"
+        if message:
+            return f"{status}{message}"
+    if payload not in (None, ""):
+        return f"{status}{fallback}: {payload}"
+    return f"{status}{fallback}"
+
+
+def response_payload(response: httpx.Response) -> Any:
+    try:
+        return response.json()
+    except ValueError:
+        return response.text[:200]
+
+
+def _response_json(response: httpx.Response) -> Any:
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise CogDocAPIError(
+            f"HTTP {response.status_code}: 后端返回非 JSON 响应: {response.text[:200]}",
+            status_code=response.status_code,
+        ) from exc
+
+
+def _checked_json(response: httpx.Response) -> Any:
+    payload = _response_json(response)
+    if response.status_code >= 400:
+        raise CogDocAPIError(
+            format_api_error(payload, response.status_code),
+            status_code=response.status_code,
+            payload=payload,
+        )
+    return payload
+
+
+def _expect_list(payload: Any, label: str) -> list[dict]:
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, Mapping) and payload.get("error_code"):
+        raise CogDocAPIError(format_api_error(payload), payload=payload)
+    raise CogDocAPIError(f"{label}响应格式不符合预期: {payload}")
 
 
 # 完成 iterSSE事件列表 处理。
@@ -45,11 +107,12 @@ class CogDocClient:
 
     # 列出 knowledge bases。
     def list_knowledge_bases(self) -> list[dict]:
-        return httpx.get(
+        response = httpx.get(
             self._url("/v1/knowledge-bases"),
             timeout=self.timeout,
             headers=self._headers,
-        ).json()
+        )
+        return _expect_list(_checked_json(response), "知识库列表")
 
     # 创建 knowledge base。
     def create_knowledge_base(self, kb_id: str) -> httpx.Response:

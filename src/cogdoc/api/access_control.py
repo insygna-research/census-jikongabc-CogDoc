@@ -12,8 +12,22 @@ from cogdoc.api.schemas import ErrorCode, build_error_response
 _EXEMPT_PATHS = frozenset(
     {"/healthz", "/readyz", "/metrics", "/docs", "/redoc", "/openapi.json"}
 )
-# 仅豁免限流（仍走鉴权）：入库 job 状态是高频轮询端点，令牌桶会误杀长任务的轮询。
-_RATE_LIMIT_EXEMPT_PREFIXES = ("/v1/index-jobs/",)
+# 仅豁免限流（仍走鉴权）：前端刷新/轮询会高频读取这些轻量状态接口。
+_RATE_LIMIT_EXEMPT_GET_PATHS = frozenset(("/v1/knowledge-bases", "/v1/sessions"))
+_RATE_LIMIT_EXEMPT_GET_PREFIXES = (
+    "/v1/index-jobs/",
+    "/v1/knowledge-bases/",
+    "/v1/sessions/",
+)
+
+
+def _is_rate_limit_exempt(request: Request) -> bool:
+    if request.method != "GET":
+        return False
+    path = request.url.path
+    return path in _RATE_LIMIT_EXEMPT_GET_PATHS or path.startswith(
+        _RATE_LIMIT_EXEMPT_GET_PREFIXES
+    )
 
 
 # 按身份分桶的令牌桶：突发容量 capacity，恒定速率 refill_per_second 补充。
@@ -97,8 +111,8 @@ class AccessControlMiddleware(BaseHTTPMiddleware):
             # 鉴权关闭时按客户端 IP 限流，仍能挡住单源洪泛。
             identity = request.client.host if request.client else "anonymous"
 
-        # 轮询端点过鉴权但不过限流，避免长任务的高频轮询被令牌桶误杀。
-        if not path.startswith(_RATE_LIMIT_EXEMPT_PREFIXES):
+        # 高频只读端点过鉴权但不过限流，避免 Streamlit rerun/轮询误杀正常使用。
+        if not _is_rate_limit_exempt(request):
             if not self._limiter.allow(identity):
                 return _reject(ErrorCode.REQUEST_THROTTLED, "请求过于频繁，请稍后重试")
 

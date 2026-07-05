@@ -3,8 +3,14 @@ import queue
 import threading
 import time
 import uuid
+from typing import Mapping
 import streamlit as st
-from cogdoc.frontend.api_client import CogDocClient
+from cogdoc.frontend.api_client import (
+    CogDocAPIError,
+    CogDocClient,
+    format_api_error,
+    response_payload,
+)
 
 DEFAULT_API_URL = os.getenv("COGDOC_API_URL", "http://localhost:8000")
 
@@ -14,6 +20,10 @@ st.set_page_config(page_title="CogDoc", layout="wide")
 # 创建测试客户端。
 def _client() -> CogDocClient:
     return CogDocClient(st.session_state.api_url)
+
+
+def _response_error(response, fallback: str = "请求失败") -> str:
+    return format_api_error(response_payload(response), response.status_code, fallback)
 
 
 # 完成 init状态 处理。
@@ -103,11 +113,20 @@ def _conversations(client: CogDocClient, kb_id: str) -> None:
         _switch_session(new_id)
 
     try:
-        backend = {
-            s["session_id"]: s
-            for s in client.list_sessions(kb_id).json().get("sessions", [])
-        }
-    except Exception:
+        resp = client.list_sessions(kb_id)
+        if resp.status_code == 200:
+            payload = response_payload(resp)
+            sessions = payload.get("sessions", []) if isinstance(payload, Mapping) else []
+            backend = {
+                s["session_id"]: s
+                for s in sessions
+                if isinstance(s, Mapping) and isinstance(s.get("session_id"), str)
+            }
+        else:
+            st.warning(f"读取会话列表失败: {_response_error(resp)}")
+            backend = {}
+    except Exception as exc:
+        st.warning(f"读取会话列表失败: {exc}")
         backend = {}
 
     # 已知列表打底（含空对话），再补上后端有、前端没记的（如刷新后从别处恢复的）。
@@ -192,10 +211,21 @@ def _sidebar() -> None:
         st.subheader("知识库")
         try:
             kbs = client.list_knowledge_bases()
+        except CogDocAPIError as exc:
+            st.error(f"读取知识库失败: {exc}")
+            return
         except Exception as exc:
             st.error(f"连不上后端: {exc}")
             return
 
+        if not isinstance(kbs, list):
+            st.error(f"意外的响应格式: {kbs}")
+            return
+        if not all(
+            isinstance(kb, Mapping) and isinstance(kb.get("kb_id"), str) for kb in kbs
+        ):
+            st.error(f"知识库列表响应缺少 kb_id: {kbs}")
+            return
         kb_ids = [kb["kb_id"] for kb in kbs]
         if kb_ids:
             # kb 选择也持久化进 URL，刷新后定位回原库（历史按 (kb, session) 存）。
@@ -239,13 +269,24 @@ def _sidebar() -> None:
                 st.rerun()
 
         try:
-            docs = client.list_documents(kb_id).json()
+            resp = client.list_documents(kb_id)
+            if resp.status_code != 200:
+                st.error(f"读取文档列表失败: {_response_error(resp)}")
+                docs = []
+            else:
+                docs = response_payload(resp)
         except Exception as exc:
             st.error(f"读取文档列表失败: {exc}")
+            docs = []
+        if docs and not isinstance(docs, list):
+            st.error(f"文档列表响应格式不符合预期: {docs}")
             docs = []
         if isinstance(docs, list) and docs:
             st.caption(f"文档 ({len(docs)})")
             for doc in docs:
+                if not isinstance(doc, Mapping) or not doc.get("name"):
+                    st.error(f"文档列表项格式不符合预期: {doc}")
+                    continue
                 row = st.columns([5, 1])
                 row[0].write(doc["name"])
                 if row[1].button("🗑", key=f"del-{doc['name']}"):
