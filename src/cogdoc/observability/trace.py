@@ -74,6 +74,11 @@ def build_trace_step(
     if "critique" in output:
         critique = str(output.get("critique") or "")
         step["critique"] = _preview(critique, 300) if critique else ""
+    if output.get("rewritten_queries"):
+        step["rewritten_queries"] = [
+            _preview(query, 120)
+            for query in list(output.get("rewritten_queries") or [])[:5]
+        ]
 
     count_fields = {
         "rewritten_queries": "rewritten_query_count",

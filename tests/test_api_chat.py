@@ -173,6 +173,8 @@ async def test_session_history_endpoint_returns_stored_turns(monkeypatch):
     assert body["session_id"] == "s1" and body["doc_id"] == "kb"
     # 刷新后能拉回多轮（user + assistant）。
     assert [m["role"] for m in body["messages"]] == ["user", "assistant"]
+    assert body["messages"][1]["trace_id"] == "trace-h"
+    assert body["messages"][1]["query"] == "问题"
     assert empty.json()["messages"] == []
 
 
@@ -278,6 +280,9 @@ async def test_chat_stream_emits_sse_frames_and_writes_session(monkeypatch):
     # 结构化 final，不泄漏 raw_output。
     assert "raw_output" not in body
     assert store.get_history("kb", "s1") == result.chat_messages
+    display = store.get_display("kb", "s1")
+    assert display[1]["trace_id"] == "trace-sse"
+    assert display[1]["query"] == "问题"
 
 
 # 验证 chat stream maps error event and skips session 场景。

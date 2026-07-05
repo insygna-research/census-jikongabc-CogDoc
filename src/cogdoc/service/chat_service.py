@@ -102,15 +102,22 @@ def _runtime_error_step(node_name: str, exc: Exception) -> dict[str, Any]:
 
 
 # 构建跟踪配置摘要。
+def _query_preview(query: str, limit: int = 80) -> str:
+    return " ".join((query or "").split())[:limit]
+
+
 def _trace_config(
     doc_id: str,
     query: str,
     is_local: bool,
     forced_task: str | None,
     settings: Any,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     return {
         "doc_id": doc_id,
+        "session_id": session_id or "",
+        "query_preview": _query_preview(query),
         "query_length": len(query),
         "is_local": is_local,
         "forced_task": forced_task,
@@ -136,6 +143,7 @@ def run_chat(
     is_local: bool = False,
     chat_history: list | None = None,
     forced_task: str | None = None,
+    session_id: str | None = None,
 ) -> Iterator[ChatEvent]:
     global app
     if app is None:
@@ -149,7 +157,9 @@ def run_chat(
     trace_steps: list[dict[str, Any]] = []
     request_start_ms = monotonic_ms()
     last_trace_ms = None
-    trace_config = _trace_config(doc_id, query, is_local, forced_task, settings)
+    trace_config = _trace_config(
+        doc_id, query, is_local, forced_task, settings, session_id=session_id
+    )
     stream_error: dict[str, Any] | None = None
     initial_state = {
         "messages": [],

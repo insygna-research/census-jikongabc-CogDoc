@@ -176,10 +176,12 @@ class CogDocClient:
         )
 
     # 列出 traces。
-    def list_traces(self, limit: int = 20) -> httpx.Response:
+    def list_traces(
+        self, limit: int = 20, kb_id: str = "", session_id: str = ""
+    ) -> httpx.Response:
         return httpx.get(
             self._url("/v1/traces"),
-            params={"limit": limit},
+            params={"limit": limit, "doc_id": kb_id, "session_id": session_id},
             timeout=self.timeout,
             headers=self._headers,
         )

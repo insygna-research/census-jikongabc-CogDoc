@@ -41,12 +41,16 @@ def test_build_trace_step_keeps_only_safe_document_preview():
 
 # 验证跟踪步骤使用显式检索截断值。
 def test_build_trace_step_uses_explicit_retrieval_top_k():
-    output = {"retrieved_docs": [{"text": "x", "meta": {"chunk_id": "c1"}}]}
+    output = {
+        "retrieved_docs": [{"text": "x", "meta": {"chunk_id": "c1"}}],
+        "rewritten_queries": ["改写问题"],
+    }
 
     step = build_trace_step("retrieve_node", output, 1.0, retrieval_top_k=9)
 
     assert step["retrieval_top_k"] == 9
     assert step["counts"]["retrieved_count"] == 1
+    assert step["rewritten_queries"] == ["改写问题"]
 
 
 # 验证跟踪载荷包含审计字段。

@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 from typing import Callable
 from fastapi import APIRouter, Query, Request, Response
@@ -37,6 +38,32 @@ _ERROR_RESPONSES = {
 }
 
 
+def _runner_accepts_session_id(runner: Callable[..., object]) -> bool:
+    try:
+        signature = inspect.signature(runner)
+    except (TypeError, ValueError):
+        return False
+    return "session_id" in signature.parameters or any(
+        param.kind == inspect.Parameter.VAR_KEYWORD
+        for param in signature.parameters.values()
+    )
+
+
+def _run_with_optional_session(
+    runner: Callable[..., object],
+    doc_id: str,
+    query: str,
+    is_local: bool,
+    chat_history: list,
+    forced_task: str | None,
+    session_id: str | None,
+):
+    args = (doc_id, query, is_local, chat_history, forced_task)
+    if _runner_accepts_session_id(runner):
+        return runner(*args, session_id=session_id)
+    return runner(*args)
+
+
 # 完成 chat 处理。
 @router.post("/chat", response_model=ChatResponse, responses=_ERROR_RESPONSES)
 async def chat(request_body: ChatRequest, request: Request, response: Response):
@@ -53,12 +80,14 @@ async def chat(request_body: ChatRequest, request: Request, response: Response):
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             request.app.state.offload_executor,
+            _run_with_optional_session,
             runner,
             request_body.doc_id,
             request_body.query,
             request_body.is_local,
             chat_history,
             request_body.forced_task,
+            request_body.session_id,
         )
     except ChatServiceError as exc:
         error_code = classify_error_code(exc.stage, exc.error_class, exc.message)
@@ -82,7 +111,13 @@ async def chat(request_body: ChatRequest, request: Request, response: Response):
         result.chat_messages,
         [
             {"role": "user", "content": request_body.query},
-            {"role": "assistant", "content": result.answer},
+            {
+                "role": "assistant",
+                "content": result.answer,
+                "trace_id": result.trace_id,
+                "query": request_body.query,
+                "task_type": result.task_type,
+            },
         ],
     )
     request.app.state.metrics.chat_results.labels(
@@ -206,12 +241,14 @@ async def chat_stream(request_body: ChatRequest, request: Request):
     def produce() -> None:
         # 同步事件流跑在有界线程池里，逐事件回投到事件循环的队列。
         try:
-            for event in stream_runner(
+            for event in _run_with_optional_session(
+                stream_runner,
                 doc_id,
                 request_body.query,
                 request_body.is_local,
                 chat_history,
                 request_body.forced_task,
+                session_id,
             ):
                 loop.call_soon_threadsafe(queue.put_nowait, event)
         except Exception as exc:
@@ -254,7 +291,13 @@ async def chat_stream(request_body: ChatRequest, request: Request):
                 final_result.chat_messages,
                 [
                     {"role": "user", "content": request_body.query},
-                    {"role": "assistant", "content": final_result.answer},
+                    {
+                        "role": "assistant",
+                        "content": final_result.answer,
+                        "trace_id": final_result.trace_id,
+                        "query": request_body.query,
+                        "task_type": final_result.task_type,
+                    },
                 ],
             )
 

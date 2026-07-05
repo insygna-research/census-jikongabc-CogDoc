@@ -13,6 +13,20 @@ from cogdoc.frontend.api_client import (
 )
 
 DEFAULT_API_URL = os.getenv("COGDOC_API_URL", "http://localhost:8000")
+MAIN_VIEWS = ["对话", "调试"]
+TRACE_NODE_LABELS = {
+    "runtime.setup": "运行准备",
+    "intent_router": "意图路由",
+    "rewrite_node": "问题改写",
+    "verify_rewrite_node": "改写校验",
+    "retrieve_node": "召回检索",
+    "rerank_node": "重排",
+    "generate_node": "答案生成",
+    "citation_node": "引用校验",
+    "qa_subgraph": "问答流程",
+    "summary_subgraph": "摘要流程",
+    "compare_subgraph": "对比流程",
+}
 
 st.set_page_config(page_title="CogDoc", layout="wide")
 
@@ -38,10 +52,14 @@ def _init_state() -> None:
     st.session_state.setdefault("messages_by_context", {})
     st.session_state.setdefault("restored_contexts", set())
     st.session_state.setdefault("pending_streams", {})
+    st.session_state.setdefault("main_views_by_context", {})
     st.session_state.setdefault("trace_cache", {})
     st.session_state.setdefault("active_trace_id", "")
-    st.session_state.setdefault("trace_list", [])
-    st.session_state.setdefault("trace_list_error", "")
+    st.session_state.setdefault("trace_labels", {})
+    st.session_state.setdefault("trace_options_by_id", {})
+    st.session_state.setdefault("trace_session_items_by_context", {})
+    st.session_state.setdefault("trace_session_loaded", set())
+    st.session_state.setdefault("trace_session_error", {})
     # 兼容旧状态：升级前只有一份全局 messages，迁移到当前 (kb, session) 桶里。
     if "messages" in st.session_state:
         if st.session_state.kb_id and st.session_state.messages:
@@ -66,25 +84,54 @@ def _messages_for(kb_id: str, session_id: str | None = None) -> list[dict]:
     )
 
 
+def _message_from_history(turn: Mapping, fallback_query: str = "") -> dict:
+    metadata = turn.get("metadata") if isinstance(turn.get("metadata"), Mapping) else {}
+    trace_id = turn.get("trace_id") or metadata.get("trace_id")
+    query = turn.get("query") or metadata.get("query") or fallback_query
+    if trace_id and query:
+        st.session_state.trace_labels[str(trace_id)] = str(query)
+    msg = {
+        "role": turn.get("role", "assistant"),
+        "content": turn.get("content", ""),
+        "id": _next_id(),
+    }
+    if trace_id:
+        msg["final"] = {
+            "trace_id": trace_id,
+            "task_type": turn.get("task_type") or metadata.get("task_type") or "-",
+            "is_valid": True,
+        }
+        msg["query"] = query
+    return msg
+
+
+def _messages_from_history(turns: list[Mapping]) -> list[dict]:
+    messages = []
+    last_user_query = ""
+    for turn in turns:
+        if turn.get("role") == "user":
+            last_user_query = str(turn.get("content") or "")
+            messages.append(_message_from_history(turn))
+        else:
+            messages.append(_message_from_history(turn, fallback_query=last_user_query))
+    return messages
+
+
 # 恢复历史记录。
 def _restore_history(kb_id: str) -> None:
     # kb 或 session 变化时重载该 kb 的历史；同一 (kb, session) 内不重复拉，保留实时追加的消息。
     marker = _context_key(kb_id)
     if marker in st.session_state.restored_contexts:
         return
+    if st.session_state.messages_by_context.get(marker):
+        st.session_state.restored_contexts.add(marker)
+        return
     try:
         resp = _client().get_session_history(st.session_state.session_id, kb_id)
         turns = resp.json().get("messages", []) if resp.status_code == 200 else []
     except Exception:
         turns = []
-    st.session_state.messages_by_context[marker] = [
-        {
-            "role": turn.get("role", "assistant"),
-            "content": turn.get("content", ""),
-            "id": _next_id(),
-        }
-        for turn in turns
-    ]
+    st.session_state.messages_by_context[marker] = _messages_from_history(turns)
     st.session_state.restored_contexts.add(marker)
 
 
@@ -184,7 +231,12 @@ def _load_trace(trace_id: str, force: bool = False) -> None:
     try:
         resp = _client().get_trace(trace_id)
         if resp.status_code == 200:
-            st.session_state.trace_cache[trace_id] = response_payload(resp)
+            payload = response_payload(resp)
+            st.session_state.trace_cache[trace_id] = payload
+            if isinstance(payload, Mapping):
+                query = (payload.get("config") or {}).get("query_preview")
+                if query:
+                    st.session_state.trace_labels[trace_id] = str(query)
         else:
             st.session_state.trace_cache[trace_id] = {
                 "error": _response_error(resp, "读取 trace 失败")
@@ -193,57 +245,164 @@ def _load_trace(trace_id: str, force: bool = False) -> None:
         st.session_state.trace_cache[trace_id] = {"error": str(exc)}
 
 
-def _load_trace_list() -> None:
+def _load_session_traces(kb_id: str | None, force: bool = False) -> None:
+    if not kb_id:
+        return
+    marker = _context_key(kb_id)
+    if not force and marker in st.session_state.trace_session_loaded:
+        return
     try:
-        resp = _client().list_traces(limit=30)
+        resp = _client().list_traces(
+            limit=30,
+            kb_id=kb_id,
+            session_id=st.session_state.session_id,
+        )
         if resp.status_code != 200:
-            st.session_state.trace_list_error = _response_error(
-                resp, "读取 trace 列表失败"
+            st.session_state.trace_session_error[marker] = _response_error(
+                resp, "读取当前会话 trace 失败"
             )
-            st.session_state.trace_list = []
+            st.session_state.trace_session_items_by_context[marker] = []
+            st.session_state.trace_session_loaded.add(marker)
             return
         payload = response_payload(resp)
         traces = payload.get("traces", []) if isinstance(payload, Mapping) else []
-        st.session_state.trace_list = [
+        items = [
             trace
             for trace in traces
             if isinstance(trace, Mapping) and isinstance(trace.get("trace_id"), str)
         ]
-        st.session_state.trace_list_error = ""
+        st.session_state.trace_session_items_by_context[marker] = items
+        st.session_state.trace_session_error.pop(marker, None)
+        st.session_state.trace_session_loaded.add(marker)
+        for trace in items:
+            query = str(trace.get("query_preview") or "").strip()
+            if query:
+                st.session_state.trace_labels[trace["trace_id"]] = query
     except Exception as exc:
-        st.session_state.trace_list = []
-        st.session_state.trace_list_error = str(exc)
+        st.session_state.trace_session_error[marker] = str(exc)
+        st.session_state.trace_session_items_by_context[marker] = []
+        st.session_state.trace_session_loaded.add(marker)
 
 
 def _trace_option_label(trace_id: str) -> str:
     if not trace_id:
         return "选择最近 trace"
-    for trace in st.session_state.trace_list:
-        if trace.get("trace_id") == trace_id:
-            status = trace.get("status", "-")
-            task = trace.get("task_type", "-")
-            duration = trace.get("duration_ms")
-            suffix = f" · {duration} ms" if duration is not None else ""
-            return f"{trace_id[:8]} · {task} · {status}{suffix}"
-    return trace_id
+    option_trace = st.session_state.trace_options_by_id.get(trace_id)
+    if option_trace:
+        status = option_trace.get("status", "-")
+        task = option_trace.get("task_type", "-")
+        title = _trace_query_title(trace_id, option_trace)
+        suffix = _format_duration(option_trace.get("duration_ms"))
+        duration = f" · {suffix}" if suffix else ""
+        return f"{title} · {task} · {status}{duration}"
+    return _trace_query_title(trace_id, {})
+
+
+def _trace_query_title(trace_id: str, trace: Mapping) -> str:
+    query = str(trace.get("query_preview") or "").strip()
+    if not query:
+        query = str(st.session_state.trace_labels.get(trace_id, "")).strip()
+    return query or "未记录问题"
+
+
+def _format_duration(duration_ms) -> str:
+    if duration_ms is None:
+        return ""
+    try:
+        value = float(duration_ms)
+    except (TypeError, ValueError):
+        return str(duration_ms)
+    if value >= 1000:
+        return f"{value / 1000:.1f}s"
+    return f"{value:.0f} ms"
+
+
+def _current_trace_items(kb_id: str | None) -> list[dict]:
+    items = []
+    seen = set()
+    for msg in reversed(_messages_for(kb_id) if kb_id else []):
+        final = msg.get("final") or {}
+        trace_id = final.get("trace_id")
+        if not trace_id or trace_id in seen:
+            continue
+        seen.add(trace_id)
+        cached = st.session_state.trace_cache.get(str(trace_id))
+        item = {"trace_id": str(trace_id)}
+        if isinstance(cached, Mapping) and not isinstance(cached.get("error"), str):
+            item.update(
+                {
+                    "query_preview": (cached.get("config") or {}).get("query_preview"),
+                    "task_type": cached.get("task_type"),
+                    "status": cached.get("status"),
+                    "duration_ms": cached.get("duration_ms"),
+                }
+            )
+        query = msg.get("query") or st.session_state.trace_labels.get(trace_id, "")
+        if query and not item.get("query_preview"):
+            item["query_preview"] = str(query)
+        if final.get("task_type") and not item.get("task_type"):
+            item["task_type"] = final.get("task_type")
+        items.append(item)
+    if kb_id:
+        marker = _context_key(kb_id)
+        for trace in st.session_state.trace_session_items_by_context.get(marker, []):
+            trace_id = trace.get("trace_id")
+            if not trace_id or trace_id in seen:
+                continue
+            seen.add(trace_id)
+            items.append(dict(trace))
+    return items
+
+
+def _trace_node_key(node_name: str) -> str:
+    tail = (node_name or "").rsplit(".", 1)[-1]
+    if ":" in tail:
+        return tail.split(":", 1)[0]
+    return tail
+
+
+def _trace_step_label(step: Mapping, idx: int) -> str:
+    node_name = str(step.get("node_name") or f"step-{idx + 1}")
+    node_key = _trace_node_key(node_name)
+    title = TRACE_NODE_LABELS.get(node_key, node_key)
+    duration = step.get("duration_ms")
+    label = f"{idx + 1}. {title}"
+    if node_key != title:
+        label += f" · {node_key}"
+    formatted = _format_duration(duration)
+    if formatted:
+        label += f" · {formatted}"
+    return label
 
 
 def _render_trace_step(step: Mapping, idx: int) -> None:
-    node = step.get("node_name") or f"step-{idx + 1}"
-    duration = step.get("duration_ms")
-    label = f"{idx + 1}. {node}"
-    if duration is not None:
-        label += f" · {duration} ms"
-    with st.expander(label):
-        cols = st.columns(4)
-        cols[0].caption(f"任务: {step.get('task_type') or '-'}")
-        cols[1].caption(f"模型: {step.get('model') or '-'}")
-        cols[2].caption(f"top_k: {step.get('retrieval_top_k') or '-'}")
-        cols[3].caption(f"错误: {step.get('error_class') or '-'}")
+    with st.expander(_trace_step_label(step, idx)):
+        if step.get("node_name"):
+            st.caption(f"原始节点: {step.get('node_name')}")
+        details = []
+        if step.get("task_type"):
+            details.append(f"任务: {step.get('task_type')}")
+        if step.get("model"):
+            details.append(f"模型: {step.get('model')}")
+        if step.get("retrieval_top_k") is not None:
+            details.append(f"top_k: {step.get('retrieval_top_k')}")
+        if step.get("error_class"):
+            details.append(f"错误: {step.get('error_class')}")
+        if details:
+            cols = st.columns(len(details))
+            for col, text in zip(cols, details):
+                col.caption(text)
 
         if step.get("router_reason"):
             st.markdown("**路由理由**")
             st.write(step["router_reason"])
+        rewritten = step.get("rewritten_queries") or []
+        if rewritten:
+            st.markdown("**改写查询**")
+            for query in rewritten:
+                st.write(f"- {query}")
+        elif (step.get("counts") or {}).get("rewritten_query_count"):
+            st.caption("此旧 trace 只记录了改写数量，未保存具体改写查询。")
         if step.get("critique"):
             st.markdown("**校验反馈**")
             st.write(step["critique"])
@@ -272,7 +431,7 @@ def _render_trace_debug(trace: dict) -> None:
     meta = st.columns(4)
     meta[0].caption(f"状态: {trace.get('status') or '-'}")
     meta[1].caption(f"任务: {trace.get('task_type') or '-'}")
-    meta[2].caption(f"耗时: {trace.get('duration_ms') or '-'} ms")
+    meta[2].caption(f"耗时: {_format_duration(trace.get('duration_ms')) or '-'}")
     meta[3].caption(f"步骤: {summary.get('step_count', 0)}")
     if trace.get("config"):
         with st.expander("请求配置"):
@@ -285,40 +444,67 @@ def _render_trace_debug(trace: dict) -> None:
             _render_trace_step(step, idx)
 
 
-def _render_trace_lookup() -> None:
-    with st.expander("Trace 调试"):
-        list_cols = st.columns([1, 1, 3])
-        if list_cols[0].button("最近 trace", key="trace-list-load"):
-            _load_trace_list()
-        if list_cols[1].button("刷新列表", key="trace-list-refresh"):
-            _load_trace_list()
-        if st.session_state.trace_list_error:
-            st.warning(f"读取 trace 列表失败: {st.session_state.trace_list_error}")
-        if st.session_state.trace_list:
-            options = [""] + [trace["trace_id"] for trace in st.session_state.trace_list]
+def _render_trace_lookup(kb_id: str | None) -> None:
+    st.subheader("Trace 调试")
+    _load_session_traces(kb_id)
+    left, right = st.columns([1, 2])
+    with left:
+        traces = _current_trace_items(kb_id)
+        trace_ids = {trace["trace_id"] for trace in traces}
+        if st.session_state.active_trace_id not in trace_ids:
+            st.session_state.active_trace_id = ""
+        marker = _context_key(kb_id) if kb_id else None
+        if marker and st.session_state.trace_session_error.get(marker):
+            st.warning(st.session_state.trace_session_error[marker])
+        if not traces:
+            st.info("当前对话还没有 trace。发送问题后这里会显示。")
+        if traces:
+            st.session_state.trace_options_by_id = {
+                trace["trace_id"]: trace for trace in traces
+            }
+            status_options = ["全部"] + sorted(
+                {str(trace.get("status") or "-") for trace in traces}
+            )
+            task_options = ["全部"] + sorted(
+                {str(trace.get("task_type") or "-") for trace in traces}
+            )
+            status_filter = st.selectbox(
+                "状态", status_options, key="trace-status-filter"
+            )
+            task_filter = st.selectbox("任务", task_options, key="trace-task-filter")
+            filtered = [
+                trace
+                for trace in traces
+                if (status_filter == "全部" or trace.get("status") == status_filter)
+                and (task_filter == "全部" or trace.get("task_type") == task_filter)
+            ]
+            options = [""] + [trace["trace_id"] for trace in filtered]
             selected = st.selectbox(
-                "最近请求",
+                "当前对话请求",
                 options,
                 format_func=_trace_option_label,
                 key="trace_recent_select",
             )
-            if selected and st.button("打开选中 trace", key="trace-open-selected"):
+            if selected and st.button(
+                "打开选中 trace", key="trace-open-selected", use_container_width=True
+            ):
                 st.session_state.active_trace_id = selected
                 _load_trace(selected)
 
-        with st.form("trace_lookup"):
-            trace_id = st.text_input(
-                "trace_id", value=st.session_state.active_trace_id
-            ).strip()
-            submitted = st.form_submit_button("查询")
-        if submitted and trace_id:
-            st.session_state.active_trace_id = trace_id
-            _load_trace(trace_id)
+    with right:
         active = st.session_state.active_trace_id
-        if active and st.button("刷新 trace", key="trace-refresh"):
+        if not active:
+            st.info("选择当前对话中的请求查看 trace。")
+            return
+        top = st.columns([3, 1])
+        top[0].markdown(f"**{_trace_query_title(active, {})}**")
+        top[0].caption(f"trace_id: {active}")
+        if top[1].button(
+            "刷新 trace", key="trace-refresh", use_container_width=True
+        ):
+            _load_session_traces(kb_id, force=True)
             _load_trace(active, force=True)
-        if active and active in st.session_state.trace_cache:
-            st.caption(f"trace_id: {active}")
+        if active in st.session_state.trace_cache:
             _render_trace_debug(st.session_state.trace_cache[active])
 
 
@@ -352,13 +538,8 @@ def _render_evidence(final: dict, key: str, query: str = "") -> None:
 
     trace_id = final.get("trace_id")
     if trace_id:
-        if st.button("查看 trace", key=f"trace-load-{key}"):
-            st.session_state.active_trace_id = trace_id
-            _load_trace(trace_id)
-        if trace_id in st.session_state.trace_cache:
-            with st.expander("Trace 调试", expanded=True):
-                st.caption(f"trace_id: {trace_id}")
-                _render_trace_debug(st.session_state.trace_cache[trace_id])
+        if query:
+            st.session_state.trace_labels[trace_id] = query
 
 
 # 完成 侧边栏 处理。
@@ -626,6 +807,9 @@ def _finish_stream(key: tuple[str, str], pending: dict) -> None:
 
     final = pending.get("final")
     answer = (final or {}).get("answer") or pending.get("answer", "")
+    trace_id = (final or {}).get("trace_id")
+    if trace_id and pending.get("prompt"):
+        st.session_state.trace_labels[trace_id] = pending["prompt"]
     _messages_for(pending["kb_id"], pending["session_id"]).append(
         {
             "role": "assistant",
@@ -675,46 +859,68 @@ def _chat_area() -> None:
     kb_id = st.session_state.kb_id
     if kb_id:
         _restore_history(kb_id)
-    st.subheader(f"对话 · {kb_id or '未选择知识库'}")
     current_key = _context_key(kb_id) if kb_id else None
     current_pending = (
         st.session_state.pending_streams.get(current_key) if current_key else None
     )
     answering = bool(current_pending)
-    mode = st.radio(
-        "模式",
-        ["auto", "qa", "summary", "compare"],
-        horizontal=True,
-        key="chat_mode",
-        disabled=answering,
+    current_view = st.session_state.main_views_by_context.get(current_key, "对话")
+    if current_view not in MAIN_VIEWS:
+        current_view = "对话"
+        st.session_state.main_views_by_context[current_key] = current_view
+    view_key = (
+        f"main-view-{kb_id}-{st.session_state.session_id}"
+        if current_key
+        else "main-view-empty"
     )
-    _render_trace_lookup()
+    view = st.radio(
+        "主视图",
+        MAIN_VIEWS,
+        index=MAIN_VIEWS.index(current_view),
+        horizontal=True,
+        key=view_key,
+        label_visibility="collapsed",
+    )
+    if current_key:
+        st.session_state.main_views_by_context[current_key] = view
 
-    messages = _messages_for(kb_id) if kb_id else []
-    for msg in messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"] or "（无答案）")
-            if msg.get("final"):
-                _render_evidence(
-                    msg["final"], key=msg["id"], query=msg.get("query", "")
-                )
+    if view == "对话":
+        st.subheader(f"对话 · {kb_id or '未选择知识库'}")
+        mode = st.radio(
+            "模式",
+            ["auto", "qa", "summary", "compare"],
+            horizontal=True,
+            key="chat_mode",
+            disabled=answering,
+        )
 
-    if current_pending:
-        with st.chat_message("assistant"):
-            answer = current_pending.get("answer", "")
-            st.markdown((answer + "▌") if answer else "正在思考…")
-            if current_pending.get("stage"):
-                st.caption(current_pending["stage"])
-        if st.button("■ 终止问题", type="primary", use_container_width=True):
-            _cancel_stream(current_key)
+        messages = _messages_for(kb_id) if kb_id else []
+        for msg in messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"] or "（无答案）")
+                if msg.get("final"):
+                    _render_evidence(
+                        msg["final"], key=msg["id"], query=msg.get("query", "")
+                    )
+
+        if current_pending:
+            with st.chat_message("assistant"):
+                answer = current_pending.get("answer", "")
+                st.markdown((answer + "▌") if answer else "正在思考…")
+                if current_pending.get("stage"):
+                    st.caption(current_pending["stage"])
+            if st.button("■ 终止问题", type="primary", use_container_width=True):
+                _cancel_stream(current_key)
+                st.rerun()
+            time.sleep(0.1)
             st.rerun()
-        time.sleep(0.1)
-        st.rerun()
 
-    prompt = st.chat_input("问点什么…", disabled=not kb_id)
-    if prompt:
-        _start_stream(kb_id, prompt, mode)
-        st.rerun()
+        prompt = st.chat_input("问点什么…", disabled=not kb_id)
+        if prompt:
+            _start_stream(kb_id, prompt, mode)
+            st.rerun()
+    else:
+        _render_trace_lookup(kb_id)
 
 
 # 完成 nextid 处理。

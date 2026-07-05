@@ -254,6 +254,7 @@ class TraceResponse(ApiModel):
 class TraceListItem(ApiModel):
     trace_id: str
     request_id: str
+    query_preview: str = ""
     task_type: str
     status: str
     duration_ms: float | None = None

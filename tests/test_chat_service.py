@@ -110,6 +110,7 @@ def test_run_chat_exports_auditable_trace(monkeypatch):
     assert exported[0]["task_type"] == "qa"
     assert exported[0]["duration_ms"] >= 0
     assert exported[0]["config"]["doc_id"] == "kb"
+    assert exported[0]["config"]["query_preview"] == "报名要求是什么"
     assert exported[0]["config"]["query_length"] == len("报名要求是什么")
     assert exported[0]["error"] is None
 
