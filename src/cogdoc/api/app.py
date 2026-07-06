@@ -13,6 +13,7 @@ from cogdoc.api.ingest import IndexJobManager, KnowledgeBaseRegistry
 from cogdoc.api.metrics import Metrics, MetricsMiddleware
 from cogdoc.api.persistence import SqliteJobStore, SqliteSessionStore
 from cogdoc.api.routes import (
+    agent_router,
     chat_router,
     documents_router,
     feedback_router,
@@ -220,6 +221,7 @@ def create_app(
         return _unhandled_error_response(exc)
 
     app.include_router(chat_router)
+    app.include_router(agent_router)
     app.include_router(health_router)
     app.include_router(documents_router)
     app.include_router(feedback_router)

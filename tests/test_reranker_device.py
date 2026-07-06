@@ -9,12 +9,15 @@ def restore_reranker_state():
     # 每个测试前后恢复 reranker 单例状态。
     saved_device = BGEReranker.device
     saved_model = BGEReranker._model
+    saved_models = dict(BGEReranker._models)
     saved_tokenizer = BGEReranker._tokenizer
     saved_required_cuda_free_bytes = BGEReranker.REQUIRED_CUDA_FREE_BYTES
+    BGEReranker._models = {}
     BGEReranker.REQUIRED_CUDA_FREE_BYTES = 2800 * 1024 * 1024
     yield
     BGEReranker.device = saved_device
     BGEReranker._model = saved_model
+    BGEReranker._models = saved_models
     BGEReranker._tokenizer = saved_tokenizer
     BGEReranker.REQUIRED_CUDA_FREE_BYTES = saved_required_cuda_free_bytes
 
@@ -83,6 +86,17 @@ def test_default_device_sticky_once_loaded_on_cuda(monkeypatch):
     monkeypatch.setattr(device, "cuda_free_bytes", lambda: 0)
     BGEReranker.device = "cuda"
     BGEReranker._model = object()
+
+    assert BGEReranker.default_device() == "cuda"
+
+
+# 验证 default device reuses cached cuda model 场景。
+def test_default_device_reuses_cached_cuda_model(monkeypatch):
+    # 显式设备调用加载过 cuda 模型后，云端默认设备继续复用已缓存模型。
+    monkeypatch.setattr(device, "cuda_free_bytes", lambda: 0)
+    BGEReranker.device = None
+    BGEReranker._model = None
+    BGEReranker._models["cuda"] = object()
 
     assert BGEReranker.default_device() == "cuda"
 

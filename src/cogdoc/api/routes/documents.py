@@ -1,6 +1,8 @@
 import asyncio
 import os
-from fastapi import APIRouter, File, Request, Response, UploadFile
+from collections.abc import Mapping
+from typing import Any
+from fastapi import APIRouter, File, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from cogdoc.api.ingest import KBExistsError
 from cogdoc.api.schemas import (
@@ -10,9 +12,13 @@ from cogdoc.api.schemas import (
     IndexJob,
     KnowledgeBase,
     KnowledgeBaseCreate,
+    ChunkPreview,
+    SourceChunksResponse,
+    SourceListResponse,
     build_error_response,
 )
 from cogdoc.config.settings import get_settings
+from cogdoc.observability.trace import delete_trace_files
 from cogdoc.service.ingest_service import (
     KBCleanupError,
     delete_kb_index_transactional,
@@ -45,11 +51,16 @@ def _delete_kb(kb_id, registry, index_jobs, session_store=None):
             if session_store is not None:
                 session_store.clear_kb(kb_id)
     finally:
-        # 释放 executor 槽位，允许 KB 重建时创建新 executor，防止 256 上限耗尽。
-        index_jobs.release_executor(kb_id)
+        try:
+            delete_trace_files(doc_id=kb_id)
+        finally:
+            # 释放 executor 槽位，允许 KB 重建时创建新 executor，防止 256 上限耗尽。
+            index_jobs.release_executor(kb_id)
 
 
 _PDF_MAGIC = b"%PDF"
+_CHUNK_PREVIEW_CHARS = 360
+_CONTEXT_PREVIEW_CHARS = 180
 _ERROR_RESPONSES = {
     400: {"model": ErrorResponse},
     404: {"model": ErrorResponse},
@@ -85,6 +96,45 @@ def _kb_documents(kb_id: str) -> list[Document]:
         Document(name=doc.get("name", ""), sha256=doc.get("sha256", ""))
         for doc in documents
     ]
+
+
+# 构建短文本预览。
+def _preview(text: Any, limit: int) -> str:
+    return " ".join(("" if text is None else str(text)).split())[:limit]
+
+
+# 读取知识库来源文件列表。
+def _kb_sources(kb_id: str) -> list[str]:
+    from cogdoc.graph.subgraphs.qa import RetrieverFactory
+    from cogdoc.service.kb_readers import kb_read_lease
+
+    with kb_read_lease(kb_id):
+        return RetrieverFactory.get_engine(kb_id).list_sources()
+
+
+# 读取来源文件分块。
+def _source_chunks(kb_id: str, source: str) -> list[dict]:
+    from cogdoc.graph.subgraphs.qa import RetrieverFactory
+    from cogdoc.service.kb_readers import kb_read_lease
+
+    with kb_read_lease(kb_id):
+        return RetrieverFactory.get_engine(kb_id).load_source_chunks(source)
+
+
+# 构建 chunk 预览。
+def _chunk_preview(doc: Mapping[str, Any]) -> ChunkPreview:
+    meta = doc.get("meta") if isinstance(doc.get("meta"), Mapping) else {}
+    page = meta.get("page")
+    return ChunkPreview(
+        chunk_id=str(meta.get("chunk_id", "")),
+        chunk_index=meta.get("chunk_index"),
+        source=str(meta.get("source", "") or ""),
+        page=page,
+        page_start=meta.get("page_start", page),
+        page_end=meta.get("page_end", page),
+        text_preview=_preview(doc.get("text", ""), _CHUNK_PREVIEW_CHARS),
+        context_preview=_preview(meta.get("context", ""), _CONTEXT_PREVIEW_CHARS),
+    )
 
 
 # 创建 knowledge base。
@@ -159,6 +209,52 @@ async def list_documents(kb_id: str, request: Request):
     if not request.app.state.kb_registry.exists(kb_id):
         return _error(ErrorCode.KB_NOT_FOUND, f"知识库不存在: {kb_id}", 404)
     return _kb_documents(kb_id)
+
+
+# 列出知识库来源文件。
+@router.get(
+    "/knowledge-bases/{kb_id}/sources",
+    response_model=SourceListResponse,
+    responses=_ERROR_RESPONSES,
+)
+async def list_sources(kb_id: str, request: Request):
+    if not request.app.state.kb_registry.exists(kb_id):
+        return _error(ErrorCode.KB_NOT_FOUND, f"知识库不存在: {kb_id}", 404)
+    loop = asyncio.get_running_loop()
+    sources = await loop.run_in_executor(
+        request.app.state.offload_executor, _kb_sources, kb_id
+    )
+    return SourceListResponse(kb_id=kb_id, sources=sources)
+
+
+# 查询来源文件 chunks。
+@router.get(
+    "/knowledge-bases/{kb_id}/sources/{source}/chunks",
+    response_model=SourceChunksResponse,
+    responses=_ERROR_RESPONSES,
+)
+async def source_chunks(
+    kb_id: str,
+    source: str,
+    request: Request,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    if not request.app.state.kb_registry.exists(kb_id):
+        return _error(ErrorCode.KB_NOT_FOUND, f"知识库不存在: {kb_id}", 404)
+    loop = asyncio.get_running_loop()
+    chunks = await loop.run_in_executor(
+        request.app.state.offload_executor, _source_chunks, kb_id, source
+    )
+    window = chunks[offset : offset + limit]
+    return SourceChunksResponse(
+        kb_id=kb_id,
+        source=source,
+        total_count=len(chunks),
+        offset=offset,
+        limit=limit,
+        chunks=[_chunk_preview(chunk) for chunk in window],
+    )
 
 
 # 完成 上传document 处理。

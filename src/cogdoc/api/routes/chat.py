@@ -1,10 +1,10 @@
 import asyncio
-import inspect
 import json
 from typing import Callable
 from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from cogdoc.api.error_mapping import classify_error_code, status_for_code
+from cogdoc.api.runners import run_with_optional_session
 from cogdoc.api.schemas import (
     ChatRequest,
     ChatResponse,
@@ -15,6 +15,7 @@ from cogdoc.api.schemas import (
     chat_result_to_response,
 )
 from cogdoc.config.settings import get_settings
+from cogdoc.observability.trace import delete_trace_files
 from cogdoc.service.chat_service import (
     ChatEvent,
     ChatResult,
@@ -38,34 +39,6 @@ _ERROR_RESPONSES = {
 }
 
 
-# 处理runneraccepts会话编号。
-def _runner_accepts_session_id(runner: Callable[..., object]) -> bool:
-    try:
-        signature = inspect.signature(runner)
-    except (TypeError, ValueError):
-        return False
-    return "session_id" in signature.parameters or any(
-        param.kind == inspect.Parameter.VAR_KEYWORD
-        for param in signature.parameters.values()
-    )
-
-
-# 运行withoptional会话。
-def _run_with_optional_session(
-    runner: Callable[..., object],
-    doc_id: str,
-    query: str,
-    is_local: bool,
-    chat_history: list,
-    forced_task: str | None,
-    session_id: str | None,
-):
-    args = (doc_id, query, is_local, chat_history, forced_task)
-    if _runner_accepts_session_id(runner):
-        return runner(*args, session_id=session_id)
-    return runner(*args)
-
-
 # 完成 chat 处理。
 @router.post("/chat", response_model=ChatResponse, responses=_ERROR_RESPONSES)
 async def chat(request_body: ChatRequest, request: Request, response: Response):
@@ -82,7 +55,7 @@ async def chat(request_body: ChatRequest, request: Request, response: Response):
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             request.app.state.offload_executor,
-            _run_with_optional_session,
+            run_with_optional_session,
             runner,
             request_body.doc_id,
             request_body.query,
@@ -164,6 +137,13 @@ async def delete_session(
     # 删除一个对话的多轮历史（幂等，不存在也返回 204）。
     kb_id = doc_id or get_settings().cogdoc_default_doc_id
     request.app.state.session_store.clear(kb_id, session_id)
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        request.app.state.offload_executor,
+        delete_trace_files,
+        kb_id,
+        session_id,
+    )
     return Response(status_code=204)
 
 
@@ -243,7 +223,7 @@ async def chat_stream(request_body: ChatRequest, request: Request):
     def produce() -> None:
         # 同步事件流跑在有界线程池里，逐事件回投到事件循环的队列。
         try:
-            for event in _run_with_optional_session(
+            for event in run_with_optional_session(
                 stream_runner,
                 doc_id,
                 request_body.query,

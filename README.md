@@ -125,8 +125,11 @@ The Streamlit app is a thin client over the FastAPI service — you can hit it d
 | --- | --- |
 | `POST /v1/knowledge-bases`, `GET /v1/knowledge-bases` | Create / list knowledge bases |
 | `POST /v1/knowledge-bases/{kb}/documents` | Upload + ingest a PDF (returns an async `job_id`) |
+| `GET /v1/knowledge-bases/{kb}/sources`, `GET /v1/knowledge-bases/{kb}/sources/{source}/chunks` | Browse indexed sources and chunk previews |
 | `GET /v1/index-jobs/{job_id}` | Poll ingestion progress |
 | `POST /v1/chat`, `POST /v1/chat/stream` | Ask (JSON or SSE streaming) |
+| `POST /v1/summary`, `POST /v1/compare` | Run explicit Summary / Compare tasks without router ambiguity |
+| `POST /v1/retrieve` | Return structured retrieval hits with chunk/source/page previews |
 | `GET /v1/sessions`, `GET /v1/sessions/{id}/history` | List / replay conversation history |
 | `GET /v1/traces?doc_id=...&session_id=...` | List recent traces, optionally scoped to one KB/session |
 | `GET /v1/traces/{trace_id}` | Fetch an exported request trace |

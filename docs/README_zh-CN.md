@@ -127,8 +127,11 @@ Streamlit 前端只是 FastAPI 服务上的瘦客户端——你也可以直接�
 | --- | --- |
 | `POST /v1/knowledge-bases`、`GET /v1/knowledge-bases` | 创建 / 列出知识库 |
 | `POST /v1/knowledge-bases/{kb}/documents` | 上传 + 入库 PDF（返回异步 `job_id`） |
+| `GET /v1/knowledge-bases/{kb}/sources`、`GET /v1/knowledge-bases/{kb}/sources/{source}/chunks` | 浏览已索引来源文件与 chunk 预览 |
 | `GET /v1/index-jobs/{job_id}` | 轮询入库进度 |
 | `POST /v1/chat`、`POST /v1/chat/stream` | 提问（JSON 或 SSE 流式） |
+| `POST /v1/summary`、`POST /v1/compare` | 显式执行 Summary / Compare，避免路由歧义 |
+| `POST /v1/retrieve` | 返回结构化检索命中，包含 chunk/source/page 预览 |
 | `GET /v1/sessions`、`GET /v1/sessions/{id}/history` | 列出 / 回放对话历史 |
 | `GET /v1/traces?doc_id=...&session_id=...` | 列出最近 trace，可限定到某个知识库/会话 |
 | `GET /v1/traces/{trace_id}` | 查询已导出的请求 trace |

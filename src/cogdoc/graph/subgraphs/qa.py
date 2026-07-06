@@ -141,7 +141,7 @@ def _find_source_chunk_index(
     source_chunks: list[RetrievedDoc], target_doc: RetrievedDoc
 ) -> int:
     target_meta = target_doc.get("meta", {})
-    target_id = str(target_meta.get("chunk_id", "") or "")
+    target_id = str(target_meta.get("chunk_id", ""))
     if target_id:
         for idx, doc in enumerate(source_chunks):
             if str(doc.get("meta", {}).get("chunk_id", "") or "") == target_id:
@@ -185,7 +185,7 @@ def _expand_with_neighbor_chunks(
             for doc in reranked_docs:
                 meta = doc.get("meta", {})
                 source = str(meta.get("source", "") or "")
-                parent_chunk_id = str(meta.get("chunk_id", "") or "")
+                parent_chunk_id = str(meta.get("chunk_id", ""))
                 if not source or not parent_chunk_id:
                     expanded[parent_chunk_id or _missing_chunk_key(expanded)] = (
                         copy.deepcopy(doc)
@@ -282,12 +282,14 @@ def rerank_node(state: GraphState) -> dict:
     settings = get_settings()
 
     target_device = "cpu" if is_local else BGEReranker.default_device()
-    BGEReranker.set_device(target_device)
 
     max_candidates = max(settings.qa_rerank_max_candidates, settings.qa_rerank_top_n)
     candidate_docs = docs[:max_candidates] if max_candidates > 0 else docs
     reranked_docs = BGEReranker.rerank(
-        query=query, docs=candidate_docs, top_n=settings.qa_rerank_top_n
+        query=query,
+        docs=candidate_docs,
+        top_n=settings.qa_rerank_top_n,
+        device=target_device,
     )
     # 下游沿用重排结果字段名，实际内容已包含相邻上下文扩展。
     expanded_docs = _expand_with_neighbor_chunks(doc_id, reranked_docs, state)

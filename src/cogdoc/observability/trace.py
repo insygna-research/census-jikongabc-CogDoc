@@ -1,7 +1,8 @@
 import json
 import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 from cogdoc.config.settings import Settings, get_settings
 
 
@@ -130,6 +131,41 @@ def trace_dir(settings: Settings | None = None) -> Path:
 def trace_path(trace_id: str, settings: Settings | None = None) -> Path:
     base_dir = trace_dir(settings)
     return base_dir / f"{trace_id}.json"
+
+
+# 判断跟踪是否属于指定范围。
+def _trace_matches_scope(
+    payload: Mapping[str, Any], doc_id: str, session_id: str
+) -> bool:
+    config = payload.get("config") if isinstance(payload.get("config"), Mapping) else {}
+    if doc_id and str(config.get("doc_id") or "") != doc_id:
+        return False
+    if session_id and str(config.get("session_id") or "") != session_id:
+        return False
+    return True
+
+
+# 清理指定知识库或会话的跟踪文件。
+def delete_trace_files(
+    doc_id: str = "", session_id: str = "", settings: Settings | None = None
+) -> int:
+    if not doc_id and not session_id:
+        return 0
+    base_dir = trace_dir(settings)
+    if not base_dir.exists() or not base_dir.is_dir():
+        return 0
+    deleted = 0
+    for path in base_dir.glob("*.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, Mapping) and _trace_matches_scope(
+                payload, doc_id, session_id
+            ):
+                path.unlink()
+                deleted += 1
+        except (OSError, json.JSONDecodeError):
+            continue
+    return deleted
 
 
 # 汇总跟踪步骤。

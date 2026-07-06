@@ -3,7 +3,7 @@ import queue
 import threading
 import time
 import uuid
-from typing import Mapping
+from collections.abc import Mapping
 import streamlit as st
 from cogdoc.frontend.api_client import (
     CogDocAPIError,
@@ -392,6 +392,17 @@ def _format_duration(duration_ms) -> str:
     return f"{value:.0f} ms"
 
 
+# 格式化页码范围。
+def _page_range_label(page_start, page_end=None) -> str:
+    if page_start is None and page_end is None:
+        return ""
+    if page_end is None or page_start == page_end:
+        return f"P{page_start}"
+    if page_start is None:
+        return f"P{page_end}"
+    return f"P{page_start}-{page_end}"
+
+
 # 构建流式预览文本。
 def _stream_preview(answer: str | None) -> str:
     answer = str(answer or "")
@@ -633,6 +644,71 @@ def _render_evidence(final: dict, key: str, query: str = "") -> None:
             st.session_state.trace_labels[trace_id] = query
 
 
+# 渲染 source chunks 浏览。
+def _render_source_browser(client: CogDocClient, kb_id: str) -> None:
+    with st.expander("索引内容"):
+        try:
+            status_code, payload = _cached_api_value(
+                ("sources", client.base_url, kb_id),
+                lambda: _response_status_payload(client.list_sources(kb_id)),
+            )
+        except Exception as exc:
+            st.warning(f"读取来源文件失败: {exc}")
+            return
+        if status_code != 200:
+            st.warning(
+                "读取来源文件失败: "
+                f"{format_api_error(payload, status_code, '读取来源文件失败')}"
+            )
+            return
+        sources = payload.get("sources", []) if isinstance(payload, Mapping) else []
+        sources = [str(source) for source in sources if source]
+        if not sources:
+            st.caption("暂无已索引 source")
+            return
+        selected = st.selectbox("source", sources, key=f"source-browser-{kb_id}")
+        if not st.checkbox("加载 chunk 预览", key=f"source-browser-load-{kb_id}"):
+            return
+        chunk_limit = st.selectbox(
+            "显示数量", [10, 20, 50], index=1, key=f"source-browser-limit-{kb_id}"
+        )
+        try:
+            status_code, payload = _cached_api_value(
+                ("chunks", client.base_url, kb_id, selected, 0, chunk_limit),
+                lambda: _response_status_payload(
+                    client.list_source_chunks(kb_id, selected, limit=chunk_limit)
+                ),
+            )
+        except Exception as exc:
+            st.warning(f"读取 chunks 失败: {exc}")
+            return
+        if status_code != 200:
+            st.warning(
+                "读取 chunks 失败: "
+                f"{format_api_error(payload, status_code, '读取 chunks 失败')}"
+            )
+            return
+        chunks = payload.get("chunks", []) if isinstance(payload, Mapping) else []
+        total = (
+            payload.get("total_count", len(chunks))
+            if isinstance(payload, Mapping)
+            else len(chunks)
+        )
+        st.caption(f"{selected} · {total} chunks")
+        for chunk in chunks:
+            if not isinstance(chunk, Mapping):
+                continue
+            chunk_id = str(chunk.get("chunk_id") or "")
+            page_start = chunk.get("page_start", chunk.get("page"))
+            page_end = chunk.get("page_end", page_start)
+            page_label = _page_range_label(page_start, page_end)
+            prefix = f"{page_label} · " if page_label else ""
+            st.caption(f"{prefix}`{chunk_id}`")
+            if chunk.get("context_preview"):
+                st.caption(str(chunk.get("context_preview")))
+            st.write(str(chunk.get("text_preview") or ""))
+
+
 # 完成 侧边栏 处理。
 def _sidebar() -> None:
     # 侧栏：后端地址、模式开关、知识库选择/新建/上传入库/文档列表。
@@ -705,6 +781,8 @@ def _sidebar() -> None:
             else:
                 _poll_job(client, resp.json()["job_id"])
                 _clear_api_cache(("documents", client.base_url, kb_id))
+                _clear_api_cache(("sources", client.base_url, kb_id))
+                _clear_api_cache(("chunks", client.base_url, kb_id))
                 _clear_api_cache(("kbs", client.base_url))
                 st.rerun()
 
@@ -736,8 +814,12 @@ def _sidebar() -> None:
                 if row[1].button("🗑", key=f"del-{doc['name']}"):
                     client.delete_document(kb_id, doc["name"])
                     _clear_api_cache(("documents", client.base_url, kb_id))
+                    _clear_api_cache(("sources", client.base_url, kb_id))
+                    _clear_api_cache(("chunks", client.base_url, kb_id))
                     _clear_api_cache(("kbs", client.base_url))
                     st.rerun()
+
+        _render_source_browser(client, kb_id)
 
         with st.expander("⚠️ 删除知识库"):
             st.caption("会删除该库全部文档与索引，不可恢复。")

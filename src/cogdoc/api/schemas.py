@@ -1,5 +1,6 @@
+from collections.abc import Mapping
 from enum import Enum
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from cogdoc.config.settings import get_settings
 
@@ -52,14 +53,11 @@ class ErrorCode(str, Enum):
     TRACE_NOT_FOUND = "TRACE_NOT_FOUND"
 
 
-# 对话接口请求体。
-class ChatRequest(ApiModel):
+# 带 query/doc_id 的请求基类。
+class QueryDocRequest(ApiModel):
     schema_version: Literal["v1"] = API_SCHEMA_VERSION
     query: str = Field(min_length=1)
     doc_id: str = Field(default_factory=lambda: get_settings().cogdoc_default_doc_id)
-    session_id: str | None = None
-    mode: ChatMode = ChatMode.AUTO
-    is_local: bool = False
 
     # 清理必填文本。
     @field_validator("query", "doc_id")
@@ -69,6 +67,13 @@ class ChatRequest(ApiModel):
         if not stripped:
             raise ValueError("must not be blank")
         return stripped
+
+
+# 对话接口请求体。
+class ChatRequest(QueryDocRequest):
+    session_id: str | None = None
+    mode: ChatMode = ChatMode.AUTO
+    is_local: bool = False
 
     # 解析强制任务模式。
     @property
@@ -112,6 +117,36 @@ class ChatResponse(ApiModel):
     evidence: list[Evidence] = Field(default_factory=list)
     critique: str = ""
     is_valid: bool
+
+
+# 独立任务接口请求体，显式指定 summary/compare 由路由层固定。
+class TaskRequest(QueryDocRequest):
+    session_id: str | None = None
+    is_local: bool = False
+
+
+# 检索接口请求体，不调用 LLM。
+class RetrieveRequest(QueryDocRequest):
+    top_k: int = Field(default=8, ge=1, le=50)
+    rerank: bool = False
+    rerank_top_n: int | None = Field(default=None, ge=1, le=50)
+    is_local: bool = False
+
+
+# 检索命中项，供前端 evidence 面板和调试面板直接消费。
+class RetrieveHit(Evidence):
+    rank: int
+    retrieval: dict[str, Any] = Field(default_factory=dict)
+
+
+# 检索接口结构化响应。
+class RetrieveResponse(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    doc_id: str
+    query: str
+    top_k: int
+    rerank: bool
+    hits: list[RetrieveHit] = Field(default_factory=list)
 
 
 # 统一错误响应体，所有失败路径共用。
@@ -164,6 +199,36 @@ class KnowledgeBase(ApiModel):
 class Document(ApiModel):
     name: str
     sha256: str = ""
+
+
+# 知识库来源文件列表响应。
+class SourceListResponse(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    kb_id: str
+    sources: list[str] = Field(default_factory=list)
+
+
+# 文档 chunk 预览，不返回完整正文。
+class ChunkPreview(ApiModel):
+    chunk_id: str = ""
+    chunk_index: int | None = None
+    source: str = ""
+    page: int | None = None
+    page_start: int | None = None
+    page_end: int | None = None
+    text_preview: str = ""
+    context_preview: str = ""
+
+
+# 单个来源文件的 chunk 预览响应。
+class SourceChunksResponse(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    kb_id: str
+    source: str
+    total_count: int
+    offset: int
+    limit: int
+    chunks: list[ChunkPreview] = Field(default_factory=list)
 
 
 # 后台入库任务记录，供轮询状态。

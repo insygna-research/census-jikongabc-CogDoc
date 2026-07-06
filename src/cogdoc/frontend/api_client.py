@@ -1,6 +1,7 @@
 import json
 import os
-from typing import Any, Callable, Iterable, Iterator, Mapping
+from collections.abc import Mapping
+from typing import Any, Callable, Iterable, Iterator
 import httpx
 
 DEFAULT_TIMEOUT = 180.0
@@ -145,6 +146,25 @@ class CogDocClient:
             headers=self._headers,
         )
 
+    # 列出知识库 sources。
+    def list_sources(self, kb_id: str) -> httpx.Response:
+        return httpx.get(
+            self._url(f"/v1/knowledge-bases/{kb_id}/sources"),
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    # 列出 source chunks。
+    def list_source_chunks(
+        self, kb_id: str, source: str, offset: int = 0, limit: int = 50
+    ) -> httpx.Response:
+        return httpx.get(
+            self._url(f"/v1/knowledge-bases/{kb_id}/sources/{source}/chunks"),
+            params={"offset": offset, "limit": limit},
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
     # 完成 上传document 处理。
     def upload_document(
         self, kb_id: str, filename: str, content: bytes
@@ -250,6 +270,73 @@ class CogDocClient:
         if session_id:
             payload["session_id"] = session_id
         return payload
+
+    # 调用独立 summary 接口。
+    def summary(
+        self,
+        kb_id: str,
+        query: str,
+        session_id: str | None = None,
+        is_local: bool = False,
+    ) -> httpx.Response:
+        payload = {
+            "query": query,
+            "doc_id": kb_id,
+            "session_id": session_id,
+            "is_local": is_local,
+        }
+        return httpx.post(
+            self._url("/v1/summary"),
+            json={k: v for k, v in payload.items() if v is not None},
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    # 调用独立 compare 接口。
+    def compare(
+        self,
+        kb_id: str,
+        query: str,
+        session_id: str | None = None,
+        is_local: bool = False,
+    ) -> httpx.Response:
+        payload = {
+            "query": query,
+            "doc_id": kb_id,
+            "session_id": session_id,
+            "is_local": is_local,
+        }
+        return httpx.post(
+            self._url("/v1/compare"),
+            json={k: v for k, v in payload.items() if v is not None},
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    # 调用独立 retrieve 接口。
+    def retrieve(
+        self,
+        kb_id: str,
+        query: str,
+        top_k: int = 8,
+        rerank: bool = False,
+        rerank_top_n: int | None = None,
+        is_local: bool = False,
+    ) -> httpx.Response:
+        payload = {
+            "query": query,
+            "doc_id": kb_id,
+            "top_k": top_k,
+            "rerank": rerank,
+            "rerank_top_n": rerank_top_n,
+            "is_local": is_local,
+        }
+        return httpx.post(
+            self._url("/v1/retrieve"),
+            json={k: v for k, v in payload.items() if v is not None},
+            timeout=self.timeout,
+            headers=self._headers,
+        )
 
     # 流式返回chat。
     def stream_chat(

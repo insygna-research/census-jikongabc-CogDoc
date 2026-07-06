@@ -2,9 +2,10 @@ import json
 import logging
 import sys
 import traceback
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 from uuid import uuid4
 from cogdoc.config.settings import Settings, get_settings
 
