@@ -213,9 +213,10 @@ async def retrieve(body: RetrieveRequest, request: Request):
     if kb_error is not None:
         return kb_error
     loop = asyncio.get_running_loop()
+    retrieve_runner = getattr(request.app.state, "retrieve_runner", _run_retrieve)
     docs = await loop.run_in_executor(
         request.app.state.offload_executor,
-        _run_retrieve,
+        retrieve_runner,
         body,
     )
     hits = [

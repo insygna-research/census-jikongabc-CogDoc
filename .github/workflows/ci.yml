@@ -39,3 +39,9 @@ jobs:
 
       - name: Run tests
         run: pytest -q
+
+      - name: Run API smoke
+        run: make smoke-api
+
+      - name: Run eval coverage gate
+        run: make eval-suite

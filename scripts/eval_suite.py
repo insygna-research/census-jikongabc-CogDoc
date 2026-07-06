@@ -25,7 +25,15 @@ from scripts import eval_quality, eval_retrieval
 DEFAULT_REPORT_PATH = ROOT / "eval" / "eval_suite_report.json"
 DEFAULT_BASELINE_PATH = ROOT / "eval" / "eval_suite_baseline.json"
 QUALITY_CASE_TYPE_ORDER = ("router", "citation", "faithfulness")
-QUALITY_LAYER_ORDER = ("easy", "hard", "no-answer", "compare", "multi-turn")
+QUALITY_LAYER_ORDER = (
+    "easy",
+    "hard",
+    "no-answer",
+    "summary",
+    "compare",
+    "multi-turn",
+    "feedback",
+)
 
 
 # 构建覆盖门禁结果。

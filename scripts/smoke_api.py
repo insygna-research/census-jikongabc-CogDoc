@@ -35,6 +35,7 @@ class InlineExecutor(Executor):
 def _configure_isolated_env(data_dir: Path) -> None:
     os.environ["COGDOC_DATA_DIR"] = str(data_dir)
     os.environ["COGDOC_TRACE_ENABLED"] = "false"
+    os.environ["COGDOC_TRACE_DIR"] = str(data_dir / "traces")
     os.environ["COGDOC_LOG_TO_CONSOLE"] = "false"
     os.environ["COGDOC_API_KEYS"] = ""
     os.environ["RATE_LIMIT_BURST"] = "0"
@@ -87,6 +88,20 @@ def _build_app(data_dir: Path):
     # 冒烟检查只验证接口串联，不做真实索引清理。
     document_routes.delete_kb_index_transactional = lambda kb_id: None
     document_routes.mark_kb_deleted = lambda kb_id: None
+
+    def fake_doc() -> dict:
+        return {
+            "text": "smoke evidence text about a document",
+            "meta": {
+                "chunk_id": "chunk-1",
+                "chunk_index": 0,
+                "source": "a.pdf",
+                "page": 1,
+                "page_start": 1,
+                "page_end": 1,
+            },
+            "retrieval": {"channel": "smoke", "score": 1.0},
+        }
 
     # 返回当前知识库的隔离源文件目录。
     def source_dir_for(kb_id: str) -> str:
@@ -161,6 +176,9 @@ def _build_app(data_dir: Path):
     app.state.offload_executor.shutdown(wait=False)
     # 仅冒烟检查替换为同步执行器，生产代码仍使用有界线程池。
     app.state.offload_executor = InlineExecutor()
+    app.state.source_list_reader = lambda kb_id: ["a.pdf"]
+    app.state.source_chunks_reader = lambda kb_id, source: [fake_doc()]
+    app.state.retrieve_runner = lambda body: [fake_doc()]
     return app
 
 
@@ -236,6 +254,26 @@ async def _run_smoke(data_dir: Path, timeout: float, verbose: bool) -> None:
             assert docs.json()[0]["name"] == "a.pdf", docs.text
             _print_step(verbose, "list documents", docs.json())
 
+            sources = await client.get(f"/v1/knowledge-bases/{kb_id}/sources")
+            _assert_status(sources, 200, "list sources")
+            assert sources.json()["sources"] == ["a.pdf"], sources.text
+            _print_step(verbose, "list sources", sources.json())
+
+            chunks = await client.get(
+                f"/v1/knowledge-bases/{kb_id}/sources/a.pdf/chunks"
+            )
+            _assert_status(chunks, 200, "source chunks")
+            assert chunks.json()["chunks"][0]["chunk_id"] == "chunk-1", chunks.text
+            _print_step(verbose, "source chunks", chunks.json())
+
+            retrieve = await client.post(
+                "/v1/retrieve",
+                json={"query": "smoke retrieval", "doc_id": kb_id, "top_k": 3},
+            )
+            _assert_status(retrieve, 200, "retrieve")
+            assert retrieve.json()["hits"][0]["source"] == "a.pdf", retrieve.text
+            _print_step(verbose, "retrieve", retrieve.json())
+
             chat = await client.post(
                 "/v1/chat",
                 json={
@@ -250,6 +288,30 @@ async def _run_smoke(data_dir: Path, timeout: float, verbose: bool) -> None:
             assert chat_body["trace_id"] == "trace-smoke-sync", chat_body
             assert chat_body["citations"][0]["source"] == "a.pdf", chat_body
             _print_step(verbose, "chat", chat_body)
+
+            summary = await client.post(
+                "/v1/summary",
+                json={
+                    "query": "summarize a.pdf",
+                    "doc_id": kb_id,
+                    "session_id": session_id,
+                },
+            )
+            _assert_status(summary, 200, "summary")
+            assert summary.json()["task_type"] == "summary", summary.text
+            _print_step(verbose, "summary", summary.json())
+
+            compare = await client.post(
+                "/v1/compare",
+                json={
+                    "query": "compare a.pdf and b.pdf",
+                    "doc_id": kb_id,
+                    "session_id": session_id,
+                },
+            )
+            _assert_status(compare, 200, "compare")
+            assert compare.json()["task_type"] == "compare", compare.text
+            _print_step(verbose, "compare", compare.json())
 
             stream = await client.post(
                 "/v1/chat/stream",
@@ -266,6 +328,45 @@ async def _run_smoke(data_dir: Path, timeout: float, verbose: bool) -> None:
             assert "event: final" in stream.text, stream.text
             _print_step(verbose, "chat stream")
 
+            from cogdoc.observability.trace import build_trace_payload, trace_path
+
+            trace_payload = build_trace_payload(
+                trace_id=chat_body["trace_id"],
+                request_id=chat_body["request_id"],
+                task_type=chat_body["task_type"],
+                steps=[
+                    {
+                        "node_name": "smoke",
+                        "duration_ms": 1.0,
+                        "model": None,
+                        "token": None,
+                        "retrieval_top_k": 3,
+                        "critique": None,
+                        "error_class": None,
+                        "counts": {"evidence_count": 1},
+                        "evidence": chat_body["evidence"],
+                    }
+                ],
+                config={
+                    "doc_id": kb_id,
+                    "session_id": session_id,
+                    "query_preview": "smoke question",
+                },
+            )
+            path = trace_path(chat_body["trace_id"])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(trace_payload, ensure_ascii=False), encoding="utf-8")
+
+            traces = await client.get(
+                "/v1/traces", params={"doc_id": kb_id, "session_id": session_id}
+            )
+            _assert_status(traces, 200, "list traces")
+            assert traces.json()["traces"][0]["trace_id"] == chat_body["trace_id"], traces.text
+            trace = await client.get(f"/v1/traces/{chat_body['trace_id']}")
+            _assert_status(trace, 200, "get trace")
+            assert trace.json()["summary"]["step_count"] == 1, trace.text
+            _print_step(verbose, "trace", trace.json())
+
             history = await client.get(
                 f"/v1/sessions/{session_id}/history", params={"doc_id": kb_id}
             )
@@ -281,6 +382,8 @@ async def _run_smoke(data_dir: Path, timeout: float, verbose: bool) -> None:
                     "kb_id": kb_id,
                     "query": "smoke question",
                     "answer": chat_body["answer"],
+                    "citations": chat_body["citations"],
+                    "evidence": chat_body["evidence"],
                 },
             )
             _assert_status(feedback, 201, "feedback")

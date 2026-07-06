@@ -27,6 +27,7 @@ def _write_quality_eval(path):
             ],
         },
         {"case_type": "faithfulness", "layer": "no-answer", "is_faithful": True},
+        {"case_type": "faithfulness", "layer": "summary", "is_faithful": True},
         {
             "case_type": "router",
             "layer": "compare",
@@ -39,6 +40,7 @@ def _write_quality_eval(path):
             "query": "那它有什么限制",
             "expected_task_type": "qa",
         },
+        {"case_type": "faithfulness", "layer": "feedback", "is_faithful": False},
     ]
     path.write_text(
         "\n".join(json.dumps(row, ensure_ascii=False) for row in rows),

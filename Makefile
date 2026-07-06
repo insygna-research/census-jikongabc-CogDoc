@@ -6,7 +6,7 @@ MATURIN ?= maturin
 # src-layout：包源码在 src/，入口经 PYTHONPATH 注入，无需先安装即可 run/serve/test。
 export PYTHONPATH := src
 
-.PHONY: help install native check test smoke-api run debug eval eval-coverage eval-quality eval-quality-coverage eval-suite eval-suite-report eval-suite-baseline eval-suite-update-baseline serve frontend
+.PHONY: help install native check test smoke-api run debug backup eval eval-coverage eval-quality eval-quality-coverage eval-suite eval-suite-run-retrieval eval-suite-report eval-suite-baseline eval-suite-update-baseline serve frontend
 
 help:
 	@echo "make install - 可编辑安装含开发依赖 (pip install -e '.[dev]')"
@@ -14,11 +14,13 @@ help:
 	@echo "make check   - 校验原生扩展是否就绪 (scripts/check_native.py)"
 	@echo "make test    - 运行 pytest 全量测试"
 	@echo "make smoke-api - 运行不依赖真实模型/索引的 API E2E smoke"
+	@echo "make backup  - 备份 data/ 与 logs/traces/ 到 backups/"
 	@echo "make eval    - 离线检索评测 recall@k/MRR (scripts/eval_retrieval.py)"
 	@echo "make eval-coverage - 只检查检索评测集覆盖面，不执行真实检索"
 	@echo "make eval-quality - 离线质量评测 router/citation/faithfulness (scripts/eval_quality.py)"
 	@echo "make eval-quality-coverage - 检查质量评测集覆盖面"
 	@echo "make eval-suite - 运行组合评测门禁（覆盖审计 + 质量评测）"
+	@echo "make eval-suite-run-retrieval - 运行组合评测并执行真实检索"
 	@echo "make eval-suite-report - 写入 eval/eval_suite_report.json"
 	@echo "make eval-suite-baseline - 对比 eval/eval_suite_baseline.json"
 	@echo "make eval-suite-update-baseline - 更新 eval/eval_suite_baseline.json"
@@ -43,6 +45,9 @@ test:
 smoke-api:
 	$(PYTHON) scripts/smoke_api.py
 
+backup:
+	$(PYTHON) scripts/backup_state.py
+
 eval:
 	$(PYTHON) scripts/eval_retrieval.py
 
@@ -57,6 +62,9 @@ eval-quality-coverage:
 
 eval-suite:
 	$(PYTHON) scripts/eval_suite.py
+
+eval-suite-run-retrieval:
+	$(PYTHON) scripts/eval_suite.py --run-retrieval
 
 eval-suite-report:
 	$(PYTHON) scripts/eval_suite.py --json eval/eval_suite_report.json

@@ -146,7 +146,13 @@ def test_quality_coverage_audit_reports_missing_dimensions():
     )
 
     assert coverage["missing_case_types"] == ["faithfulness"]
-    assert coverage["missing_layers"] == ["no-answer", "compare", "multi-turn"]
+    assert coverage["missing_layers"] == [
+        "no-answer",
+        "summary",
+        "compare",
+        "multi-turn",
+        "feedback",
+    ]
     assert coverage["is_coverage_complete"] is False
 
 
@@ -156,8 +162,10 @@ def _write_complete_quality_eval(path):
         {"case_type": "router", "layer": "easy"},
         {"case_type": "citation", "layer": "hard"},
         {"case_type": "faithfulness", "layer": "no-answer"},
+        {"case_type": "faithfulness", "layer": "summary"},
         {"case_type": "router", "layer": "compare"},
         {"case_type": "router", "layer": "multi-turn"},
+        {"case_type": "faithfulness", "layer": "feedback"},
     ]
     path.write_text(
         "\n".join(json.dumps(row, ensure_ascii=False) for row in rows),

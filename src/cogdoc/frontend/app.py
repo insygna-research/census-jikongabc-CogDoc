@@ -282,6 +282,17 @@ def _conversations(client: CogDocClient, kb_id: str) -> None:
 # 完成 send反馈 处理。
 def _send_feedback(final: dict, query: str, feedback: str) -> None:
     # 凭该回答的 trace_id 提交赞/踩，关联 kb/query/answer 落到后端。
+    _submit_feedback(final, query, feedback)
+
+
+# 提交反馈。
+def _submit_feedback(
+    final: dict,
+    query: str,
+    feedback: str,
+    comment: str | None = None,
+    correction: str | None = None,
+) -> None:
     trace_id = final.get("trace_id")
     if not trace_id:
         st.toast("缺少 trace_id，无法提交反馈")
@@ -292,6 +303,10 @@ def _send_feedback(final: dict, query: str, feedback: str) -> None:
         kb_id=st.session_state.kb_id,
         query=query,
         answer=final.get("answer", ""),
+        citations=final.get("citations") or [],
+        evidence=final.get("evidence") or [],
+        comment=comment,
+        correction=correction,
     )
     st.toast(
         "反馈已记录" if resp.status_code == 201 else f"反馈失败: {resp.status_code}"
@@ -645,6 +660,19 @@ def _render_evidence(final: dict, key: str, query: str = "") -> None:
         _send_feedback(final, query, "thumbs_up")
     if fb[1].button("👎", key=f"down-{key}"):
         _send_feedback(final, query, "thumbs_down")
+    with st.expander("纠错"):
+        with st.form(f"correction-{key}", clear_on_submit=True):
+            comment = st.text_area("备注", key=f"comment-{key}", height=80)
+            correction = st.text_area("纠正答案", key=f"correction-text-{key}", height=120)
+            submitted = st.form_submit_button("提交纠错")
+        if submitted:
+            _submit_feedback(
+                final,
+                query,
+                "correction",
+                comment=comment.strip() or None,
+                correction=correction.strip() or None,
+            )
 
     trace_id = final.get("trace_id")
     if trace_id:

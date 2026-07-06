@@ -24,6 +24,7 @@ chroma_db/
 
 logs/
 *.log
+backups/
 
 测试论文/
 your_documents/

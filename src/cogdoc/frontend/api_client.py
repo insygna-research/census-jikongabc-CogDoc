@@ -247,6 +247,10 @@ class CogDocClient:
         kb_id: str | None = None,
         query: str | None = None,
         answer: str | None = None,
+        citations: list[dict] | None = None,
+        evidence: list[dict] | None = None,
+        comment: str | None = None,
+        correction: str | None = None,
     ) -> httpx.Response:
         payload = {
             "trace_id": trace_id,
@@ -254,6 +258,10 @@ class CogDocClient:
             "kb_id": kb_id,
             "query": query,
             "answer": answer,
+            "citations": citations or [],
+            "evidence": evidence or [],
+            "comment": comment,
+            "correction": correction,
         }
         return httpx.post(
             self._url("/v1/feedback"),

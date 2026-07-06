@@ -8,6 +8,33 @@ from uuid import uuid4
 from cogdoc.config.settings import get_settings
 
 _BAD_CASE_TYPES = {"thumbs_down", "correction"}
+_EVIDENCE_PREVIEW_LIMIT = 6
+
+
+# 构建可转入质量评测集的坏样本草稿。
+def _build_eval_draft(entry: dict[str, Any]) -> dict[str, Any]:
+    feedback = str(entry.get("feedback") or "")
+    correction = entry.get("correction")
+    draft = {
+        "case_type": "faithfulness",
+        "layer": "feedback",
+        "query": entry.get("query", ""),
+        "answer": correction or entry.get("answer", ""),
+        "is_faithful": False,
+        "reviewer": "user_feedback",
+        "trace_id": entry.get("trace_id", ""),
+        "kb_id": entry.get("kb_id", ""),
+        "feedback": feedback,
+    }
+    if entry.get("comment"):
+        draft["comment"] = entry["comment"]
+    if correction:
+        draft["correction"] = correction
+    if entry.get("citations"):
+        draft["citations"] = entry["citations"]
+    if entry.get("evidence"):
+        draft["evidence"] = entry["evidence"][:_EVIDENCE_PREVIEW_LIMIT]
+    return draft
 
 
 # 返回当前 UTC 时间字符串。
@@ -35,6 +62,8 @@ class FeedbackStore:
         feedback_id = uuid4().hex
         entry = {"feedback_id": feedback_id, "created_at": _now_iso(), **payload}
         is_bad_case = payload.get("feedback") in _BAD_CASE_TYPES
+        if is_bad_case:
+            entry["eval_draft"] = _build_eval_draft(entry)
         with self._lock:
             self._append(self._feedback_path, entry)
             if is_bad_case:

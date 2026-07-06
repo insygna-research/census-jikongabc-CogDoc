@@ -221,8 +221,9 @@ async def list_sources(kb_id: str, request: Request):
     if not request.app.state.kb_registry.exists(kb_id):
         return _error(ErrorCode.KB_NOT_FOUND, f"知识库不存在: {kb_id}", 404)
     loop = asyncio.get_running_loop()
+    source_reader = getattr(request.app.state, "source_list_reader", _kb_sources)
     sources = await loop.run_in_executor(
-        request.app.state.offload_executor, _kb_sources, kb_id
+        request.app.state.offload_executor, source_reader, kb_id
     )
     return SourceListResponse(kb_id=kb_id, sources=sources)
 
@@ -243,8 +244,9 @@ async def source_chunks(
     if not request.app.state.kb_registry.exists(kb_id):
         return _error(ErrorCode.KB_NOT_FOUND, f"知识库不存在: {kb_id}", 404)
     loop = asyncio.get_running_loop()
+    chunks_reader = getattr(request.app.state, "source_chunks_reader", _source_chunks)
     chunks = await loop.run_in_executor(
-        request.app.state.offload_executor, _source_chunks, kb_id, source
+        request.app.state.offload_executor, chunks_reader, kb_id, source
     )
     window = chunks[offset : offset + limit]
     return SourceChunksResponse(

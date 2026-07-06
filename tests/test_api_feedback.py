@@ -71,14 +71,68 @@ async def test_thumbs_down_lands_in_bad_cases(tmp_path, monkeypatch):
             "kb_id": "kb",
             "query": "问题",
             "answer": "错答案",
+            "citations": [{"chunk_id": "c1", "source": "a.pdf", "page": 1}],
+            "evidence": [
+                {
+                    "chunk_id": "c1",
+                    "source": "a.pdf",
+                    "page": 1,
+                    "text_preview": "证据",
+                }
+            ],
         },
     )
 
     assert resp.status_code == 201 and resp.json()["is_bad_case"] is True
     bad = _read_jsonl(root / "bad_cases.jsonl")
     assert len(bad) == 1 and bad[0]["feedback"] == "thumbs_down"
+    assert bad[0]["eval_draft"] == {
+        "case_type": "faithfulness",
+        "layer": "feedback",
+        "query": "问题",
+        "answer": "错答案",
+        "is_faithful": False,
+        "reviewer": "user_feedback",
+        "trace_id": "t2",
+        "kb_id": "kb",
+        "feedback": "thumbs_down",
+        "citations": [{"chunk_id": "c1", "source": "a.pdf", "page": 1}],
+        "evidence": [
+            {
+                "chunk_id": "c1",
+                "source": "a.pdf",
+                "page": 1,
+                "text_preview": "证据",
+            }
+        ],
+    }
     # 同时也进总反馈日志。
     assert len(_read_jsonl(root / "feedback.jsonl")) == 1
+
+
+# 验证 correction prefers corrected answer in eval draft 场景。
+@pytest.mark.anyio
+async def test_correction_uses_correction_text_in_eval_draft(tmp_path, monkeypatch):
+    app, root = _make_app(tmp_path, monkeypatch)
+
+    resp = await _post(
+        app,
+        {
+            "trace_id": "t4",
+            "feedback": "correction",
+            "kb_id": "kb",
+            "query": "问题",
+            "answer": "原答案",
+            "correction": "纠正后的答案",
+            "comment": "引用不支撑结论",
+        },
+    )
+
+    assert resp.status_code == 201 and resp.json()["is_bad_case"] is True
+    draft = _read_jsonl(root / "bad_cases.jsonl")[0]["eval_draft"]
+    assert draft["answer"] == "纠正后的答案"
+    assert draft["correction"] == "纠正后的答案"
+    assert draft["comment"] == "引用不支撑结论"
 
 
 # 验证 feedback rejects invalid payload 场景。

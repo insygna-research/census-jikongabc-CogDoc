@@ -258,6 +258,8 @@ class FeedbackRequest(ApiModel):
     kb_id: str | None = None
     query: str | None = None
     answer: str | None = None
+    citations: list[Citation] = Field(default_factory=list)
+    evidence: list[Evidence] = Field(default_factory=list)
     comment: str | None = None
     correction: str | None = None
 

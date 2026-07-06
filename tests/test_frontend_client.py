@@ -123,3 +123,30 @@ def test_trace_client_methods_call_expected_endpoints(monkeypatch):
         "doc_id": "kb",
         "session_id": "s1",
     }
+
+
+# 验证 feedback client sends evidence payload 场景。
+def test_feedback_client_sends_citation_and_evidence_payload(monkeypatch):
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs))
+        return httpx.Response(201, json={"feedback_id": "f1", "is_bad_case": True})
+
+    monkeypatch.setattr("cogdoc.frontend.api_client.httpx.post", fake_post)
+
+    response = CogDocClient("http://api", api_key="secret").submit_feedback(
+        trace_id="t1",
+        feedback="thumbs_down",
+        kb_id="kb",
+        query="问题",
+        answer="答案",
+        citations=[{"chunk_id": "c1", "source": "a.pdf", "page": 1}],
+        evidence=[{"chunk_id": "c1", "source": "a.pdf", "text_preview": "证据"}],
+    )
+
+    assert response.status_code == 201
+    assert calls[0][0] == "http://api/v1/feedback"
+    assert calls[0][1]["headers"] == {"Authorization": "Bearer secret"}
+    assert calls[0][1]["json"]["citations"][0]["source"] == "a.pdf"
+    assert calls[0][1]["json"]["evidence"][0]["text_preview"] == "证据"

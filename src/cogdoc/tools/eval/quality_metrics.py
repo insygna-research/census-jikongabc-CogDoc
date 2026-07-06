@@ -8,7 +8,15 @@ from cogdoc.agents.router import classify_intent_by_rule
 
 BASELINE_GATED_METRICS = ("router_rule_accuracy", "citation_accuracy")
 REQUIRED_CASE_TYPES = ("router", "citation", "faithfulness")
-RECOMMENDED_LAYERS = ("easy", "hard", "no-answer", "compare", "multi-turn")
+RECOMMENDED_LAYERS = (
+    "easy",
+    "hard",
+    "no-answer",
+    "summary",
+    "compare",
+    "multi-turn",
+    "feedback",
+)
 
 
 # 计算结果。
