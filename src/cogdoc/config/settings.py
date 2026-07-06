@@ -73,6 +73,9 @@ class Settings(BaseSettings):
     # 检索与生成控制。
     qa_retrieval_top_k: int = Field(default=9, validation_alias="QA_RETRIEVAL_TOP_K")
     qa_rerank_top_n: int = Field(default=3, validation_alias="QA_RERANK_TOP_N")
+    qa_rerank_max_candidates: int = Field(
+        default=12, validation_alias="QA_RERANK_MAX_CANDIDATES"
+    )
     hybrid_rrf_k: int = Field(default=60, validation_alias="HYBRID_RRF_K")
     cloud_section_max_workers: int = Field(
         default=6, validation_alias="CLOUD_SECTION_MAX_WORKERS"

@@ -14,6 +14,12 @@ from cogdoc.frontend.api_client import (
 
 DEFAULT_API_URL = os.getenv("COGDOC_API_URL", "http://localhost:8000")
 MAIN_VIEWS = ["对话", "调试"]
+STREAM_RERUN_INTERVAL_SECONDS = 0.8
+STREAM_PREVIEW_HEAD_CHARS = 1200
+STREAM_PREVIEW_TAIL_CHARS = 3600
+SIDEBAR_CACHE_TTL_SECONDS = 2.0
+SIDEBAR_STREAM_CACHE_TTL_SECONDS = 30.0
+SIDEBAR_STALE_CACHE_GRACE_SECONDS = 120.0
 TRACE_NODE_LABELS = {
     "runtime.setup": "运行准备",
     "intent_router": "意图路由",
@@ -41,6 +47,11 @@ def _response_error(response, fallback: str = "请求失败") -> str:
     return format_api_error(response_payload(response), response.status_code, fallback)
 
 
+# 提取响应状态与载荷。
+def _response_status_payload(response) -> tuple[int, object]:
+    return response.status_code, response_payload(response)
+
+
 # 完成 init状态 处理。
 def _init_state() -> None:
     st.session_state.setdefault("api_url", DEFAULT_API_URL)
@@ -53,6 +64,7 @@ def _init_state() -> None:
     st.session_state.setdefault("messages_by_context", {})
     st.session_state.setdefault("restored_contexts", set())
     st.session_state.setdefault("pending_streams", {})
+    st.session_state.setdefault("api_cache", {})
     st.session_state.setdefault("main_views_by_context", {})
     st.session_state.setdefault("trace_cache", {})
     st.session_state.setdefault("active_trace_id", "")
@@ -73,6 +85,51 @@ def _init_state() -> None:
         st.session_state.pop(legacy_key, None)
     # 本会话内已知的对话 id（按 kb），与后端列表合并，保证空/新对话也留得住、点得到。
     st.session_state.setdefault("known_sessions", {})
+
+
+# 判断是否存在未完成流式请求。
+def _has_pending_stream() -> bool:
+    return any(
+        not pending.get("done")
+        for pending in st.session_state.pending_streams.values()
+        if isinstance(pending, Mapping)
+    )
+
+
+# 返回侧栏缓存时长。
+def _sidebar_cache_ttl() -> float:
+    return (
+        SIDEBAR_STREAM_CACHE_TTL_SECONDS
+        if _has_pending_stream()
+        else SIDEBAR_CACHE_TTL_SECONDS
+    )
+
+
+# 读取带 TTL 的 API 缓存。
+def _cached_api_value(key: tuple, loader):
+    cache = st.session_state.api_cache
+    now = time.monotonic()
+    entry = cache.get(key)
+    if entry and now - entry["time"] <= _sidebar_cache_ttl():
+        return entry["value"]
+    try:
+        value = loader()
+    except Exception:
+        if entry and now - entry["time"] <= SIDEBAR_STALE_CACHE_GRACE_SECONDS:
+            return entry["value"]
+        raise
+    cache[key] = {"time": now, "value": value}
+    return value
+
+
+# 清理 API 缓存。
+def _clear_api_cache(prefix: tuple | None = None) -> None:
+    if prefix is None:
+        st.session_state.api_cache.clear()
+        return
+    for key in list(st.session_state.api_cache):
+        if key[: len(prefix)] == prefix:
+            st.session_state.api_cache.pop(key, None)
 
 
 # 处理context键。
@@ -169,9 +226,11 @@ def _conversations(client: CogDocClient, kb_id: str) -> None:
         _switch_session(new_id)
 
     try:
-        resp = client.list_sessions(kb_id)
-        if resp.status_code == 200:
-            payload = response_payload(resp)
+        status_code, payload = _cached_api_value(
+            ("sessions", client.base_url, kb_id),
+            lambda: _response_status_payload(client.list_sessions(kb_id)),
+        )
+        if status_code == 200:
             sessions = (
                 payload.get("sessions", []) if isinstance(payload, Mapping) else []
             )
@@ -181,7 +240,10 @@ def _conversations(client: CogDocClient, kb_id: str) -> None:
                 if isinstance(s, Mapping) and isinstance(s.get("session_id"), str)
             }
         else:
-            st.warning(f"读取会话列表失败: {_response_error(resp)}")
+            st.warning(
+                "读取会话列表失败: "
+                f"{format_api_error(payload, status_code, '读取会话列表失败')}"
+            )
             backend = {}
     except Exception as exc:
         st.warning(f"读取会话列表失败: {exc}")
@@ -201,6 +263,7 @@ def _conversations(client: CogDocClient, kb_id: str) -> None:
             _switch_session(sid)
         if row[1].button("🗑", key=f"sessdel-{sid}"):
             client.delete_session(sid, kb_id)
+            _clear_api_cache(("sessions", client.base_url, kb_id))
             if sid in known:
                 known.remove(sid)
             if sid == current:
@@ -327,6 +390,20 @@ def _format_duration(duration_ms) -> str:
     if value >= 1000:
         return f"{value / 1000:.1f}s"
     return f"{value:.0f} ms"
+
+
+# 构建流式预览文本。
+def _stream_preview(answer: str | None) -> str:
+    answer = str(answer or "")
+    if len(answer) <= STREAM_PREVIEW_HEAD_CHARS + STREAM_PREVIEW_TAIL_CHARS:
+        return answer + "▌" if answer else "正在思考…"
+    omitted = len(answer) - STREAM_PREVIEW_HEAD_CHARS - STREAM_PREVIEW_TAIL_CHARS
+    return (
+        answer[:STREAM_PREVIEW_HEAD_CHARS]
+        + f"\n\n... 已生成 {len(answer)} 字，暂折叠中间 {omitted} 字，完成后显示全文 ...\n\n"
+        + answer[-STREAM_PREVIEW_TAIL_CHARS:]
+        + "▌"
+    )
 
 
 # 处理current跟踪items。
@@ -568,7 +645,9 @@ def _sidebar() -> None:
         st.divider()
         st.subheader("知识库")
         try:
-            kbs = client.list_knowledge_bases()
+            kbs = _cached_api_value(
+                ("kbs", client.base_url), client.list_knowledge_bases
+            )
         except CogDocAPIError as exc:
             st.error(f"读取知识库失败: {exc}")
             return
@@ -602,6 +681,7 @@ def _sidebar() -> None:
             if st.form_submit_button("创建") and new_kb:
                 resp = client.create_knowledge_base(new_kb)
                 if resp.status_code == 201:
+                    _clear_api_cache(("kbs", client.base_url))
                     st.success(f"已创建 {new_kb}")
                     st.rerun()
                 else:
@@ -624,15 +704,21 @@ def _sidebar() -> None:
                 st.error(resp.json().get("message", resp.text))
             else:
                 _poll_job(client, resp.json()["job_id"])
+                _clear_api_cache(("documents", client.base_url, kb_id))
+                _clear_api_cache(("kbs", client.base_url))
                 st.rerun()
 
         try:
-            resp = client.list_documents(kb_id)
-            if resp.status_code != 200:
-                st.error(f"读取文档列表失败: {_response_error(resp)}")
+            status_code, docs = _cached_api_value(
+                ("documents", client.base_url, kb_id),
+                lambda: _response_status_payload(client.list_documents(kb_id)),
+            )
+            if status_code != 200:
+                st.error(
+                    "读取文档列表失败: "
+                    f"{format_api_error(docs, status_code, '读取文档列表失败')}"
+                )
                 docs = []
-            else:
-                docs = response_payload(resp)
         except Exception as exc:
             st.error(f"读取文档列表失败: {exc}")
             docs = []
@@ -649,6 +735,8 @@ def _sidebar() -> None:
                 row[0].write(doc["name"])
                 if row[1].button("🗑", key=f"del-{doc['name']}"):
                     client.delete_document(kb_id, doc["name"])
+                    _clear_api_cache(("documents", client.base_url, kb_id))
+                    _clear_api_cache(("kbs", client.base_url))
                     st.rerun()
 
         with st.expander("⚠️ 删除知识库"):
@@ -656,6 +744,7 @@ def _sidebar() -> None:
             if st.button("确认删除此知识库", key="del_kb"):
                 resp = client.delete_knowledge_base(kb_id)
                 if resp.status_code == 204:
+                    _clear_api_cache()
                     st.session_state.kb_id = None
                     st.query_params.pop("kb", None)
                     st.success("已删除")
@@ -918,21 +1007,20 @@ def _chat_area() -> None:
         for msg in messages:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"] or "（无答案）")
-                if msg.get("final"):
+                if msg.get("final") and not answering:
                     _render_evidence(
                         msg["final"], key=msg["id"], query=msg.get("query", "")
                     )
 
         if current_pending:
             with st.chat_message("assistant"):
-                answer = current_pending.get("answer", "")
-                st.markdown((answer + "▌") if answer else "正在思考…")
+                st.markdown(_stream_preview(current_pending.get("answer", "")))
                 if current_pending.get("stage"):
                     st.caption(current_pending["stage"])
             if st.button("■ 终止问题", type="primary", use_container_width=True):
                 _cancel_stream(current_key)
                 st.rerun()
-            time.sleep(0.1)
+            time.sleep(STREAM_RERUN_INTERVAL_SECONDS)
             st.rerun()
 
         prompt = st.chat_input("问点什么…", disabled=not kb_id)

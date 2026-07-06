@@ -124,6 +124,7 @@ def _trace_config(
         "forced_task": forced_task,
         "qa_retrieval_top_k": settings.qa_retrieval_top_k,
         "qa_rerank_top_n": settings.qa_rerank_top_n,
+        "qa_rerank_max_candidates": settings.qa_rerank_max_candidates,
         "model": settings.ollama_model_name if is_local else settings.llm_model_name,
     }
 

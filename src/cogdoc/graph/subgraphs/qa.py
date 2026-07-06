@@ -279,12 +279,15 @@ def rerank_node(state: GraphState) -> dict:
     docs = state.get("retrieved_docs", [])
     doc_id = state.get("doc_id", "default")
     is_local = state.get("is_local", False)
+    settings = get_settings()
 
     target_device = "cpu" if is_local else BGEReranker.default_device()
     BGEReranker.set_device(target_device)
 
+    max_candidates = max(settings.qa_rerank_max_candidates, settings.qa_rerank_top_n)
+    candidate_docs = docs[:max_candidates] if max_candidates > 0 else docs
     reranked_docs = BGEReranker.rerank(
-        query=query, docs=docs, top_n=get_settings().qa_rerank_top_n
+        query=query, docs=candidate_docs, top_n=settings.qa_rerank_top_n
     )
     # 下游沿用重排结果字段名，实际内容已包含相邻上下文扩展。
     expanded_docs = _expand_with_neighbor_chunks(doc_id, reranked_docs, state)
@@ -293,6 +296,7 @@ def rerank_node(state: GraphState) -> dict:
         "qa_rerank",
         state,
         candidate_count=len(docs),
+        rerank_candidate_count=len(candidate_docs),
         reranked_count=len(reranked_docs),
         expanded_count=len(expanded_docs),
         device=target_device,
