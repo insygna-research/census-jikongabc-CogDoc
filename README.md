@@ -4,49 +4,65 @@
 
 [English](README.md) · [简体中文](docs/README_zh-CN.md)
 
-A local RAG knowledge-base console for individuals and teams, built on **LangGraph multi-agent orchestration** with a **deterministic Rust core (PyO3 + maturin)** underneath. It answers questions, summarizes a single document, and compares multiple documents over your own PDF knowledge base — and every generated claim is pinned back to a `[source:Pn]` citation that is *checked, not trusted*. Use it from a **CLI console** or a **Streamlit web app** backed by a FastAPI service.
+A local RAG knowledge-base console for individuals and teams, built on **LangGraph multi-agent orchestration** with a **deterministic Rust core (PyO3 + maturin)** underneath. It answers questions, summarizes a single document, and compares multiple documents over your own PDF knowledge base — and every generated claim is pinned back to a `[source:Pn]` citation that is *checked, not trusted*. Use it from a **CLI console**, a **Streamlit web app** backed by FastAPI, or a standalone **Debug console** for trace inspection.
 
 > ⚠️ **Text-layer PDFs only — no OCR yet.** Parsing extracts the text layer; pages that look scanned/image-only are flagged (`is_ocr_fallback`) and skipped, not recognized. Use PDFs that contain a real text layer.
 
-## Features
-
 - **Grounded QA with verified citations** — generation is constrained to retrieved document blocks; fabricated file/page tags are caught by a Rust validator and re-generated in a self-heal loop.
+
 - **Structured single-document summary** — fixed sections, deterministic citations bound from chunk metadata.
+
 - **Multi-document comparison** — per-document profiles across fixed dimensions, rendered as cited dimension-by-dimension blocks.
+
 - **Hybrid retrieval, native scoring** — Vector (Chroma + multilingual BGE-M3) and BM25 recall fused by a Rust RRF kernel; tokenization and BM25 are native — Chinese via `jieba-rs`, English lowercased + Snowball-stemmed + stopword-filtered, so both languages retrieve well.
+
 - **Content-addressed incremental cache** — a per-file SHA-256 manifest plus a versioned chunk-identity contract: unchanged files reuse the existing index, and only a changed PDF or chunking scheme triggers an incremental rebuild.
-- **Multiple knowledge bases · multiple conversations · persistent memory** — each KB runs many parallel conversations; history is persisted to SQLite (long-term memory) and survives refresh/restart for replay. Every question carries a recent window of the dialogue (short-term memory, last 12 messages by default) for multi-turn coreference, and only citation-validated answers enter memory so wrong answers never poison later turns.
-- **Two front ends** — a slash-command CLI console and a Streamlit web UI over a FastAPI backend with streaming, history, citations, and feedback.
 
+- **Multiple knowledge bases · multiple conversations · persistent memory** — each KB runs many parallel conversations; the selected KB and session are persisted in the URL, so refresh returns to the same conversation. History is persisted to SQLite (long-term memory) and survives restart for replay. Every question carries a recent dialogue window (short-term memory, last 12 messages by default) for multi-turn coreference, and only citation-validated answers enter memory so wrong answers never poison later turns.
 
+- **Web, CLI, and Debug entry points** — a slash-command CLI console, a Streamlit web UI over FastAPI, and a focused `make debug` console for trace inspection.
 
-1. **Web chat (Streamlit).** Pick a knowledge base, ask in natural language, watch the answer stream, then inspect the citation sources and evidence snippets and leave 👍/👎 feedback.
+- **Trace observability and feedback loop** — every request can export a safe JSON trace with config, node timings, rewrites, evidence previews, and errors; the web UI scopes traces to the current conversation, and feedback is stored by `trace_id`.
+
+- **API access control and rate limiting** — optional API keys protect `/v1` routes, with a token-bucket limiter that avoids throttling high-frequency health/session/trace polling.
+
+  
+
+1. **Web chat with citations and evidence.** Pick a knowledge base, ask in natural language, watch the answer stream, then inspect citation sources, evidence snippets, and feedback controls.
 
    ![Web chat](./docs/images/web-chat.png)
 
-2. **CLI console.** A slash-command console for knowledge bases, ingestion, and multi-conversation history.
+2. **CLI console.** A slash-command console for knowledge bases, ingestion, multi-conversation history, and forced task modes.
 
    ![CLI console](./docs/images/cli-console.png)
 
-3. **Grounded QA.** Every factual sentence ends with a citation whose file name and page exist in the retrieved context; invalid ones bounce the answer back for regeneration.
+3. **Standalone Debug console.** `make debug` opens a focused console for one KB; after a normal answer, continue with `/trace`, `/steps`, `/rewrite`, `/evidence`, and `/config`.
+
+   ![Standalone Debug console](./docs/images/debug-console1.png)
+
+   ![Standalone Debug console](./docs/images/debug-console2.png)
+
+4. **Grounded QA.** Every factual sentence ends with a citation whose file name and page exist in the retrieved context; invalid ones bounce the answer back for regeneration.
 
    ![Grounded QA](./docs/images/qa_net.png)
 
    ![Grounded QA](./docs/images/qa_cli.png)
 
-4. **Structured summary.** Summarize one named document into fixed sections with deterministic per-section citations.
+5. **Structured summary.** Summarize one named document into fixed sections with deterministic per-section citations.
 
    ![Structured summary](./docs/images/summary_net.png)
 
    ![Structured summary](./docs/images/summary_cli.png)
 
-5. **Multi-document comparison.** Compare two or more named documents method-by-method, metric-by-metric, with citations on every cell.
+6. **Multi-document comparison.** Compare two or more named documents method-by-method, metric-by-metric, with citations on every cell.
 
    ![Comparison](./docs/images/compare_net.png)
 
    ![Comparison](./docs/images/compare_cli.png)
 
-6. **Retrieval debug console.** Visualize routing, query rewrites, recalled + reranked chunks with RRF scores, and citation audits for one KB.
+7. **Trace debug panel.** Inspect only the current conversation's traces, including routing, query rewrites, retrieval/rerank steps, request config, and citation audits.
+
+   ![Trace debug panel](./docs/images/web-trace-debug.png)
 
    ![Retrieval debug](./docs/images/debug.png)
 
@@ -55,19 +71,19 @@ A local RAG knowledge-base console for individuals and teams, built on **LangGra
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"   # runtime + build/test deps (editable, src-layout)
+pip install -e ".[dev,frontend]"   # runtime + build/test + Streamlit deps
 make native     # build the Rust extension: cd rust_core && maturin develop --release
 make check      # verify the extension and its native symbols
 make run        # build/reuse the index, warm up models, start the console
 ```
 
-Dependencies live in [pyproject.toml](pyproject.toml): runtime in `[project.dependencies]`, with `dev` (build/test) and `frontend` (Streamlit client) as optional extras — install via `.[dev]` / `.[frontend]`. The package uses a `src/` layout (`src/cogdoc/`); the `make` targets put `src/` on `PYTHONPATH`, so no install is strictly required to run the suite.
+Dependencies live in [pyproject.toml](pyproject.toml): runtime in `[project.dependencies]`, with `dev` (build/test) and `frontend` (Streamlit client) as optional extras — install both for the full local experience via `.[dev,frontend]`. The package uses a `src/` layout (`src/cogdoc/`); the `make` targets put `src/` on `PYTHONPATH`, so no install is strictly required to run the suite.
 
 Copy `.env.example` to `.env` and set at least your cloud `LLM_API_KEY` (or run `/local` with Ollama). Put PDFs in the inbox `your_documents/` (or set `COGDOC_DOC_DIR`). `make native` must be re-run after any change under `rust_core/src/` — the `.so` is not auto-rebuilt and not committed.
 
 ## How to Use
 
-Both front ends share the same KB → ingest → ask flow. Set up once (see [Quick Start](#quick-start)): install deps, build the native extension (`make native && make check`), configure `.env`, and drop PDFs into `your_documents/`.
+The CLI and web app share the same KB → ingest → ask flow. Set up once (see [Quick Start](#quick-start)): install deps, build the native extension (`make native && make check`), configure `.env`, and drop PDFs into `your_documents/`.
 
 ### CLI console
 
@@ -81,9 +97,9 @@ Then drive everything with slash commands inside the console:
 2. `/add <file.pdf>` — ingest an inbox PDF from `your_documents/` into the active KB (synchronous rebuild).
 3. `/new` — start a conversation; `/chats` and `/open` browse persisted history.
 4. Ask directly to run **QA**; "summarize `<file>`" runs **Summary**; "compare `<a>` and `<b>`" runs **Compare**.
-5. `/cloud` uses the cloud LLM, `/local` uses Ollama; `/help` lists everything; `exit` quits.
+5. `/cloud` uses the cloud LLM, `/local` uses Ollama; `/help` lists commands; `exit` quits.
 
-`make debug` opens the retrieval-visualization console for one KB.
+`make debug` opens the standalone Debug console for one KB. Ask questions there to get normal answers plus trace summaries, then use `/trace`, `/steps`, `/rewrite`, `/evidence`, and `/config` to inspect the latest request. To debug a specific KB directly, run `python -m cogdoc.debug --kb <kb_id>`.
 
 ### Web app (Streamlit + FastAPI)
 
@@ -99,6 +115,7 @@ In the browser:
 3. **Conversations** — start a new conversation or reopen a previous one (session and KB persist in the URL, so a refresh resumes the same chat).
 4. **Chat** — pick a mode (`auto` / `qa` / `summary` / `compare`), ask, and read the streamed answer with its citation sources, evidence snippets, and 👍/👎 feedback.
 5. Toggle **Local Ollama mode** in the sidebar to route generation to the local model.
+6. Open **Trace debug** to inspect traces for the current conversation only: request config, node timings, rewrites, evidence previews, and errors.
 
 ### Calling the API directly
 
@@ -111,11 +128,12 @@ The Streamlit app is a thin client over the FastAPI service — you can hit it d
 | `GET /v1/index-jobs/{job_id}` | Poll ingestion progress |
 | `POST /v1/chat`, `POST /v1/chat/stream` | Ask (JSON or SSE streaming) |
 | `GET /v1/sessions`, `GET /v1/sessions/{id}/history` | List / replay conversation history |
+| `GET /v1/traces?doc_id=...&session_id=...` | List recent traces, optionally scoped to one KB/session |
 | `GET /v1/traces/{trace_id}` | Fetch an exported request trace |
 | `POST /v1/feedback` | Submit thumbs-up/down on a `trace_id` |
 | `GET /healthz`, `GET /readyz`, `GET /metrics` | Health, readiness, Prometheus metrics |
 
-If `LLM_API_KEY`-style API keys are configured, requests are authenticated and rate-limited; with no keys set, `/v1` is open (the server logs a warning at startup).
+If `COGDOC_API_KEYS` is configured, `/v1` requests are authenticated and rate-limited; with no keys set, `/v1` is open (the server logs a warning at startup).
 
 ## Tech Stack
 
@@ -123,41 +141,44 @@ If `LLM_API_KEY`-style API keys are configured, requests are authenticated and r
 - **Retrieval** — `bge-m3` multilingual vector recall + BM25 keyword recall, fused by the Rust RRF kernel and reranked by `bge-reranker-v2-m3`; vectors live in [Chroma](https://www.trychroma.com/), PDFs are parsed by PyMuPDF.
 - **Orchestration** — [LangGraph](https://langchain-ai.github.io/langgraph/) wires routing → rewrite → retrieve → generate → citation self-heal into a loopable state graph.
 - **Models** — OpenAI-compatible dual backend, hot-swappable: cloud DeepSeek or local Ollama `qwen2.5:7b`.
-- **Serving** — FastAPI with SSE streaming; sessions / index jobs / feedback persisted in SQLite; Streamlit as a thin client.
+- **Serving and observability** — FastAPI with SSE streaming, optional API-key auth and token-bucket rate limiting; sessions / index jobs / feedback persisted in SQLite; JSON traces exported for the web Trace panel and standalone Debug console.
 
 ## Architecture
 
 ```text
-┌──────────────────────── Front ends ────────────────────────┐
-│   CLI console (slash commands)        Streamlit web UI       │
-└───────────┬───────────────────────────────────┬─────────────┘
-            │ in-process                          │ HTTP + SSE
-            │                            ┌────────▼─────────┐
-            │                            │  FastAPI service │──► SQLite
-            │                            │ sessions·jobs·fb │   (history/jobs/feedback)
-            │                            └────────┬─────────┘
-            ▼  user question                      ▼
-┌────────────────────── LangGraph workflow ──────────────────────┐
-│  intent_router ──► qa | summary | compare | unknown             │
-│                                                                 │
-│  QA:       rewrite ─► verify ─► retrieve ─► rerank ─► generate  │
-│                                                  ▲          │   │
-│                                          citation └─────────┘   │
-│                                          (self-heal loop ≤ N)    │
-│  Summary:  loader ─► plan ─► section ─► global                  │
-│  Compare:  loader ─► profile ─► table ─► citation               │
-└───────────┬─────────────────────────────────────┬──────────────┘
-            │ hybrid retrieval                     │ native kernels
-┌───────────▼────────────┐            ┌────────────▼───────────────┐
-│  Chroma (vectors)      │            │  Rust core (PyO3 + maturin) │
-│  BM25 native artifact  │ ◄────────► │  tokenize · BM25 · RRF ·    │
-│  PDFs via PyMuPDF      │            │  SHA-256 · citation check   │
-└────────────────────────┘            └─────────────────────────────┘
+┌───────────────────┐     ┌───────────────────┐     ┌───────────────────┐
+│ CLI console       │     │ Debug console     │     │ Streamlit web UI  │
+└─────────┬─────────┘     └─────────┬─────────┘     └─────────┬─────────┘
+          │                         │                         │
+          │ in-process              │ in-process              │ HTTP + SSE
+          ▼                         ▼                         ▼
+┌───────────────────────────────────────────────────────────────────────┐
+│                          LangGraph workflow                           │
+│                                                                       │
+│  intent_router  →  qa / summary / compare / unknown                   │
+│                                                                       │
+│  QA:       rewrite → verify → retrieve → rerank → generate            │
+│                                                   ▲          │        │
+│                                                   │          ▼        │
+│                                                citation ◄────┘        │
+│                                                self-heal loop         │
+│                                                                       │
+│  Summary:  loader → plan → section → global                           │
+│  Compare:  loader → profile → table → citation                        │
+└─────────────────────────────┬───────────────────────────┬─────────────┘
+                              │                           │
+                              │ hybrid retrieval          │ native kernels
+                              ▼                           ▼
+┌───────────────────────────────┐     ┌───────────────────────────────┐
+│ Chroma vectors                │     │ Rust core                     │
+│ BM25 native artifact          │◄───►│ tokenize · BM25 · RRF         │
+│ PDFs via PyMuPDF              │     │ SHA-256 · citation check      │
+└───────────────────────────────┘     └───────────────────────────────┘
 ```
 
 Summary builds a fixed-section structured summary of one named document; Compare builds a per-document profile across fixed dimensions and renders cited Markdown comparison blocks grouped by dimension. Both bind `[source:Pn]` citations deterministically from chunk metadata and run the same `validate_citations_native` checker as QA — no subgraph is exempt.
 
-The Python layer owns orchestration, prompts, model clients, indexing, the CLI console, and the FastAPI/Streamlit front ends. The Rust layer (`rust_core`) owns deterministic kernels that stay stable across agent changes and are unit-tested independently.
+The Python layer owns orchestration, prompts, model clients, indexing, the CLI console, the standalone Debug console, and the FastAPI/Streamlit front ends. The Rust layer (`rust_core`) owns deterministic kernels that stay stable across agent changes and are unit-tested independently.
 
 ## Indexing Pipeline
 
@@ -208,7 +229,7 @@ chunk_id = sha256:{source_sha256}:src:{source_name}:p{page_start}-p{page_end}:c{
 CogDoc/
 ├── src/cogdoc/              # the importable package (src-layout)
 │   ├── cli.py               # multi-KB / multi-conversation console (python -m cogdoc.cli / `cogdoc`)
-│   ├── debug.py             # retrieval-visualization console (python -m cogdoc.debug / `cogdoc-debug`)
+│   ├── debug.py             # standalone trace Debug console (python -m cogdoc.debug / `cogdoc-debug`)
 │   ├── agents/              # router, query_rewriter, rewrite_verifier, qa_generator,
 │   │                        # citation_validator, structured_output, summary_*, compare_*
 │   ├── api/                 # FastAPI app, routes, persistence, access control, metrics
@@ -232,11 +253,20 @@ CogDoc/
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `COGDOC_DOC_DIR` | `your_documents` | Inbox directory of PDFs that `/add` ingests into a KB |
+| `COGDOC_DATA_DIR` | `./data` | Root for persisted KB state, SQLite DBs, manifests, and index artifacts |
+| `COGDOC_TRACE_ENABLED` | `true` | Enable JSON trace export for request inspection |
+| `COGDOC_TRACE_DIR` | `logs/traces` | Directory for exported trace JSON files |
+| `COGDOC_API_KEYS` | unset | Comma-separated API keys; empty disables API auth |
+| `RATE_LIMIT_PER_MINUTE` | `120` | Token-bucket refill rate for protected API routes |
+| `RATE_LIMIT_BURST` | `120` | Token-bucket burst capacity; `<=0` disables rate limiting |
+| `COGDOC_MAX_UPLOAD_MB` | `50` | Maximum PDF upload size through the API/frontend |
 | `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Local OpenAI-compatible Ollama endpoint |
 | `OLLAMA_MODEL_NAME` | `qwen2.5:7b` | Local model name |
+| `OLLAMA_TIMEOUT_SECONDS` | `180` | Local model request timeout |
 | `LLM_BASE_URL` | `https://api.deepseek.com/v1` | Cloud OpenAI-compatible endpoint |
 | `LLM_MODEL_NAME` | `deepseek-chat` | Cloud model name |
 | `LLM_API_KEY` | `your-cloud-api-key-here` | Cloud API key |
+| `LLM_TIMEOUT_SECONDS` | `90` | Cloud model request timeout |
 | `HF_TOKEN` | unset | Optional Hugging Face Hub token |
 
 Requirements: Python 3.11+ (developed on 3.13; the extension targets 3.8+), a Rust toolchain with `cargo` (edition 2024, via [rustup](https://rustup.rs/)), and [maturin](https://www.maturin.rs/). Optional: [Ollama](https://ollama.com/) for local models. See `.env.example` for the full set of tunables (retrieval `top_k`, rerank `top_n`, RRF `k`, CUDA memory floors, eval set paths).
@@ -260,7 +290,7 @@ Requirements: Python 3.11+ (developed on 3.13; the extension targets 3.8+), a Ru
 | `make run` | Start the interactive CLI console |
 | `make serve` | Start the FastAPI service (`uvicorn cogdoc.api.app:app`) |
 | `make frontend` | Start the Streamlit web app |
-| `make debug` | Start the retrieval-visualization console |
+| `make debug` | Start the standalone Debug console |
 | `cd rust_core && cargo test` | Run Rust unit tests |
 | `cd rust_core && cargo fmt --check` | Check Rust formatting |
 
@@ -268,7 +298,7 @@ Test layering: business logic and the Python↔native API contract are tested in
 
 Offline evaluation uses local JSONL files under `eval/`. `make eval-suite` is the default gate: it audits retrieval and quality coverage, runs the cheap quality metrics, prints quality metrics by case type and layer, and skips real retrieval by default. `make eval-suite-report` writes `eval/eval_suite_report.json`; `make eval-suite-baseline` compares aggregate, case-type, and layer-level quality metrics against `eval/eval_suite_baseline.json`; `make eval-suite-update-baseline` refreshes that baseline after review. Both generated files are ignored by Git. Add `--run-retrieval` when a real index is available and retrieval metrics should also be compared. `make eval` measures retrieval (`recall@k`, hit rate, MRR) against `eval/retrieval_eval.jsonl`, falling back to `eval/retrieval_eval.example.jsonl` on a clean checkout. Use `make eval-coverage` to check whether the retrieval eval set covers single-source, multi-source, and no-answer cases without touching the real index. `make eval-quality` measures router accuracy, citation accuracy, and the manual faithfulness ledger; use `make eval-quality-coverage` to run those quality metrics and fail when the eval set misses required case types or recommended layers. For a coverage-only quality check, run `python scripts/eval_quality.py --coverage-only`. `--coverage-only` is intentionally incompatible with `--check-coverage`, `--json`, and `--baseline`.
 
-Every chat request gets a `request_id`/`trace_id`. When `COGDOC_TRACE_ENABLED=true`, the service writes JSON traces under `COGDOC_TRACE_DIR` (default `logs/traces`), and the same safe payload is available through `GET /v1/traces/{trace_id}`. Trace files include `schema_version`, `status` (`ok`, `degraded`, or `failed`), total `duration_ms`, a safe config snapshot, step summaries, error summaries, and only truncated evidence previews rather than full document text.
+Every chat request gets a `request_id`/`trace_id`. When `COGDOC_TRACE_ENABLED=true`, the service writes JSON traces under `COGDOC_TRACE_DIR` (default `logs/traces`), and the same safe payload is available through `GET /v1/traces/{trace_id}`. `GET /v1/traces` lists recent traces and can be scoped by `doc_id` and `session_id`, which is how the Streamlit Trace panel shows only the current conversation. Trace files include `schema_version`, `status` (`ok`, `degraded`, or `failed`), total `duration_ms`, a safe config snapshot, step summaries, rewrite summaries, error summaries, and only truncated evidence previews rather than full document text. The standalone Debug console reads the same trace format.
 
 ## Known Limitations
 
