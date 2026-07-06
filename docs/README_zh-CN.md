@@ -32,41 +32,41 @@
 
 1. **网页端对话、引用与证据。** 选一个知识库，自然语言提问，看着答案流式生成，再展开引用来源和证据片段，并打 👍/👎 反馈。
 
-   ![网页端对话](./images/web-chat.png)
+   <img src="./images/web-chat.png" alt="网页端对话" width="900">
 
 2. **命令行控制台。** 用斜杠命令管理知识库、入库、多对话历史和强制任务模式。
 
-   ![命令行控制台](./images/cli-console.png)
+   <img src="./images/cli-console.png" alt="命令行控制台" width="900">
 
 3. **独立 Debug 控制台。** `make debug` 针对一个知识库调试，普通提问后可继续用 `/trace`、`/steps`、`/rewrite`、`/evidence`、`/config` 查看细节。
 
-   ![独立 Debug 控制台](./images/debug-console1.png)
+   <img src="./images/debug-console1.png" alt="独立 Debug 控制台" width="900">
 
-   ![独立 Debug 控制台](./images/debug-console2.png)
+   <img src="./images/debug-console2.png" alt="独立 Debug 控制台 trace 视图" width="900">
 
 4. **带引用的问答。** 每条事实性句子都以引用结尾，且引用的文件名和页码必须存在于本轮检索上下文中；非法引用会把回答打回重新生成。
 
-   ![带引用的问答](./images/qa_net.png)
+   <img src="./images/qa_net.png" alt="带引用的问答网页视图" width="900">
 
-   ![带引用的问答](./images/qa_cli.png)
+   <img src="./images/qa_cli.png" alt="带引用的问答 CLI 视图" width="900">
 
 5. **结构化摘要。** 把一篇点名文档总结为固定章节，每节带确定性引用。
 
-   ![结构化摘要](./images/summary_net.png)
+   <img src="./images/summary_net.png" alt="结构化摘要网页视图" width="900">
 
-   ![结构化摘要](./images/summary_cli.png)
+   <img src="./images/summary_cli.png" alt="结构化摘要 CLI 视图" width="900">
 
 6. **多文档对比。** 对两篇或更多点名文档逐方法、逐指标对比，每个单元格都带引用。
 
-   ![多文档对比](./images/compare_net.png)
+   <img src="./images/compare_net.png" alt="多文档对比网页视图" width="900">
 
-   ![多文档对比](./images/compare_cli.png)
+   <img src="./images/compare_cli.png" alt="多文档对比 CLI 视图" width="900">
 
 7. **Trace 调试面板。** 只查看当前对话的 trace，可视化路由判别、问题改写、召回与重排、请求配置和引证审计。
 
-   ![Trace 调试面板](./images/web-trace-debug.png)
+   <img src="./images/web-trace-debug.png" alt="Trace 调试面板" width="900">
 
-   ![检索调试](./images/debug.png)
+   <img src="./images/debug.png" alt="检索调试" width="900">
 
 ## 快速开始
 

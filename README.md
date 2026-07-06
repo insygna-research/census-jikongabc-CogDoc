@@ -30,41 +30,41 @@ A local RAG knowledge-base console for individuals and teams, built on **LangGra
 
 1. **Web chat with citations and evidence.** Pick a knowledge base, ask in natural language, watch the answer stream, then inspect citation sources, evidence snippets, and feedback controls.
 
-   ![Web chat](./docs/images/web-chat.png)
+   <img src="./docs/images/web-chat.png" alt="Web chat" width="900">
 
 2. **CLI console.** A slash-command console for knowledge bases, ingestion, multi-conversation history, and forced task modes.
 
-   ![CLI console](./docs/images/cli-console.png)
+   <img src="./docs/images/cli-console.png" alt="CLI console" width="900">
 
 3. **Standalone Debug console.** `make debug` opens a focused console for one KB; after a normal answer, continue with `/trace`, `/steps`, `/rewrite`, `/evidence`, and `/config`.
 
-   ![Standalone Debug console](./docs/images/debug-console1.png)
+   <img src="./docs/images/debug-console1.png" alt="Standalone Debug console" width="900">
 
-   ![Standalone Debug console](./docs/images/debug-console2.png)
+   <img src="./docs/images/debug-console2.png" alt="Standalone Debug console trace view" width="900">
 
 4. **Grounded QA.** Every factual sentence ends with a citation whose file name and page exist in the retrieved context; invalid ones bounce the answer back for regeneration.
 
-   ![Grounded QA](./docs/images/qa_net.png)
+   <img src="./docs/images/qa_net.png" alt="Grounded QA web view" width="900">
 
-   ![Grounded QA](./docs/images/qa_cli.png)
+   <img src="./docs/images/qa_cli.png" alt="Grounded QA CLI view" width="900">
 
 5. **Structured summary.** Summarize one named document into fixed sections with deterministic per-section citations.
 
-   ![Structured summary](./docs/images/summary_net.png)
+   <img src="./docs/images/summary_net.png" alt="Structured summary web view" width="900">
 
-   ![Structured summary](./docs/images/summary_cli.png)
+   <img src="./docs/images/summary_cli.png" alt="Structured summary CLI view" width="900">
 
 6. **Multi-document comparison.** Compare two or more named documents method-by-method, metric-by-metric, with citations on every cell.
 
-   ![Comparison](./docs/images/compare_net.png)
+   <img src="./docs/images/compare_net.png" alt="Comparison web view" width="900">
 
-   ![Comparison](./docs/images/compare_cli.png)
+   <img src="./docs/images/compare_cli.png" alt="Comparison CLI view" width="900">
 
 7. **Trace debug panel.** Inspect only the current conversation's traces, including routing, query rewrites, retrieval/rerank steps, request config, and citation audits.
 
-   ![Trace debug panel](./docs/images/web-trace-debug.png)
+   <img src="./docs/images/web-trace-debug.png" alt="Trace debug panel" width="900">
 
-   ![Retrieval debug](./docs/images/debug.png)
+   <img src="./docs/images/debug.png" alt="Retrieval debug" width="900">
 
 ## Quick Start
 
