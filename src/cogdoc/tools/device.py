@@ -1,5 +1,46 @@
+import threading
 import torch
 from cogdoc.config.settings import get_settings
+
+_MODEL_SEMAPHORES = {}
+_MODEL_SEMAPHORE_SIZES = {}
+_MODEL_SEMAPHORE_LOCK = threading.Lock()
+_TORCH_THREADS_CONFIGURED = None
+_TORCH_THREADS_LOCK = threading.Lock()
+
+
+# 配置 Torch CPU 线程数。
+def configure_torch_threads() -> None:
+    global _TORCH_THREADS_CONFIGURED
+    threads = get_settings().torch_num_threads
+    if not threads or threads <= 0 or _TORCH_THREADS_CONFIGURED == threads:
+        return
+    with _TORCH_THREADS_LOCK:
+        if _TORCH_THREADS_CONFIGURED == threads:
+            return
+        if torch.get_num_threads() != threads:
+            torch.set_num_threads(threads)
+        _TORCH_THREADS_CONFIGURED = threads
+
+
+# 返回模型推理并发闸门。
+def model_inference_semaphore(kind: str) -> threading.BoundedSemaphore:
+    settings = get_settings()
+    sizes = {
+        "embedder": settings.cogdoc_embedder_max_concurrency,
+        "reranker": settings.cogdoc_reranker_max_concurrency,
+    }
+    if kind not in sizes:
+        raise ValueError(f"未知模型推理闸门: {kind}")
+    size = max(1, int(sizes[kind]))
+    with _MODEL_SEMAPHORE_LOCK:
+        if (
+            _MODEL_SEMAPHORES.get(kind) is None
+            or _MODEL_SEMAPHORE_SIZES.get(kind) != size
+        ):
+            _MODEL_SEMAPHORES[kind] = threading.BoundedSemaphore(size)
+            _MODEL_SEMAPHORE_SIZES[kind] = size
+        return _MODEL_SEMAPHORES[kind]
 
 
 # 完成 CUDAfreebytes 处理。
@@ -30,6 +71,7 @@ def resolve_device(
     min_cuda_free_bytes: int, current_device: str = None, model_loaded: bool = False
 ) -> str:
     # 按当前空闲显存动态判定：够则 GPU 加速、不够回落 CPU，避免小显存/共享卡 OOM。
+    configure_torch_threads()
     if current_device == "cuda" and model_loaded:
         return "cuda"
     if torch.cuda.is_available() and cuda_free_bytes() >= min_cuda_free_bytes:

@@ -4,7 +4,21 @@ import threading
 from typing import List
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from cogdoc.graph.state import RetrievedDoc
-from cogdoc.tools.device import required_cuda_free_bytes, resolve_device
+from cogdoc.tools.device import (
+    model_inference_semaphore,
+    required_cuda_free_bytes,
+    resolve_device,
+)
+
+
+# 返回跳过 CPU 重排的候选文档。
+def skipped_cpu_rerank_docs(
+    docs: List[RetrievedDoc], top_n: int, reason: str = "cpu_disabled"
+) -> List[RetrievedDoc]:
+    selected = copy.deepcopy(docs[:top_n])
+    for doc in selected:
+        doc.setdefault("retrieval", {})["rerank_skipped_reason"] = reason
+    return selected
 
 
 # 定义 BGEReranker 数据结构。
@@ -94,21 +108,22 @@ class BGEReranker:
         if len(docs) <= 1:
             return copy.deepcopy(docs)[:top_n]  # 单文档无需精排
 
-        tokenizer, model, target_device = cls._get_resources(device)  # 获取单例资源
+        with model_inference_semaphore("reranker"):
+            tokenizer, model, target_device = cls._get_resources(device)  # 获取单例资源
 
-        pairs = [[query, doc["text"]] for doc in docs]  # 构造[Query, Chunk]配对
+            pairs = [[query, doc["text"]] for doc in docs]  # 构造[Query, Chunk]配对
 
-        with torch.no_grad():  # 关闭梯度计算
-            inputs = tokenizer(
-                pairs,
-                padding=True,  # 自动补齐长度
-                truncation=True,  # 超长自动截断
-                max_length=cls.MAX_LENGTH,  # 最大长度限制
-                return_tensors="pt",  # 返回PyTorch张量
-            ).to(target_device)  # 输入迁移到目标设备
+            with torch.no_grad():  # 关闭梯度计算
+                inputs = tokenizer(
+                    pairs,
+                    padding=True,  # 自动补齐长度
+                    truncation=True,  # 超长自动截断
+                    max_length=cls.MAX_LENGTH,  # 最大长度限制
+                    return_tensors="pt",  # 返回PyTorch张量
+                ).to(target_device)  # 输入迁移到目标设备
 
-            outputs = model(**inputs, return_dict=True)  # 执行前向推理
-            scores = outputs.logits.view(-1).float().cpu().numpy()  # 提取相关性得分
+                outputs = model(**inputs, return_dict=True)  # 执行前向推理
+                scores = outputs.logits.view(-1).float().cpu().numpy()  # 提取相关性得分
 
         ranked_docs: List[RetrievedDoc] = []
         for idx, score in enumerate(scores):

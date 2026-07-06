@@ -253,34 +253,45 @@ async def chat_stream(request_body: ChatRequest, request: Request):
     # 转换来源。
     async def event_source():
         final_result: ChatResult | None = None
+        recorded = False
+
+        # 记录最终结果。
+        def record_final(result: ChatResult) -> None:
+            nonlocal recorded
+            if recorded:
+                return
+            request.app.state.metrics.chat_results.labels(
+                result.task_type, str(result.is_valid).lower()
+            ).inc()
+            session_store.record(
+                doc_id,
+                session_id,
+                result.chat_messages,
+                [
+                    {"role": "user", "content": request_body.query},
+                    {
+                        "role": "assistant",
+                        "content": result.answer,
+                        "trace_id": result.trace_id,
+                        "query": request_body.query,
+                        "task_type": result.task_type,
+                    },
+                ],
+            )
+            recorded = True
+
         while True:
             event = await queue.get()
             if event is _STREAM_DONE:
                 break
             if event.type == "final":
                 final_result = event.payload["result"]
+                record_final(final_result)
             frame = _event_to_frame(event, doc_id=doc_id, session_id=session_id)
             if frame is not None:
                 yield frame
-        # 只有真正产出 final 才写会话；记忆走门控、展示存完整问答。
+        # 兜底：理论上 final 事件已即时记录；保留防止未来事件处理顺序变化。
         if final_result is not None:
-            request.app.state.metrics.chat_results.labels(
-                final_result.task_type, str(final_result.is_valid).lower()
-            ).inc()
-            session_store.record(
-                doc_id,
-                session_id,
-                final_result.chat_messages,
-                [
-                    {"role": "user", "content": request_body.query},
-                    {
-                        "role": "assistant",
-                        "content": final_result.answer,
-                        "trace_id": final_result.trace_id,
-                        "query": request_body.query,
-                        "task_type": final_result.task_type,
-                    },
-                ],
-            )
+            record_final(final_result)
 
     return StreamingResponse(event_source(), media_type="text/event-stream")

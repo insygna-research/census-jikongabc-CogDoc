@@ -17,7 +17,7 @@ from cogdoc.tools.retriever.vector_retriever import (
 )
 from cogdoc.tools.retriever.bm25_retriever import BM25Retriever
 from cogdoc.tools.retriever.hybrid import HybridRetriever, IndexCorruptError
-from cogdoc.tools.reranker import BGEReranker
+from cogdoc.tools.reranker import BGEReranker, skipped_cpu_rerank_docs
 from cogdoc.agents.qa_generator import Generator
 from cogdoc.agents.query_rewriter import QueryRewriteAgent
 from cogdoc.agents.rewrite_verifier import RewriteVerifyAgent
@@ -278,19 +278,25 @@ def rerank_node(state: GraphState) -> dict:
     query = state.get("query", "")
     docs = state.get("retrieved_docs", [])
     doc_id = state.get("doc_id", "default")
-    is_local = state.get("is_local", False)
     settings = get_settings()
 
-    target_device = "cpu" if is_local else BGEReranker.default_device()
+    target_device = BGEReranker.default_device()
 
     max_candidates = max(settings.qa_rerank_max_candidates, settings.qa_rerank_top_n)
     candidate_docs = docs[:max_candidates] if max_candidates > 0 else docs
-    reranked_docs = BGEReranker.rerank(
-        query=query,
-        docs=candidate_docs,
-        top_n=settings.qa_rerank_top_n,
-        device=target_device,
-    )
+    rerank_skipped_reason = ""
+    if target_device == "cpu" and not settings.qa_rerank_on_cpu:
+        rerank_skipped_reason = "cpu_disabled"
+        reranked_docs = skipped_cpu_rerank_docs(
+            candidate_docs, settings.qa_rerank_top_n, rerank_skipped_reason
+        )
+    else:
+        reranked_docs = BGEReranker.rerank(
+            query=query,
+            docs=candidate_docs,
+            top_n=settings.qa_rerank_top_n,
+            device=target_device,
+        )
     # 下游沿用重排结果字段名，实际内容已包含相邻上下文扩展。
     expanded_docs = _expand_with_neighbor_chunks(doc_id, reranked_docs, state)
     log_event(
@@ -302,6 +308,7 @@ def rerank_node(state: GraphState) -> dict:
         reranked_count=len(reranked_docs),
         expanded_count=len(expanded_docs),
         device=target_device,
+        rerank_skipped_reason=rerank_skipped_reason,
     )
     return {"reranked_docs": expanded_docs}
 

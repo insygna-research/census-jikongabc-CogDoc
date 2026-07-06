@@ -64,6 +64,7 @@ def _init_state() -> None:
     st.session_state.setdefault("messages_by_context", {})
     st.session_state.setdefault("restored_contexts", set())
     st.session_state.setdefault("pending_streams", {})
+    st.session_state.setdefault("pending_retrieve_debugs", {})
     st.session_state.setdefault("api_cache", {})
     st.session_state.setdefault("main_views_by_context", {})
     st.session_state.setdefault("trace_cache", {})
@@ -73,6 +74,7 @@ def _init_state() -> None:
     st.session_state.setdefault("trace_session_items_by_context", {})
     st.session_state.setdefault("trace_session_loaded", set())
     st.session_state.setdefault("trace_session_error", {})
+    st.session_state.setdefault("retrieve_debug_by_context", {})
     # 兼容旧状态：升级前只有一份全局 messages，迁移到当前 (kb, session) 桶里。
     if "messages" in st.session_state:
         if st.session_state.kb_id and st.session_state.messages:
@@ -89,11 +91,17 @@ def _init_state() -> None:
 
 # 判断是否存在未完成流式请求。
 def _has_pending_stream() -> bool:
-    return any(
+    has_stream = any(
         not pending.get("done")
         for pending in st.session_state.pending_streams.values()
         if isinstance(pending, Mapping)
     )
+    has_retrieve = any(
+        not pending.get("done")
+        for pending in st.session_state.pending_retrieve_debugs.values()
+        if isinstance(pending, Mapping)
+    )
+    return has_stream or has_retrieve
 
 
 # 返回侧栏缓存时长。
@@ -709,6 +717,219 @@ def _render_source_browser(client: CogDocClient, kb_id: str) -> None:
             st.write(str(chunk.get("text_preview") or ""))
 
 
+# 格式化检索分数。
+def _score_label(value) -> str:
+    if value is None:
+        return "-"
+    try:
+        return f"{float(value):.4f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+# 渲染检索命中。
+def _render_retrieve_hit(hit: Mapping) -> None:
+    rank = hit.get("rank", "-")
+    source = hit.get("source") or "-"
+    page = _page_range_label(hit.get("page_start", hit.get("page")), hit.get("page_end"))
+    chunk_id = hit.get("chunk_id") or "-"
+    score = _score_label(hit.get("rerank_score"))
+    title = f"#{rank} · {source}"
+    if page:
+        title += f" · {page}"
+    with st.expander(title):
+        cols = st.columns(4)
+        cols[0].caption(f"chunk: {chunk_id}")
+        cols[1].caption(f"chunk_index: {hit.get('chunk_index')}")
+        cols[2].caption(f"rerank_score: {score}")
+        cols[3].caption(f"rewrite: {hit.get('rewrite_query') or '-'}")
+        st.write(hit.get("text_preview") or "")
+        retrieval = hit.get("retrieval") or {}
+        if retrieval:
+            st.markdown("**retrieval metadata**")
+            st.json(retrieval)
+
+
+# 检索调试后台worker。
+def _retrieve_debug_worker(
+    *,
+    api_url: str,
+    kb_id: str,
+    query: str,
+    top_k: int,
+    rerank: bool,
+    rerank_top_n: int | None,
+    outbox: queue.Queue,
+) -> None:
+    try:
+        client = CogDocClient(api_url)
+        resp = client.retrieve(
+            kb_id,
+            query,
+            top_k=top_k,
+            rerank=rerank,
+            rerank_top_n=rerank_top_n,
+        )
+        outbox.put(
+            (
+                "result",
+                {"status_code": resp.status_code, "payload": response_payload(resp)},
+            )
+        )
+    except Exception as exc:
+        outbox.put(("result", {"status_code": None, "payload": {"message": str(exc)}}))
+    finally:
+        outbox.put(("done", {}))
+
+
+# 启动检索调试。
+def _start_retrieve_debug(
+    kb_id: str,
+    query: str,
+    top_k: int,
+    rerank: bool,
+    rerank_top_n: int | None,
+) -> None:
+    marker = _context_key(kb_id)
+    pending = st.session_state.pending_retrieve_debugs.get(marker)
+    if pending and not pending.get("done"):
+        return
+    outbox: queue.Queue = queue.Queue()
+    pending = {
+        "query": query,
+        "top_k": top_k,
+        "rerank": rerank,
+        "rerank_top_n": rerank_top_n,
+        "started_at": time.monotonic(),
+        "queue": outbox,
+        "done": False,
+    }
+    worker = threading.Thread(
+        target=_retrieve_debug_worker,
+        kwargs={
+            "api_url": st.session_state.api_url,
+            "kb_id": kb_id,
+            "query": query,
+            "top_k": top_k,
+            "rerank": rerank,
+            "rerank_top_n": rerank_top_n,
+            "outbox": outbox,
+        },
+        daemon=True,
+    )
+    pending["thread"] = worker
+    st.session_state.pending_retrieve_debugs[marker] = pending
+    worker.start()
+
+
+# 消费检索调试事件。
+def _drain_retrieve_debug_events() -> None:
+    for marker, pending in list(st.session_state.pending_retrieve_debugs.items()):
+        outbox = pending["queue"]
+        while True:
+            try:
+                event, data = outbox.get_nowait()
+            except queue.Empty:
+                break
+            if event == "result":
+                st.session_state.retrieve_debug_by_context[marker] = data
+            elif event == "done":
+                pending["done"] = True
+        if pending.get("done"):
+            st.session_state.pending_retrieve_debugs.pop(marker, None)
+
+
+# 渲染检索调试。
+def _render_retrieve_debug(client: CogDocClient, kb_id: str | None) -> None:
+    st.subheader("检索调试")
+    if not kb_id:
+        st.info("先选择知识库。")
+        return
+    marker = _context_key(kb_id)
+    pending = st.session_state.pending_retrieve_debugs.get(marker)
+    with st.form(f"retrieve-debug-{kb_id}-{st.session_state.session_id}"):
+        query = st.text_area("检索问题", height=90, placeholder="输入要召回的查询…")
+        controls = st.columns([1, 1, 1])
+        top_k = controls[0].slider("top_k", min_value=1, max_value=50, value=8)
+        rerank = controls[1].checkbox("重排", value=True)
+        rerank_top_n = controls[2].number_input(
+            "rerank_top_n",
+            min_value=1,
+            max_value=50,
+            value=min(8, top_k),
+            disabled=not rerank,
+        )
+        if rerank:
+            st.caption(
+                "重排会加载 bge-reranker-v2-m3；无可用 GPU 时后端默认跳过 CPU 重排，"
+                "如强制开启可能明显卡顿。"
+            )
+        submitted = st.form_submit_button(
+            "运行检索", use_container_width=True, disabled=bool(pending)
+        )
+    if submitted:
+        if not query.strip():
+            st.warning("请输入检索问题。")
+        else:
+            _start_retrieve_debug(
+                kb_id,
+                query.strip(),
+                top_k,
+                rerank,
+                int(rerank_top_n) if rerank else None,
+            )
+            st.rerun()
+    pending = st.session_state.pending_retrieve_debugs.get(marker)
+    if pending:
+        elapsed = time.monotonic() - pending.get("started_at", time.monotonic())
+        st.info(
+            f"正在检索：{pending.get('query')} · "
+            f"top_k={pending.get('top_k')} · "
+            f"rerank={pending.get('rerank')} · {elapsed:.1f}s"
+        )
+        time.sleep(STREAM_RERUN_INTERVAL_SECONDS)
+        st.rerun()
+    result = st.session_state.retrieve_debug_by_context.get(marker)
+    if not result:
+        st.info("运行一次检索后，这里会显示命中 chunk、分数和 retrieval 元数据。")
+        return
+    status_code = result.get("status_code")
+    payload = result.get("payload")
+    if status_code != 200:
+        st.error(format_api_error(payload, status_code, "检索失败"))
+        return
+    if not isinstance(payload, Mapping):
+        st.error(f"检索响应格式不符合预期: {payload}")
+        return
+    hits = payload.get("hits", [])
+    header = st.columns(4)
+    header[0].caption(f"query: {payload.get('query') or '-'}")
+    header[1].caption(f"top_k: {payload.get('top_k')}")
+    header[2].caption(f"rerank: {payload.get('rerank')}")
+    header[3].caption(f"hits: {len(hits) if isinstance(hits, list) else 0}")
+    if not hits:
+        st.warning("没有召回到内容。")
+        return
+    if any(
+        isinstance(hit, Mapping)
+        and (hit.get("retrieval") or {}).get("rerank_skipped_reason")
+        for hit in hits
+    ):
+        st.warning("后端检测到 reranker 会走 CPU，已跳过重排以避免卡死。")
+    for hit in hits:
+        if isinstance(hit, Mapping):
+            _render_retrieve_hit(hit)
+
+
+# 渲染调试区。
+def _debug_area(kb_id: str | None) -> None:
+    trace_tab, retrieve_tab = st.tabs(["Trace 调试", "检索调试"])
+    with trace_tab:
+        _render_trace_lookup(kb_id)
+    with retrieve_tab:
+        _render_retrieve_debug(_client(), kb_id)
+
+
 # 完成 侧边栏 处理。
 def _sidebar() -> None:
     # 侧栏：后端地址、模式开关、知识库选择/新建/上传入库/文档列表。
@@ -1047,6 +1268,7 @@ def _drain_stream_events() -> None:
 def _chat_area() -> None:
     # 主对话区：按 (kb, session) 还原历史 + 渲染气泡；SSE 在后台线程中归属到发送时上下文。
     _drain_stream_events()
+    _drain_retrieve_debug_events()
     kb_id = st.session_state.kb_id
     if kb_id:
         _restore_history(kb_id)
@@ -1110,7 +1332,7 @@ def _chat_area() -> None:
             _start_stream(kb_id, prompt, mode)
             st.rerun()
     else:
-        _render_trace_lookup(kb_id)
+        _debug_area(kb_id)
 
 
 # 完成 nextid 处理。

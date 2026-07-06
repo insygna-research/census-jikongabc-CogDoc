@@ -321,7 +321,6 @@ class CogDocClient:
         top_k: int = 8,
         rerank: bool = False,
         rerank_top_n: int | None = None,
-        is_local: bool = False,
     ) -> httpx.Response:
         payload = {
             "query": query,
@@ -329,7 +328,6 @@ class CogDocClient:
             "top_k": top_k,
             "rerank": rerank,
             "rerank_top_n": rerank_top_n,
-            "is_local": is_local,
         }
         return httpx.post(
             self._url("/v1/retrieve"),

@@ -44,7 +44,7 @@ from cogdoc.tools.manifest import (
     manifests_match,
     stamp_chunk_identity_contract,
 )
-from cogdoc.tools.reranker import BGEReranker
+from cogdoc.tools.reranker import BGEReranker, skipped_cpu_rerank_docs
 from cogdoc.tools.rust_core_loader import ensure_rust_core
 
 rust_core = None
@@ -58,6 +58,7 @@ DEBUG_COMMANDS = [
     "/local",
     "/cloud",
     "/qa",
+    "/retrieve",
     "/summary",
     "/compare",
     "/help",
@@ -74,6 +75,7 @@ DEBUG_HELP_TEXT = """\
     /ls                     查看当前知识库 PDF
     /local  /cloud          切换本地 Ollama / 云端 API
     /qa <问题>              调试模式下强制问答
+    /retrieve <问题>        只执行召回与重排，不调用 LLM
     /summary <文件名>       调试模式下强制总结
     /compare <A> <B> ...    调试模式下强制对比
     /help                   显示本帮助
@@ -496,7 +498,7 @@ class DebugSession:
         return final_result
 
     # 分发 debug 命令。
-    def dispatch(self, text: str, ask_callback) -> str:
+    def dispatch(self, text: str, ask_callback, retrieve_callback=None) -> str:
         low = text.lower()
         if low == "/help":
             self.print_help()
@@ -523,6 +525,15 @@ class DebugSession:
             return "handled"
         if cmd == "/config":
             self.print_trace_config()
+            return "handled"
+        if cmd == "/retrieve":
+            if not arg:
+                print("⚠️ 请输入 /retrieve 后面的检索问题。")
+                return "handled"
+            if retrieve_callback is None:
+                print("❓ 当前环境没有注册检索调试回调。")
+                return "handled"
+            retrieve_callback(arg)
             return "handled"
 
         forced_task, cleaned_query = parse_forced_mode(text)
@@ -564,9 +575,14 @@ def _index_is_current(doc_id: str, doc_dir: str, engine):
 # 完成 预热流程预热流程运行时 处理。
 def warm_up_runtime(engine) -> None:
     print("🧠 正在预热检索与重排模型，请稍候...")
+    settings = get_settings()
     Embedder.get_model()
     engine.bm25_retriever.warm_up()
-    BGEReranker.warm_up()
+    rerank_device = BGEReranker.default_device()
+    if rerank_device != "cpu" or settings.qa_rerank_on_cpu:
+        BGEReranker.warm_up()
+    else:
+        print("ℹ️ 未预热 CPU reranker；如需强制 CPU 精排，请设置 QA_RERANK_ON_CPU=true。")
     print("✅ 模型与分词资源预热完成。")
 
 
@@ -606,7 +622,7 @@ def print_final_qa_output(subgraph_output: dict) -> None:
             print(
                 f"  📍 [{idx + 1}] 来源: {meta.get('source')} | 页码: P{meta.get('page')}"
             )
-            print(f"     📊 融合得分(RRF): {retrieval_info.get('rrf_score', 'N/A')}")
+            print(f"     📊 精排得分: {retrieval_info.get('rerank_score', 'N/A')}")
             preview_text = doc["text"].strip().replace("\n", " ")
             print(f"     📄 核心内容: {preview_text[:120]}...")
             print("     " + "-" * 40)
@@ -624,6 +640,75 @@ def print_final_qa_output(subgraph_output: dict) -> None:
     else:
         print("\n⚠️ [AI]: 模型返回了空内容，但引证校验已通过。")
     print("=" * 50)
+
+
+# 格式化页码范围。
+def _page_range_text(meta: dict) -> str:
+    page = meta.get("page")
+    page_start = meta.get("page_start", page)
+    page_end = meta.get("page_end", page_start)
+    if page_start is None and page_end is None:
+        return "-"
+    if page_end is None or page_start == page_end:
+        return f"P{page_start}"
+    if page_start is None:
+        return f"P{page_end}"
+    return f"P{page_start}-{page_end}"
+
+
+# 输出检索调试结果。
+def print_retrieve_debug_output(
+    query: str, docs: list, reranked: bool, device: str
+) -> None:
+    print("\n🔎 [Retrieve Debug]")
+    print(f"   query: {query}")
+    print(f"   rerank: {'on' if reranked else 'off'} · device: {device}")
+    if not docs:
+        print("   （没有召回到任何 chunk。）")
+        print("=" * 50)
+        return
+    for idx, doc in enumerate(docs, start=1):
+        meta = doc.get("meta", {}) if isinstance(doc, dict) else {}
+        retrieval = doc.get("retrieval", {}) if isinstance(doc, dict) else {}
+        source = meta.get("source", "-")
+        chunk_id = meta.get("chunk_id", "-")
+        text = str(doc.get("text", "") if isinstance(doc, dict) else "")
+        preview = " ".join(text.split())[:180]
+        score_parts = []
+        for key in ("rerank_score", "bm25_score", "distance"):
+            if retrieval.get(key) is not None:
+                score_parts.append(f"{key}={retrieval.get(key)}")
+        scores = " · ".join(score_parts) if score_parts else "score=-"
+        print(f"  [{idx}] {source} · {_page_range_text(meta)} · {chunk_id}")
+        print(f"      {scores}")
+        print(f"      {preview}...")
+    print("=" * 50)
+
+
+# 执行检索调试。
+def run_retrieve_debug(doc_id: str, query: str) -> None:
+    settings = get_settings()
+    engine = RetrieverFactory.get_engine(doc_id)
+    top_k = settings.qa_retrieval_top_k
+    docs = engine.search(query=query, top_k=top_k)
+    if not docs:
+        print_retrieve_debug_output(query, [], False, "-")
+        return
+    target_device = BGEReranker.default_device()
+    max_candidates = max(settings.qa_rerank_max_candidates, settings.qa_rerank_top_n)
+    candidate_docs = docs[:max_candidates] if max_candidates > 0 else docs
+    if target_device == "cpu" and not settings.qa_rerank_on_cpu:
+        selected = skipped_cpu_rerank_docs(candidate_docs, settings.qa_rerank_top_n)
+        print_retrieve_debug_output(query, selected, False, target_device)
+        print("ℹ️ CPU 重排默认关闭；如需强制 CPU 精排，请设置 QA_RERANK_ON_CPU=true。")
+        return
+    reranked_docs = BGEReranker.rerank(
+        query=query,
+        docs=candidate_docs,
+        top_n=settings.qa_rerank_top_n,
+        device=target_device,
+    )
+    print_retrieve_debug_output(query, reranked_docs, True, target_device)
 
 
 # 输出final摘要output。
@@ -944,6 +1029,7 @@ def main():
     print(f"   - Trace 目录: {trace_dir()}")
     print("   - 直接提问会打印回答、路由/改写/检索/引用审计过程，并保存本次 trace")
     print("       · /qa <问题>            强制问答")
+    print("       · /retrieve <问题>      只执行召回与重排")
     print("       · /summary <文件名>     强制总结指定文档")
     print("       · /compare <文件A> <文件B> ...  强制对比多篇文档（≥2，本地模式限 2）")
     print("       · /trace /steps /rewrite /evidence /config  查看最近一次请求 trace")
@@ -968,6 +1054,10 @@ def main():
         )
         chat_history.extend(new_messages)
         chat_history = chat_history[-CHAT_HISTORY_MESSAGE_LIMIT:]
+
+    # 执行检索调试。
+    def _retrieve_debug(query: str) -> None:
+        run_retrieve_debug(TARGET_DOC_ID, query)
 
     while True:
         try:
@@ -997,7 +1087,7 @@ def main():
                 print_kb_pdfs(TARGET_DOC_ID, TARGET_DOC_DIR)
                 continue
 
-            debug_session.dispatch(user_input, _ask_debug)
+            debug_session.dispatch(user_input, _ask_debug, _retrieve_debug)
 
         except KeyboardInterrupt:
             safe_print_on_interrupt("\n👋 检测到系统中断信号（Ctrl+C），安全关闭。")

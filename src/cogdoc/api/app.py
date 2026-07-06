@@ -65,7 +65,7 @@ def create_app(
     feedback_store: FeedbackStore | None = None,
     api_keys: set[str] | None = None,
     rate_limiter: TokenBucketRateLimiter | None = None,
-    offload_workers: int = 8,
+    offload_workers: int | None = None,
 ) -> FastAPI:
     # 管理结果。
     @asynccontextmanager
@@ -189,7 +189,8 @@ def create_app(
     app.state.session_store = session_store or SessionStore()
     # 有界线程池限制本地算力并发，缓解高并发下精排/嵌入的坏邻居效应。
     app.state.offload_executor = ThreadPoolExecutor(
-        max_workers=offload_workers, thread_name_prefix="cogdoc-offload"
+        max_workers=offload_workers or get_settings().cogdoc_offload_workers,
+        thread_name_prefix="cogdoc-offload",
     )
     # 入库注册表/任务管理器可注入，便于测试用假入库函数。
     app.state.kb_registry = kb_registry or KnowledgeBaseRegistry()

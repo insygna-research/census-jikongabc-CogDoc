@@ -130,7 +130,6 @@ class RetrieveRequest(QueryDocRequest):
     top_k: int = Field(default=8, ge=1, le=50)
     rerank: bool = False
     rerank_top_n: int | None = Field(default=None, ge=1, le=50)
-    is_local: bool = False
 
 
 # 检索命中项，供前端 evidence 面板和调试面板直接消费。

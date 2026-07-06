@@ -38,6 +38,9 @@ class Settings(BaseSettings):
         default=120, validation_alias="RATE_LIMIT_PER_MINUTE"
     )
     rate_limit_burst: int = Field(default=120, validation_alias="RATE_LIMIT_BURST")
+    cogdoc_offload_workers: int = Field(
+        default=2, validation_alias="COGDOC_OFFLOAD_WORKERS"
+    )
 
     # 云端 OpenAI 兼容后端。
     llm_model_name: str = Field(
@@ -76,6 +79,7 @@ class Settings(BaseSettings):
     qa_rerank_max_candidates: int = Field(
         default=12, validation_alias="QA_RERANK_MAX_CANDIDATES"
     )
+    qa_rerank_on_cpu: bool = Field(default=False, validation_alias="QA_RERANK_ON_CPU")
     hybrid_rrf_k: int = Field(default=60, validation_alias="HYBRID_RRF_K")
     cloud_section_max_workers: int = Field(
         default=6, validation_alias="CLOUD_SECTION_MAX_WORKERS"
@@ -87,6 +91,13 @@ class Settings(BaseSettings):
     )
     reranker_min_cuda_free_mb: int = Field(
         default=2800, validation_alias="RERANKER_MIN_CUDA_FREE_MB"
+    )
+    torch_num_threads: int = Field(default=2, validation_alias="COGDOC_TORCH_NUM_THREADS")
+    cogdoc_embedder_max_concurrency: int = Field(
+        default=1, validation_alias="COGDOC_EMBEDDER_MAX_CONCURRENCY"
+    )
+    cogdoc_reranker_max_concurrency: int = Field(
+        default=1, validation_alias="COGDOC_RERANKER_MAX_CONCURRENCY"
     )
 
     # 入库上传单文件大小上限，最小毒丸防护。

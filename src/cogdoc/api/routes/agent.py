@@ -16,6 +16,7 @@ from cogdoc.api.schemas import (
     build_error_response,
     chat_result_to_response,
 )
+from cogdoc.config.settings import get_settings
 from cogdoc.service.chat_service import ChatResult, ChatServiceError, run_chat_sync
 
 
@@ -136,15 +137,17 @@ async def _task_endpoint(
 def _run_retrieve(body: RetrieveRequest) -> list:
     from cogdoc.graph.subgraphs.qa import RetrieverFactory
     from cogdoc.service.kb_readers import kb_read_lease
-    from cogdoc.tools.reranker import BGEReranker
+    from cogdoc.tools.reranker import BGEReranker, skipped_cpu_rerank_docs
 
     with kb_read_lease(body.doc_id):
         engine = RetrieverFactory.get_engine(body.doc_id)
         docs = engine.search(body.query, top_k=body.top_k)
         if not body.rerank or not docs:
             return docs
-        target_device = "cpu" if body.is_local else BGEReranker.default_device()
+        target_device = BGEReranker.default_device()
         top_n = body.rerank_top_n or body.top_k
+        if target_device == "cpu" and not get_settings().qa_rerank_on_cpu:
+            return skipped_cpu_rerank_docs(docs, top_n)
         return BGEReranker.rerank(body.query, docs, top_n=top_n, device=target_device)
 
 
