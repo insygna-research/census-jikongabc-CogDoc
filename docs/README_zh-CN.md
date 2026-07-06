@@ -38,7 +38,7 @@
 
    <img src="./images/cli-console.png" alt="命令行控制台" width="900">
 
-3. **独立 Debug 控制台。** `make debug` 针对一个知识库调试，普通提问后可继续用 `/trace`、`/steps`、`/rewrite`、`/evidence`、`/config` 查看细节。
+3. **独立 Debug 控制台。** `make debug` 针对一个知识库调试，普通提问后可继续用 `/trace`、`/steps`、`/rewrite`、`/evidence`、`/config` 查看细节，也可以用 `/retrieve <问题>` 只看召回与重排结果。
 
    <img src="./images/debug-console1.png" alt="独立 Debug 控制台" width="900">
 
@@ -101,7 +101,7 @@ make run            # python -m cogdoc.cli
 4. 直接提问走 **QA**；"总结 `<文件>`" 走 **Summary**；"对比 `<a>` 和 `<b>`" 走 **Compare**。
 5. `/cloud` 用云端 LLM，`/local` 用 Ollama；`/help` 列出命令；`exit` 退出。
 
-`make debug` 打开针对单个库的独立 Debug 控制台。可以直接提问获得回答和 trace 摘要，再用 `/trace`、`/steps`、`/rewrite`、`/evidence`、`/config` 查看最近一次请求。需要直接调试指定知识库时，可运行 `python -m cogdoc.debug --kb <kb_id>`。
+`make debug` 打开针对单个库的独立 Debug 控制台。可以直接提问获得回答和 trace 摘要，再用 `/trace`、`/steps`、`/rewrite`、`/evidence`、`/config` 查看最近一次请求，也可以用 `/retrieve <问题>` 只检查召回和重排输出、不调用 LLM。需要直接调试指定知识库时，可运行 `python -m cogdoc.debug --kb <kb_id>`。
 
 ### 网页端（Streamlit + FastAPI）
 
@@ -117,7 +117,7 @@ make frontend       # 终端 2：Streamlit 网页端（自动在浏览器打开�
 3. **对话** — 新建对话或重开历史对话（会话和知识库持久化进 URL，刷新后续上同一对话）。
 4. **聊天** — 选模式（`auto` / `qa` / `summary` / `compare`），提问，读流式答案及其引用来源、证据片段和 👍/👎 反馈。
 5. 在侧栏打开 **本地 Ollama 模式** 即可把生成切到本地模型。
-6. 打开 **Trace 调试**，只查看当前对话的请求 trace：请求配置、节点耗时、问题改写、证据预览和错误信息。
+6. 打开 **调试**，只查看当前对话的请求 trace；也可以用 **检索调试** 直接调用 `/v1/retrieve`，检查命中 chunk、重排分数和 retrieval 元数据。
 
 ### 直接调用 API
 

@@ -36,7 +36,7 @@ A local RAG knowledge-base console for individuals and teams, built on **LangGra
 
    <img src="./docs/images/cli-console.png" alt="CLI console" width="900">
 
-3. **Standalone Debug console.** `make debug` opens a focused console for one KB; after a normal answer, continue with `/trace`, `/steps`, `/rewrite`, `/evidence`, and `/config`.
+3. **Standalone Debug console.** `make debug` opens a focused console for one KB; after a normal answer, continue with `/trace`, `/steps`, `/rewrite`, `/evidence`, and `/config`, or run `/retrieve <query>` to inspect retrieval without calling the LLM.
 
    <img src="./docs/images/debug-console1.png" alt="Standalone Debug console" width="900">
 
@@ -99,7 +99,7 @@ Then drive everything with slash commands inside the console:
 4. Ask directly to run **QA**; "summarize `<file>`" runs **Summary**; "compare `<a>` and `<b>`" runs **Compare**.
 5. `/cloud` uses the cloud LLM, `/local` uses Ollama; `/help` lists commands; `exit` quits.
 
-`make debug` opens the standalone Debug console for one KB. Ask questions there to get normal answers plus trace summaries, then use `/trace`, `/steps`, `/rewrite`, `/evidence`, and `/config` to inspect the latest request. To debug a specific KB directly, run `python -m cogdoc.debug --kb <kb_id>`.
+`make debug` opens the standalone Debug console for one KB. Ask questions there to get normal answers plus trace summaries, use `/trace`, `/steps`, `/rewrite`, `/evidence`, and `/config` to inspect the latest request, or run `/retrieve <query>` to inspect retrieval and rerank output without calling the LLM. To debug a specific KB directly, run `python -m cogdoc.debug --kb <kb_id>`.
 
 ### Web app (Streamlit + FastAPI)
 
@@ -115,7 +115,7 @@ In the browser:
 3. **Conversations** — start a new conversation or reopen a previous one (session and KB persist in the URL, so a refresh resumes the same chat).
 4. **Chat** — pick a mode (`auto` / `qa` / `summary` / `compare`), ask, and read the streamed answer with its citation sources, evidence snippets, and 👍/👎 feedback.
 5. Toggle **Local Ollama mode** in the sidebar to route generation to the local model.
-6. Open **Trace debug** to inspect traces for the current conversation only: request config, node timings, rewrites, evidence previews, and errors.
+6. Open **Debug** to inspect traces for the current conversation only, or use **Retrieval debug** to call `/v1/retrieve` directly and inspect chunk hits, rerank scores, and retrieval metadata.
 
 ### Calling the API directly
 
