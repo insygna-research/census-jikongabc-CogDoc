@@ -256,9 +256,7 @@ def test_retrieval_feedback_client_methods_call_expected_endpoints(monkeypatch):
 
     client = CogDocClient("http://api", api_key="secret")
     client.list_retrieval_feedback("kb", enabled=False, limit=50)
-    client.set_retrieval_feedback_enabled(
-        "rf1", False, actor="admin", reason="误点"
-    )
+    client.set_retrieval_feedback_enabled("rf1", False, actor="admin", reason="误点")
     client.set_retrieval_feedback_enabled("rf1", True)
 
     assert calls[0][0:2] == ("GET", "http://api/v1/retrieval-feedback")

@@ -248,9 +248,7 @@ async def test_feedback_analysis_can_be_listed(tmp_path, monkeypatch):
 
 # 验证反馈理解失败不阻断反馈提交场景。
 @pytest.mark.anyio
-async def test_feedback_analysis_failure_does_not_block_feedback(
-    tmp_path, monkeypatch
-):
+async def test_feedback_analysis_failure_does_not_block_feedback(tmp_path, monkeypatch):
     import cogdoc.api.routes.feedback as feedback_route
 
     app, root = _make_app(tmp_path, monkeypatch)
@@ -280,9 +278,7 @@ async def test_feedback_analysis_failure_does_not_block_feedback(
 
 # 验证知识草稿创建失败不阻断反馈提交场景。
 @pytest.mark.anyio
-async def test_knowledge_create_failure_does_not_block_feedback(
-    tmp_path, monkeypatch
-):
+async def test_knowledge_create_failure_does_not_block_feedback(tmp_path, monkeypatch):
     app, root = _make_app(tmp_path, monkeypatch)
 
     class BrokenKnowledgeStore:
@@ -331,9 +327,7 @@ async def test_retrieval_feedback_can_disable_and_enable(tmp_path, monkeypatch):
                     "citations": [{"chunk_id": "c1", "source": "a.pdf"}],
                 },
             )
-            listed = await client.get(
-                "/v1/retrieval-feedback", params={"kb_id": "kb"}
-            )
+            listed = await client.get("/v1/retrieval-feedback", params={"kb_id": "kb"})
             feedback_id = _read_jsonl(root / "retrieval_feedback.jsonl")[0][
                 "retrieval_feedback_id"
             ]

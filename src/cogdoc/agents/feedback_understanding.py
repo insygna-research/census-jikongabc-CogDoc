@@ -154,7 +154,9 @@ def analyze_feedback(payload: Mapping[str, Any]) -> FeedbackAnalysis:
     feedback_text = _text(payload, "feedback_text", "comment")
     correction_text = _text(payload, "correction_text", "correction")
     combined_text = " ".join(
-        text for text in (feedback_text, correction_text, _text(payload, "answer")) if text
+        text
+        for text in (feedback_text, correction_text, _text(payload, "answer"))
+        if text
     )
     target = _target(payload)
     feedback_type = _feedback_type(payload, combined_text)

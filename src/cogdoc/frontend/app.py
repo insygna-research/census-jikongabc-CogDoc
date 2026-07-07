@@ -965,9 +965,7 @@ def _retrieval_feedback_rows(
         ),
     )
     if status_code != 200:
-        raise CogDocAPIError(
-            format_api_error(payload, status_code, "读取检索调权失败")
-        )
+        raise CogDocAPIError(format_api_error(payload, status_code, "读取检索调权失败"))
     rows = payload.get("retrieval_feedback", []) if isinstance(payload, Mapping) else []
     return [row for row in rows if isinstance(row, Mapping)]
 
@@ -987,9 +985,7 @@ def _feedback_analysis_rows(
         ),
     )
     if status_code != 200:
-        raise CogDocAPIError(
-            format_api_error(payload, status_code, "读取反馈分析失败")
-        )
+        raise CogDocAPIError(format_api_error(payload, status_code, "读取反馈分析失败"))
     rows = payload.get("feedback_analysis", []) if isinstance(payload, Mapping) else []
     return [row for row in rows if isinstance(row, Mapping)]
 
@@ -1121,9 +1117,7 @@ def _render_knowledge_review_list(
 
 
 # 处理检索调权反馈响应。
-def _handle_retrieval_feedback_response(
-    resp, client: CogDocClient, kb_id: str
-) -> None:
+def _handle_retrieval_feedback_response(resp, client: CogDocClient, kb_id: str) -> None:
     if resp.status_code >= 400:
         st.error(_response_error(resp, "检索调权操作失败"))
         return

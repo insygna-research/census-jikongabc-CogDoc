@@ -72,9 +72,7 @@ def _analysis_knowledge_payload(
 
 
 # 分析反馈，失败时降级为仅记录原始反馈。
-def _analyze_feedback_quiet(
-    feedback_id: str, payload: dict
-) -> FeedbackAnalysis | None:
+def _analyze_feedback_quiet(feedback_id: str, payload: dict) -> FeedbackAnalysis | None:
     try:
         return analyze_feedback(payload)
     except Exception as exc:
@@ -164,9 +162,7 @@ async def submit_feedback(body: FeedbackRequest, request: Request):
         )
     if knowledge_payload is not None:
         knowledge_id, knowledge_status, knowledge_deduplicated = (
-            _create_knowledge_quiet(
-                request, result["feedback_id"], knowledge_payload
-            )
+            _create_knowledge_quiet(request, result["feedback_id"], knowledge_payload)
         )
     return FeedbackResponse(
         feedback_id=result["feedback_id"],
