@@ -4,6 +4,7 @@ from httpx import ASGITransport, AsyncClient
 from cogdoc.api.app import create_app
 from cogdoc.api.derived_knowledge_store import DerivedKnowledgeStore
 from cogdoc.api.feedback_store import FeedbackStore
+from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
 
 
 # 声明异步测试使用的后端。
@@ -22,7 +23,17 @@ def _make_app(tmp_path, monkeypatch):
         bad_cases_path=str(tmp_path / "bad_cases.jsonl"),
     )
     knowledge_store = DerivedKnowledgeStore(path=str(tmp_path / "knowledge.jsonl"))
-    return create_app(feedback_store=store, knowledge_store=knowledge_store), tmp_path
+    retrieval_feedback_store = RetrievalFeedbackStore(
+        path=str(tmp_path / "retrieval_feedback.jsonl")
+    )
+    return (
+        create_app(
+            feedback_store=store,
+            knowledge_store=knowledge_store,
+            retrieval_feedback_store=retrieval_feedback_store,
+        ),
+        tmp_path,
+    )
 
 
 # 发送结果。
@@ -120,6 +131,10 @@ async def test_thumbs_down_lands_in_bad_cases(tmp_path, monkeypatch):
     }
     # 同时也进总反馈日志。
     assert len(_read_jsonl(root / "feedback.jsonl")) == 1
+    retrieval_feedback = _read_jsonl(root / "retrieval_feedback.jsonl")
+    assert len(retrieval_feedback) == 1
+    assert retrieval_feedback[0]["chunk_id"] == "c1"
+    assert retrieval_feedback[0]["weight_delta"] < 0
 
 
 # 验证纠错样本草稿优先使用纠正答案场景。
@@ -180,6 +195,44 @@ async def test_correction_can_create_pending_knowledge(tmp_path, monkeypatch):
     assert knowledge["created_from_trace_id"] == "t5"
     assert knowledge["related_source"] == "policy.pdf"
     assert knowledge["related_chunk_ids"] == ["c1"]
+
+
+# 验证检索反馈可以禁用和启用场景。
+@pytest.mark.anyio
+async def test_retrieval_feedback_can_disable_and_enable(tmp_path, monkeypatch):
+    app, root = _make_app(tmp_path, monkeypatch)
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            await client.post(
+                "/v1/feedback",
+                json={
+                    "trace_id": "t6",
+                    "feedback": "thumbs_down",
+                    "kb_id": "kb",
+                    "query": "问题",
+                    "citations": [{"chunk_id": "c1", "source": "a.pdf"}],
+                },
+            )
+            feedback_id = _read_jsonl(root / "retrieval_feedback.jsonl")[0][
+                "retrieval_feedback_id"
+            ]
+            disabled = await client.post(
+                f"/v1/retrieval-feedback/{feedback_id}/disable",
+                json={"actor": "admin", "reason": "误点"},
+            )
+            enabled = await client.post(f"/v1/retrieval-feedback/{feedback_id}/enable")
+
+    assert disabled.status_code == 200
+    assert disabled.json()["status"] == "disabled"
+    assert enabled.status_code == 200
+    assert enabled.json()["status"] == "enabled"
+    rows = _read_jsonl(root / "retrieval_feedback.jsonl")
+    assert rows[-2]["enabled"] is False and rows[-2]["disable_reason"] == "误点"
+    assert rows[-1]["enabled"] is True and rows[-1]["disabled_at"] is None
 
 
 # 验证反馈拒绝非法请求场景。

@@ -9,6 +9,8 @@ from cogdoc.service.ingest_service import (
     IndexInconsistencyError,
     _populate_staging,
     _fill_staging_incremental,
+    _stale_bindings_from_document_changes,
+    _transactional_empty,
 )
 from cogdoc.tools.chunk_identity import build_chunk_id
 from cogdoc.tools.embedder import Embedder
@@ -20,9 +22,9 @@ def _make_state(tmp_path, kb_id="kb"):
     return KBState(kb_id, path=str(tmp_path / kb_id / "state.json"), epochs=epochs)
 
 
-# 构造或驱动 reg文档 测试场景。
+# 构造注册文档。
 def _reg_doc(source, sha, local_idx, chunk_index, page_start=1, page_end=1):
-    # BM25 registry 形态的自洽复用 chunk：chunk_id 由 hash/name/页跨度/局部序号真实构建。
+    # 构造自洽复用分块，分块标识由哈希、名称、页跨度和局部序号生成。
     chunk_id = build_chunk_id(sha, source, page_start, page_end, local_idx)
     return {
         "text": f"text-{chunk_id}",
@@ -68,12 +70,12 @@ def _patch_prev_stores(monkeypatch, registry, embeddings):
     return fake_vec, fake_bm25
 
 
-# 构造或驱动 embfor 测试场景。
+# 构造嵌入映射。
 def _emb_for(registry):
     return {d["meta"]["chunk_id"]: [0.1] for d in registry}
 
 
-# 构造测试用 manifest。
+# 构造测试用清单。
 def _manifest(kb_id, documents, build_version=INDEX_BUILD_VERSION):
     return {
         "doc_id": kb_id,
@@ -85,7 +87,7 @@ def _manifest(kb_id, documents, build_version=INDEX_BUILD_VERSION):
 # 未修改文档复用向量。
 
 
-# 验证 unchanged docs reuse without embedding。
+# 验证未变文档复用且不重新嵌入。
 def test_unchanged_docs_reuse_without_embedding(tmp_path, monkeypatch):
     kb_id = "kb-reuse"
     state = _make_state(tmp_path, kb_id)
@@ -117,7 +119,7 @@ def test_unchanged_docs_reuse_without_embedding(tmp_path, monkeypatch):
 # 仅新增和修改文档调用嵌入。
 
 
-# 验证 new doc goes through embedding。
+# 验证新增文档会进入嵌入流程。
 def test_new_doc_goes_through_embedding(tmp_path, monkeypatch):
     kb_id = "kb-add"
     state = _make_state(tmp_path, kb_id)
@@ -161,7 +163,7 @@ def test_new_doc_goes_through_embedding(tmp_path, monkeypatch):
 # 纯删除不调用嵌入。
 
 
-# 验证 pure delete zero embedding。
+# 验证纯删除不触发嵌入。
 def test_pure_delete_zero_embedding(tmp_path, monkeypatch):
     kb_id = "kb-del"
     state = _make_state(tmp_path, kb_id)
@@ -190,10 +192,44 @@ def test_pure_delete_zero_embedding(tmp_path, monkeypatch):
     }
 
 
+# 验证文档变化会产生过期绑定。
+def test_stale_bindings_from_document_changes():
+    previous = _docs(("a.pdf", "H1"), ("b.pdf", "H2"), ("c.pdf", "H3"))
+    current = _docs(("a.pdf", "H1"), ("b.pdf", "H2-new"), ("d.pdf", "H4"))
+
+    bindings = _stale_bindings_from_document_changes(previous, current)
+
+    assert bindings == [("b.pdf", "H2"), ("c.pdf", "H3")]
+
+
+# 验证空库提交会标记旧文档绑定过期。
+def test_transactional_empty_marks_previous_bindings_stale(tmp_path, monkeypatch):
+    kb_id = "kb-empty-stale"
+    state = _make_state(tmp_path, kb_id)
+    _seed_active(state, _docs(("a.pdf", "H1")), [_reg_doc("a.pdf", "H1", 0, 0)])
+    calls = []
+
+    monkeypatch.setattr(ingest_service.RetrieverFactory, "invalidate", lambda kb: None)
+    monkeypatch.setattr(ingest_service, "_remove_manifest", lambda kb: None)
+    monkeypatch.setattr(
+        ingest_service, "_schedule_generation_cleanup", lambda kb, gen_id: None
+    )
+    monkeypatch.setattr(
+        ingest_service,
+        "_mark_stale_derived_knowledge_quiet",
+        lambda kb, bindings, state=None: calls.append((kb, bindings)),
+    )
+
+    result = _transactional_empty(kb_id, state)
+
+    assert result.document_count == 0
+    assert calls == [(kb_id, [("a.pdf", "H1")])]
+
+
 # 索引编号不一致时回退全量。
 
 
-# 验证 diverged stores fallback to full。
+# 验证两路存储分叉时回退全量。
 def test_diverged_stores_fallback_to_full(tmp_path, monkeypatch):
     kb_id = "kb-diverge"
     state = _make_state(tmp_path, kb_id)
@@ -218,7 +254,7 @@ def test_diverged_stores_fallback_to_full(tmp_path, monkeypatch):
     assert all_chunks == full
 
 
-# 验证 diverged stores raise in fill。
+# 验证填充时遇到分叉存储会报错。
 def test_diverged_stores_raise_in_fill(tmp_path, monkeypatch):
     kb_id = "kb-diverge2"
     state = _make_state(tmp_path, kb_id)
@@ -237,12 +273,12 @@ def test_diverged_stores_raise_in_fill(tmp_path, monkeypatch):
 # 关键词索引内容损坏时回退全量。
 
 
-# 验证 reuse rejects source not in active。
+# 验证复用拒绝非活跃来源。
 def test_reuse_rejects_source_not_in_active(tmp_path, monkeypatch):
     kb_id = "kb-badsrc"
     state = _make_state(tmp_path, kb_id)
     documents = _docs(("a.pdf", "H1"))
-    # registry 的 source 不在 active documents 中（损坏）。
+    # 注册表来源不在活跃文档中，表示数据已损坏。
     registry = [_reg_doc("ghost.pdf", "H1", 0, 0)]
     _seed_active(state, documents, registry)
     _patch_prev_stores(monkeypatch, registry, _emb_for(registry))
@@ -254,14 +290,14 @@ def test_reuse_rejects_source_not_in_active(tmp_path, monkeypatch):
         )
 
 
-# 验证 reuse rejects sha mismatch。
+# 验证复用拒绝哈希不匹配。
 def test_reuse_rejects_sha_mismatch(tmp_path, monkeypatch):
     kb_id = "kb-badsha"
     state = _make_state(tmp_path, kb_id)
     documents = _docs(("a.pdf", "H1"))
     registry = [_reg_doc("a.pdf", "H1", 0, 0)]
     _seed_active(state, documents, registry)
-    # 篡改 registry 内 source_sha256，与 active documents 不一致。
+    # 篡改注册表来源哈希，使其与活跃文档不一致。
     registry[0]["meta"]["source_sha256"] = "TAMPERED"
     _patch_prev_stores(monkeypatch, registry, _emb_for(registry))
 
@@ -272,14 +308,14 @@ def test_reuse_rejects_sha_mismatch(tmp_path, monkeypatch):
         )
 
 
-# 验证 reuse rejects chunk id metadata mismatch。
+# 验证复用拒绝分块标识和元数据不匹配。
 def test_reuse_rejects_chunk_id_metadata_mismatch(tmp_path, monkeypatch):
     kb_id = "kb-badid"
     state = _make_state(tmp_path, kb_id)
     documents = _docs(("a.pdf", "H1"))
     registry = [_reg_doc("a.pdf", "H1", 0, 0)]
     _seed_active(state, documents, registry)
-    # chunk_id 与 metadata 的页跨度不再自洽（chunk_id 编码了 page span/local index）。
+    # 分块标识与元数据页跨度不再自洽。
     registry[0]["meta"]["page_end"] = 99
     _patch_prev_stores(monkeypatch, registry, _emb_for(registry))
 
@@ -293,7 +329,7 @@ def test_reuse_rejects_chunk_id_metadata_mismatch(tmp_path, monkeypatch):
 # 复用写入失败时回退全量。
 
 
-# 验证 partial write clears and full rebuild。
+# 验证部分写入后会清理并全量重建。
 def test_partial_write_clears_and_full_rebuild(tmp_path, monkeypatch):
     kb_id = "kb-partial"
     state = _make_state(tmp_path, kb_id)
@@ -321,7 +357,7 @@ def test_partial_write_clears_and_full_rebuild(tmp_path, monkeypatch):
 # 模型契约变化强制全量构建。
 
 
-# 验证 contract change forces full build。
+# 验证契约变化强制全量构建。
 def test_contract_change_forces_full_build(tmp_path, monkeypatch):
     kb_id = "kb-contract"
     state = _make_state(tmp_path, kb_id)
@@ -345,7 +381,7 @@ def test_contract_change_forces_full_build(tmp_path, monkeypatch):
 # 嵌入契约版本参与构建门控。
 
 
-# 验证 embedding contract in build version。
+# 验证嵌入契约进入构建版本。
 def test_embedding_contract_in_build_version():
     assert Embedder.EMBEDDING_CONTRACT_VERSION in INDEX_BUILD_VERSION
     assert Embedder.MODEL_NAME in Embedder.EMBEDDING_CONTRACT_VERSION

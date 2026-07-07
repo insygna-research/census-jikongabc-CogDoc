@@ -131,6 +131,56 @@ def test_retrieve_node_merges_approved_knowledge(monkeypatch):
     ]
 
 
+# 验证检索反馈会调整召回排序。
+def test_retrieve_node_applies_retrieval_feedback_boost(monkeypatch):
+    docs = [
+        {"text": "a", "meta": {"chunk_id": "c1"}},
+        {"text": "b", "meta": {"chunk_id": "c2"}},
+    ]
+
+    class Engine:
+        def search(self, query, top_k):
+            return docs
+
+    class Knowledge:
+        def search(self, kb_id, query, top_k):
+            return []
+
+    class Feedback:
+        def boosts_for_query(self, kb_id, query):
+            return {"c2": 0.5, "c1": -0.2}
+
+    monkeypatch.setattr(qa.RetrieverFactory, "get_engine", lambda doc_id: Engine())
+    monkeypatch.setattr(qa, "_derived_knowledge_retriever", Knowledge())
+    monkeypatch.setattr(qa, "_retrieval_feedback_store", Feedback())
+
+    result = qa.retrieve_node({"query": "报名要求", "doc_id": "kb"})
+
+    assert [doc["meta"]["chunk_id"] for doc in result["retrieved_docs"]] == [
+        "c2",
+        "c1",
+    ]
+    assert result["retrieved_docs"][0]["retrieval"]["feedback_boost"] == 0.5
+
+
+# 验证检索反馈读取失败时保持原排序。
+def test_retrieve_node_ignores_retrieval_feedback_errors(monkeypatch):
+    docs = [
+        {"text": "a", "meta": {"chunk_id": "c1"}},
+        {"text": "b", "meta": {"chunk_id": "c2"}},
+    ]
+
+    class BrokenFeedback:
+        def boosts_for_query(self, kb_id, query):
+            raise ValueError("broken")
+
+    monkeypatch.setattr(qa, "_retrieval_feedback_store", BrokenFeedback())
+
+    result = qa._apply_retrieval_feedback("kb", "问题", docs)
+
+    assert result == docs
+
+
 # 集合编号哈希命名。
 
 

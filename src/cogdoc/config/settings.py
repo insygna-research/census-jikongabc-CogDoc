@@ -4,7 +4,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-# 仓库根（.env / 默认 data 根的锚点）。本文件位于 src/cogdoc/config/，上溯 3 层到仓库根。
+# 仓库根目录，作为环境文件与默认数据目录的锚点。
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -31,7 +31,7 @@ class Settings(BaseSettings):
         default="logs/traces", validation_alias="COGDOC_TRACE_DIR"
     )
 
-    # 访问控制：API key 逗号分隔，留空则鉴权关闭（本地/测试透明）。
+    # 访问控制：密钥逗号分隔，留空则关闭鉴权。
     cogdoc_api_keys: str = Field(default="", validation_alias="COGDOC_API_KEYS")
     # 限流令牌桶：每分钟补充速率 + 突发容量；容量<=0 关闭限流。
     rate_limit_per_minute: int = Field(
@@ -42,7 +42,7 @@ class Settings(BaseSettings):
         default=2, validation_alias="COGDOC_OFFLOAD_WORKERS"
     )
 
-    # 云端 OpenAI 兼容后端。
+    # 云端模型兼容后端。
     llm_model_name: str = Field(
         default="deepseek-chat", validation_alias="LLM_MODEL_NAME"
     )
@@ -53,13 +53,13 @@ class Settings(BaseSettings):
     llm_structured_output_method: str = Field(
         default="auto", validation_alias="LLM_STRUCTURED_OUTPUT_METHOD"
     )
-    # 云端韧性：单次调用硬超时与传输层重试次数，运维可按后端 SLA 调。
+    # 云端韧性：单次调用硬超时与传输层重试次数。
     llm_timeout_seconds: float = Field(
         default=90.0, validation_alias="LLM_TIMEOUT_SECONDS"
     )
     llm_max_retries: int = Field(default=2, validation_alias="LLM_MAX_RETRIES")
 
-    # 本地 Ollama OpenAI 兼容后端。
+    # 本地模型兼容后端。
     ollama_model_name: str = Field(
         default="qwen2.5:7b", validation_alias="OLLAMA_MODEL_NAME"
     )
@@ -67,7 +67,7 @@ class Settings(BaseSettings):
         default="http://localhost:11434/v1", validation_alias="OLLAMA_BASE_URL"
     )
     ollama_api_key: str = Field(default="ollama", validation_alias="OLLAMA_API_KEY")
-    # 本地 Ollama 比云端慢得多：超时更长、重试更少（本地失败重试意义不大）。
+    # 本地模型通常比云端慢，超时更长且重试更少。
     ollama_timeout_seconds: float = Field(
         default=180.0, validation_alias="OLLAMA_TIMEOUT_SECONDS"
     )
@@ -85,7 +85,7 @@ class Settings(BaseSettings):
         default=6, validation_alias="CLOUD_SECTION_MAX_WORKERS"
     )
 
-    # 模型设备阈值，单位 MB。
+    # 模型设备阈值，单位兆字节。
     embedder_min_cuda_free_mb: int = Field(
         default=800, validation_alias="EMBEDDER_MIN_CUDA_FREE_MB"
     )
@@ -129,17 +129,17 @@ class Settings(BaseSettings):
         populate_by_name=True,
     )
 
-    # 完成 data目录 处理。
+    # 处理数据目录。
     @property
     def data_dir(self) -> Path:
         return Path(self.cogdoc_data_dir)
 
-    # 完成 chroma持久化流程目录 处理。
+    # 处理向量持久化目录。
     @property
     def chroma_persist_dir(self) -> str:
         return str(self.data_dir / "chroma_db")
 
-    # 完成 bm25持久化流程目录 处理。
+    # 处理关键词索引持久化目录。
     @property
     def bm25_persist_dir(self) -> str:
         return str(self.data_dir / "bm25_db")
@@ -161,39 +161,39 @@ class Settings(BaseSettings):
 
     # 完成 知识库来源目录 处理。
     def kb_source_dir(self, kb_id: str) -> str:
-        # 每个知识库一个源 PDF 目录；上传落在这里，构建时硬链接快照到 generation 工作区。
+        # 每个知识库一个源文档目录，构建时硬链接快照到索引代工作区。
         return str(self.data_dir / "kb" / kb_id / "sources")
 
     # 完成 知识库状态路径 处理。
     def kb_state_path(self, kb_id: str) -> str:
-        # 事务化索引的提交指针：active_generation/epoch/generations 表，与每文档 manifest 分离。
+        # 事务化索引的提交指针，与每文档清单分离。
         return str(self.data_dir / "kb" / kb_id / "state.json")
 
     # 完成 知识库索引代目录 处理。
     def kb_generation_dir(self, kb_id: str, generation_id: str) -> str:
-        # 单个 generation 的工作区：源文件硬链接快照 + 该代 manifest 等内部产物。
+        # 单个索引代的工作区，保存源文件快照和内部产物。
         return str(self.data_dir / "kb" / kb_id / "generations" / generation_id)
 
-    # 完成 知识库collectionid 处理。
+    # 处理知识库集合标识。
     def kb_collection_id(self, kb_id: str, gen_id: str) -> str:
-        # Chroma/BM25 集合 ID：sha256(kb_id)[:8]-{gen_id}，固定 22 字符，不受 kb_id 长度影响。
+        # 集合标识由知识库短哈希和索引代标识组成。
         import hashlib
 
         return f"{hashlib.sha256(kb_id.encode()).hexdigest()[:8]}-{gen_id}"
 
-    # 完成 API密钥set 处理。
+    # 处理接口密钥集合。
     @property
     def api_key_set(self) -> set[str]:
-        # 解析逗号分隔的 key 列表，去空白与空项；空集合表示鉴权关闭。
+        # 解析逗号分隔的密钥列表，空集合表示鉴权关闭。
         return {k.strip() for k in self.cogdoc_api_keys.split(",") if k.strip()}
 
-    # 完成 状态db路径 处理。
+    # 处理状态库路径。
     @property
     def state_db_path(self) -> str:
-        # 会话与入库任务的 SQLite 落盘，进程重启不丢对话与任务状态。
+        # 会话与入库任务落盘，进程重启不丢状态。
         return str(self.data_dir / "state.db")
 
-    # 完成 反馈log路径 处理。
+    # 处理反馈日志路径。
     @property
     def feedback_log_path(self) -> str:
         return str(self.data_dir / "feedback" / "feedback.jsonl")
@@ -201,7 +201,7 @@ class Settings(BaseSettings):
     # 完成 坏样本用例列表路径 处理。
     @property
     def bad_cases_path(self) -> str:
-        # 点踩/纠错自动归集到此，喂离线质量评测 harness。
+        # 点踩和纠错自动归集到此，供离线质量评测使用。
         return str(self.data_dir / "feedback" / "bad_cases.jsonl")
 
     # 完成 派生知识路径 处理。
@@ -209,12 +209,17 @@ class Settings(BaseSettings):
     def derived_knowledge_path(self) -> str:
         return str(self.data_dir / "knowledge" / "derived_knowledge.jsonl")
 
+    # 完成 检索反馈路径 处理。
+    @property
+    def retrieval_feedback_path(self) -> str:
+        return str(self.data_dir / "feedback" / "retrieval_feedback.jsonl")
+
     # 返回根目录。
     @property
     def project_root(self) -> Path:
         return PROJECT_ROOT
 
-    # 完成 CUDAminfreebytes 处理。
+    # 处理显存阈值。
     def cuda_min_free_bytes(self, setting_name: str) -> int:
         mb_by_name = {
             "EMBEDDER_MIN_CUDA_FREE_MB": self.embedder_min_cuda_free_mb,

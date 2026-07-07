@@ -13,6 +13,7 @@ from cogdoc.api.feedback_store import FeedbackStore
 from cogdoc.api.ingest import IndexJobManager, KnowledgeBaseRegistry
 from cogdoc.api.metrics import Metrics, MetricsMiddleware
 from cogdoc.api.persistence import SqliteJobStore, SqliteSessionStore
+from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
 from cogdoc.api.routes import (
     agent_router,
     chat_router,
@@ -66,6 +67,7 @@ def create_app(
     index_jobs: IndexJobManager | None = None,
     feedback_store: FeedbackStore | None = None,
     knowledge_store: DerivedKnowledgeStore | None = None,
+    retrieval_feedback_store: RetrievalFeedbackStore | None = None,
     api_keys: set[str] | None = None,
     rate_limiter: TokenBucketRateLimiter | None = None,
     offload_workers: int | None = None,
@@ -203,6 +205,9 @@ def create_app(
     )
     app.state.feedback_store = feedback_store or FeedbackStore()
     app.state.knowledge_store = knowledge_store or DerivedKnowledgeStore()
+    app.state.retrieval_feedback_store = (
+        retrieval_feedback_store or RetrievalFeedbackStore()
+    )
 
     # 访问控制留空则鉴权关闭，限流默认按配置令牌桶。
     settings = get_settings()

@@ -5,6 +5,7 @@ from threading import RLock
 from langchain_core.messages import SystemMessage
 from langgraph.graph import StateGraph, START, END
 from cogdoc.config.settings import get_settings
+from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
 from cogdoc.graph.state import GraphState, Evidence, RetrievedDoc
 from cogdoc.observability.logger import log_event
 from cogdoc.service.kb_lifecycle import LIFECYCLE_ACTIVE, shared_lifecycle_store
@@ -27,6 +28,7 @@ from cogdoc.agents.citation_validator import CitationValidatorAgent
 
 NEIGHBOR_CONTEXT_RADIUS = 1
 _derived_knowledge_retriever = DerivedKnowledgeRetriever()
+_retrieval_feedback_store = RetrievalFeedbackStore()
 
 
 # 进程内按知识库和索引代缓存引擎，切代后失效缓存。
@@ -237,6 +239,39 @@ def _expand_with_neighbor_chunks(
     return list(expanded.values())
 
 
+# 应用检索反馈调权。
+def _apply_retrieval_feedback(
+    kb_id: str, query: str, docs: list[RetrievedDoc]
+) -> list[RetrievedDoc]:
+    if not docs or not query:
+        return docs
+    try:
+        boosts = _retrieval_feedback_store.boosts_for_query(kb_id, query)
+    except Exception as exc:
+        log_event(
+            "qa",
+            "retrieval_feedback_boost_failed",
+            {},
+            level=logging.WARNING,
+            kb_id=kb_id,
+            error_class=type(exc).__name__,
+        )
+        return docs
+    if not boosts:
+        return docs
+    adjusted = []
+    for idx, doc in enumerate(docs):
+        chunk_id = str(doc.get("meta", {}).get("chunk_id", "") or "")
+        boost = boosts.get(chunk_id, 0.0)
+        if boost:
+            doc = copy.deepcopy(doc)
+            retrieval = doc.setdefault("retrieval", {})
+            retrieval["feedback_boost"] = boost
+        adjusted.append((idx, boost, doc))
+    adjusted.sort(key=lambda item: (-item[1], item[0]))
+    return [doc for _, _, doc in adjusted]
+
+
 # 检索节点。
 def retrieve_node(state: GraphState) -> dict:
     original_query = state.get("query", "")
@@ -282,6 +317,8 @@ def retrieve_node(state: GraphState) -> dict:
                     else:
                         doc_copy = doc
                     retrieved_docs.append(doc_copy)
+
+    retrieved_docs = _apply_retrieval_feedback(doc_id, original_query, retrieved_docs)
 
     log_event(
         "qa",
