@@ -13,6 +13,7 @@ from cogdoc.api.schemas import (
     KnowledgeOrigin,
     KnowledgeReviewRequest,
     KnowledgeStatus,
+    ReviewQueueSummaryResponse,
     build_error_response,
 )
 
@@ -74,6 +75,41 @@ async def list_knowledge(
         created_before=created_before,
     )
     return KnowledgeListResponse(knowledge=[_public(row) for row in rows])
+
+
+# 查询审核队列摘要。
+@router.get("/review-queue", response_model=ReviewQueueSummaryResponse)
+async def review_queue_summary(
+    request: Request,
+    kb_id: str = Query(min_length=1),
+    document_id: str | None = None,
+    origin: KnowledgeOrigin | None = None,
+    created_by: str | None = None,
+    created_after: str | None = None,
+    created_before: str | None = None,
+):
+    knowledge = request.app.state.knowledge_store.counts(
+        kb_id=kb_id,
+        document_id=document_id,
+        origin=origin.value if origin is not None else None,
+        created_by=created_by,
+        created_after=created_after,
+        created_before=created_before,
+    )
+    feedback = request.app.state.feedback_analysis_store.counts(kb_id=kb_id)
+    retrieval = request.app.state.retrieval_feedback_store.counts(kb_id=kb_id)
+    return ReviewQueueSummaryResponse(
+        kb_id=kb_id,
+        knowledge=knowledge["by_status"],
+        knowledge_origin=knowledge["by_origin"],
+        feedback_analysis={
+            **feedback["by_action"],
+            "needs_review": feedback["needs_review"],
+            "total": feedback["total"],
+        },
+        feedback_analysis_type=feedback["by_type"],
+        retrieval_feedback=retrieval,
+    )
 
 
 # 审核状态流转。

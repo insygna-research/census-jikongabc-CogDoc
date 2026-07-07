@@ -933,18 +933,54 @@ def _document_rows(client: CogDocClient, kb_id: str) -> list[Mapping]:
 # 清理知识缓存。
 def _clear_knowledge_cache(client: CogDocClient, kb_id: str) -> None:
     _clear_api_cache(("knowledge", client.base_url, kb_id))
+    _clear_api_cache(("review-queue", client.base_url, kb_id))
 
 
 # 读取派生知识列表。
-def _knowledge_rows(client: CogDocClient, kb_id: str, status: str) -> list[Mapping]:
+def _knowledge_rows(
+    client: CogDocClient,
+    kb_id: str,
+    status: str,
+    origin: str | None = None,
+    created_by: str | None = None,
+) -> list[Mapping]:
     status_code, payload = _cached_api_value(
-        ("knowledge", client.base_url, kb_id, status),
-        lambda: _response_status_payload(client.list_knowledge(kb_id, status=status)),
+        ("knowledge", client.base_url, kb_id, status, origin, created_by),
+        lambda: _response_status_payload(
+            client.list_knowledge(
+                kb_id, status=status, origin=origin, created_by=created_by
+            )
+        ),
     )
     if status_code != 200:
         raise CogDocAPIError(format_api_error(payload, status_code, "读取知识失败"))
     rows = payload.get("knowledge", []) if isinstance(payload, Mapping) else []
     return [row for row in rows if isinstance(row, Mapping)]
+
+
+# 读取审核队列摘要。
+def _review_queue_summary(client: CogDocClient, kb_id: str) -> Mapping:
+    status_code, payload = _cached_api_value(
+        ("review-queue", client.base_url, kb_id),
+        lambda: _response_status_payload(client.review_queue_summary(kb_id)),
+    )
+    if status_code != 200 or not isinstance(payload, Mapping):
+        return {}
+    return payload
+
+
+# 读取计数。
+def _summary_count(summary: Mapping, group: str, key: str) -> int:
+    values = summary.get(group)
+    if not isinstance(values, Mapping):
+        return 0
+    value = values.get(key)
+    return int(value) if isinstance(value, int) else 0
+
+
+# 格式化页签计数。
+def _tab_label(label: str, count: int) -> str:
+    return f"{label} ({count})" if count else label
 
 
 # 清理检索调权反馈缓存。
@@ -1087,8 +1123,33 @@ def _render_knowledge_item(
 def _render_knowledge_review_list(
     client: CogDocClient, kb_id: str, status: str, label: str
 ) -> None:
+    origin_labels = {
+        "": "全部来源",
+        "manual_entry": "手工新增",
+        "correction": "纠错",
+        "saved_answer": "保存答案",
+        "agent_suggested": "分析建议",
+    }
+    filters = st.columns([1, 1])
+    origin = filters[0].selectbox(
+        "来源",
+        list(origin_labels),
+        format_func=lambda value: origin_labels[value],
+        key=f"knowledge-origin-{status}-{kb_id}",
+    )
+    created_by = filters[1].text_input(
+        "创建者",
+        key=f"knowledge-created-by-{status}-{kb_id}",
+        placeholder="全部",
+    )
     try:
-        rows = _knowledge_rows(client, kb_id, status)
+        rows = _knowledge_rows(
+            client,
+            kb_id,
+            status,
+            origin=origin or None,
+            created_by=created_by.strip() or None,
+        )
     except Exception as exc:
         st.warning(str(exc))
         return
@@ -1253,8 +1314,30 @@ def _knowledge_area(kb_id: str | None) -> None:
         st.info("先选择知识库。")
         return
     client = _client()
+    try:
+        summary = _review_queue_summary(client, kb_id)
+    except Exception:
+        summary = {}
+    pending_count = _summary_count(summary, "knowledge", "pending")
+    stale_count = _summary_count(summary, "knowledge", "stale")
+    retrieval_count = _summary_count(summary, "retrieval_feedback", "enabled")
+    retrieval_disabled_count = _summary_count(summary, "retrieval_feedback", "disabled")
+    analysis_count = _summary_count(summary, "feedback_analysis", "total")
+    needs_review_count = _summary_count(summary, "feedback_analysis", "needs_review")
+    metrics = st.columns(4)
+    metrics[0].metric("待审核知识", pending_count)
+    metrics[1].metric("过期知识", stale_count)
+    metrics[2].metric("反馈分析", analysis_count, delta=needs_review_count)
+    metrics[3].metric("检索调权", retrieval_count + retrieval_disabled_count)
+    metrics[3].caption(f"启用 {retrieval_count} · 禁用 {retrieval_disabled_count}")
     create_tab, pending_tab, stale_tab, retrieval_tab, analysis_tab = st.tabs(
-        ["新增", "待审核", "过期", "调权", "反馈分析"]
+        [
+            "新增",
+            _tab_label("待审核", pending_count),
+            _tab_label("过期", stale_count),
+            _tab_label("调权", retrieval_count),
+            _tab_label("反馈分析", analysis_count),
+        ]
     )
     with create_tab:
         _render_create_knowledge(client, kb_id)

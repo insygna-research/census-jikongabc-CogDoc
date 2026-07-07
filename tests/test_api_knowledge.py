@@ -5,6 +5,8 @@ from httpx import ASGITransport, AsyncClient
 
 from cogdoc.api.app import create_app
 from cogdoc.api.derived_knowledge_store import DerivedKnowledgeStore
+from cogdoc.api.feedback_analysis_store import FeedbackAnalysisStore
+from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
 
 
 # 声明异步测试使用的后端。
@@ -19,7 +21,17 @@ def _make_app(tmp_path, monkeypatch):
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
     store = DerivedKnowledgeStore(path=str(tmp_path / "knowledge.jsonl"))
-    return create_app(knowledge_store=store)
+    feedback_analysis_store = FeedbackAnalysisStore(
+        path=str(tmp_path / "feedback_analysis.jsonl")
+    )
+    retrieval_feedback_store = RetrievalFeedbackStore(
+        path=str(tmp_path / "retrieval_feedback.jsonl")
+    )
+    return create_app(
+        knowledge_store=store,
+        feedback_analysis_store=feedback_analysis_store,
+        retrieval_feedback_store=retrieval_feedback_store,
+    )
 
 
 # 构造测试客户端。
@@ -126,6 +138,61 @@ async def test_saved_answer_origin_creates_pending_knowledge(tmp_path, monkeypat
         assert row["status"] == "pending"
         assert row["created_from_trace_id"] == "trace-1"
         assert row["related_chunk_ids"] == ["c1", "c2"]
+
+
+# 验证审核队列摘要聚合多类待处理事项场景。
+@pytest.mark.anyio
+async def test_review_queue_summary_counts_pending_work(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+
+    app.state.feedback_analysis_store.record(
+        "fb1",
+        {"kb_id": "kb", "trace_id": "t1", "query": "问题"},
+        {
+            "feedback_type": "correction",
+            "sentiment": "negative",
+            "target": {"chunk_ids": [], "sources": [], "source_type": "none"},
+            "extracted_claim": "正确说法",
+            "recommended_action": "create_pending_knowledge",
+            "weight_delta": -0.55,
+            "confidence": 0.72,
+            "needs_review": True,
+        },
+    )
+    app.state.retrieval_feedback_store.record_from_feedback(
+        "fb2",
+        {
+            "kb_id": "kb",
+            "query": "问题",
+            "feedback": "thumbs_down",
+            "citations": [{"chunk_id": "c1", "source": "a.pdf"}],
+        },
+    )
+
+    async with _client(app) as client:
+        await client.post(
+            "/v1/knowledge",
+            json={"kb_id": "kb", "text": "待审核知识。"},
+        )
+        await client.post(
+            "/v1/knowledge",
+            json={
+                "kb_id": "kb",
+                "text": "保存答案知识。",
+                "origin": "saved_answer",
+                "enable_immediately": True,
+            },
+        )
+        summary = await client.get("/v1/review-queue", params={"kb_id": "kb"})
+
+    assert summary.status_code == 200
+    body = summary.json()
+    assert body["knowledge"]["pending"] == 1
+    assert body["knowledge"]["approved"] == 1
+    assert body["knowledge_origin"]["saved_answer"] == 1
+    assert body["feedback_analysis"]["create_pending_knowledge"] == 1
+    assert body["feedback_analysis"]["needs_review"] == 1
+    assert body["retrieval_feedback"]["enabled"] == 1
 
 
 # 验证批量审核报告缺失标识场景。

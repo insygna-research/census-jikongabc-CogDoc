@@ -424,6 +424,17 @@ class KnowledgeBatchReviewResponse(ApiModel):
     missing_ids: list[str] = Field(default_factory=list)
 
 
+# 审核队列摘要响应。
+class ReviewQueueSummaryResponse(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    kb_id: str
+    knowledge: dict[str, int] = Field(default_factory=dict)
+    knowledge_origin: dict[str, int] = Field(default_factory=dict)
+    feedback_analysis: dict[str, int] = Field(default_factory=dict)
+    feedback_analysis_type: dict[str, int] = Field(default_factory=dict)
+    retrieval_feedback: dict[str, int] = Field(default_factory=dict)
+
+
 # 会话多轮历史，刷新后前端据此还原聊天记录。
 class SessionHistoryResponse(ApiModel):
     schema_version: Literal["v1"] = API_SCHEMA_VERSION

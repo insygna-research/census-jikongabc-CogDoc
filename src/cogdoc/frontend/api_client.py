@@ -366,6 +366,31 @@ class CogDocClient:
             headers=self._headers,
         )
 
+    # 查询审核队列摘要。
+    def review_queue_summary(
+        self,
+        kb_id: str,
+        document_id: str | None = None,
+        origin: str | None = None,
+        created_by: str | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
+    ) -> httpx.Response:
+        params = {
+            "kb_id": kb_id,
+            "document_id": document_id,
+            "origin": origin,
+            "created_by": created_by,
+            "created_after": created_after,
+            "created_before": created_before,
+        }
+        return httpx.get(
+            self._url("/v1/review-queue"),
+            params={k: v for k, v in params.items() if v is not None},
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
     # 审核派生知识。
     def review_knowledge(
         self,

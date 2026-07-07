@@ -80,6 +80,28 @@ class FeedbackAnalysisStore:
         rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
         return rows[:limit]
 
+    # 统计反馈理解队列。
+    def counts(self, *, kb_id: str) -> dict[str, dict[str, int] | int]:
+        with self._lock:
+            rows = self._read_all()
+        rows = [row for row in rows if row.get("kb_id") == kb_id]
+        by_action: dict[str, int] = {}
+        by_type: dict[str, int] = {}
+        needs_review = 0
+        for row in rows:
+            action = str(row.get("recommended_action") or "unknown")
+            feedback_type = str(row.get("feedback_type") or "unknown")
+            by_action[action] = by_action.get(action, 0) + 1
+            by_type[feedback_type] = by_type.get(feedback_type, 0) + 1
+            if row.get("needs_review") is True:
+                needs_review += 1
+        return {
+            "total": len(rows),
+            "needs_review": needs_review,
+            "by_action": by_action,
+            "by_type": by_type,
+        }
+
     # 读取全部分析结果。
     def _read_all(self) -> list[dict[str, Any]]:
         mtime = (

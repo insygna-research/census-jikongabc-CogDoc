@@ -300,3 +300,27 @@ def test_feedback_analysis_client_method_calls_expected_endpoint(monkeypatch):
         "recommended_action": "create_pending_knowledge",
         "limit": 25,
     }
+
+
+# 验证审核队列摘要客户端方法调用稳定端点场景。
+def test_review_queue_summary_client_method_calls_expected_endpoint(monkeypatch):
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return httpx.Response(200, json={"knowledge": {"pending": 1}})
+
+    monkeypatch.setattr("cogdoc.frontend.api_client.httpx.get", fake_get)
+
+    response = CogDocClient("http://api", api_key="secret").review_queue_summary(
+        "kb", origin="saved_answer", created_by="frontend"
+    )
+
+    assert response.status_code == 200
+    assert calls[0][0] == "http://api/v1/review-queue"
+    assert calls[0][1]["headers"] == {"Authorization": "Bearer secret"}
+    assert calls[0][1]["params"] == {
+        "kb_id": "kb",
+        "origin": "saved_answer",
+        "created_by": "frontend",
+    }

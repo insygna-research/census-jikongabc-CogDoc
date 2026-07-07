@@ -163,6 +163,19 @@ class RetrievalFeedbackStore:
         rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
         return rows[:limit]
 
+    # 统计检索调权反馈。
+    def counts(self, *, kb_id: str) -> dict[str, int]:
+        with self._lock:
+            rows = list(self._latest_cached().values())
+        rows = [row for row in rows if row.get("kb_id") == kb_id]
+        enabled = sum(1 for row in rows if row.get("enabled") is True)
+        disabled = sum(1 for row in rows if row.get("enabled") is False)
+        return {
+            "total": len(rows),
+            "enabled": enabled,
+            "disabled": disabled,
+        }
+
     # 设置启用状态。
     def set_enabled(
         self,

@@ -125,6 +125,38 @@ class DerivedKnowledgeStore:
             rows, key=lambda row: str(row.get("created_at", "")), reverse=True
         )
 
+    # 统计知识审核队列。
+    def counts(
+        self,
+        *,
+        kb_id: str,
+        document_id: str | None = None,
+        origin: str | None = None,
+        created_by: str | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
+    ) -> dict[str, dict[str, int] | int]:
+        rows = self.list(
+            kb_id=kb_id,
+            document_id=document_id,
+            origin=origin,
+            created_by=created_by,
+            created_after=created_after,
+            created_before=created_before,
+        )
+        by_status: dict[str, int] = {}
+        by_origin: dict[str, int] = {}
+        for row in rows:
+            status = str(row.get("status") or "unknown")
+            row_origin = str(row.get("origin") or "unknown")
+            by_status[status] = by_status.get(status, 0) + 1
+            by_origin[row_origin] = by_origin.get(row_origin, 0) + 1
+        return {
+            "total": len(rows),
+            "by_status": by_status,
+            "by_origin": by_origin,
+        }
+
     # 修改审核状态，保留历史快照。
     def set_status(
         self,
