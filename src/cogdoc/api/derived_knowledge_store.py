@@ -271,6 +271,25 @@ class DerivedKnowledgeStore:
         conflicts.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
         return conflicts
 
+    # 统计曾过期知识的复核完成情况。
+    def stale_review_counts(self, *, kb_id: str) -> dict[str, int]:
+        with self._lock:
+            history = self._read_history()
+            latest = self._latest()
+        stale_ids = {
+            str(row.get("knowledge_id"))
+            for row in history
+            if row.get("kb_id") == kb_id
+            and row.get("status") == "stale"
+            and row.get("knowledge_id")
+        }
+        reviewed = sum(
+            1
+            for knowledge_id in stale_ids
+            if latest.get(knowledge_id, {}).get("status") != "stale"
+        )
+        return {"total": len(stale_ids), "reviewed": reviewed}
+
     # 修改审核状态，保留历史快照。
     def set_status(
         self,
@@ -419,17 +438,23 @@ class DerivedKnowledgeStore:
     # 读取最新快照。
     def _latest(self) -> dict[str, dict[str, Any]]:
         latest: dict[str, dict[str, Any]] = {}
+        for row in self._read_history():
+            knowledge_id = str(row.get("knowledge_id") or "")
+            if knowledge_id:
+                latest[knowledge_id] = row
+        return latest
+
+    # 读取全部历史快照。
+    def _read_history(self) -> list[dict[str, Any]]:
+        rows = []
         if not os.path.exists(self._path):
-            return latest
+            return rows
         with open(self._path, encoding="utf-8") as f:
             for line in f:
                 if not line.strip():
                     continue
-                row = json.loads(line)
-                knowledge_id = str(row.get("knowledge_id") or "")
-                if knowledge_id:
-                    latest[knowledge_id] = row
-        return latest
+                rows.append(json.loads(line))
+        return rows
 
     # 追加。
     def _append(self, entry: dict[str, Any]) -> None:

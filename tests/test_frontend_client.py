@@ -390,3 +390,25 @@ def test_review_queue_summary_client_method_calls_expected_endpoint(monkeypatch)
         "origin": "saved_answer",
         "created_by": "frontend",
     }
+
+
+# 验证知识审核指标客户端方法调用稳定端点场景。
+def test_knowledge_metrics_client_methods_call_expected_endpoints(monkeypatch):
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return httpx.Response(200, json={"ok": True})
+
+    monkeypatch.setattr("cogdoc.frontend.api_client.httpx.get", fake_get)
+
+    client = CogDocClient("http://api", api_key="secret")
+    client.pending_knowledge_count("kb")
+    client.feedback_loop_metrics("kb", answer_count=20)
+
+    assert calls[0][0] == "http://api/v1/knowledge/pending-count"
+    assert calls[0][1]["headers"] == {"Authorization": "Bearer secret"}
+    assert calls[0][1]["params"] == {"kb_id": "kb"}
+    assert calls[1][0] == "http://api/v1/feedback-loop-metrics"
+    assert calls[1][1]["headers"] == {"Authorization": "Bearer secret"}
+    assert calls[1][1]["params"] == {"kb_id": "kb", "answer_count": 20}

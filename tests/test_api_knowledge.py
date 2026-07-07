@@ -442,6 +442,87 @@ async def test_review_queue_summary_counts_pending_work(tmp_path, monkeypatch):
     assert body["retrieval_feedback"]["enabled"] == 1
 
 
+# 验证待审核计数和反馈闭环指标场景。
+@pytest.mark.anyio
+async def test_review_metrics_endpoints_report_feedback_loop(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+
+    app.state.feedback_store.record(
+        {"kb_id": "kb", "trace_id": "t1", "feedback": "thumbs_down"}
+    )
+    app.state.feedback_store.record(
+        {"kb_id": "kb", "trace_id": "t2", "feedback": "correction"}
+    )
+    app.state.feedback_analysis_store.record(
+        "fb1",
+        {"kb_id": "kb", "trace_id": "t2", "query": "问题"},
+        {
+            "feedback_type": "correction",
+            "sentiment": "negative",
+            "target": {"chunk_ids": [], "sources": [], "source_type": "none"},
+            "extracted_claim": "正确说法",
+            "recommended_action": "create_pending_knowledge",
+            "weight_delta": -0.55,
+            "confidence": 0.9,
+            "needs_review": True,
+        },
+    )
+    records = app.state.retrieval_feedback_store.record_from_feedback(
+        "fb2",
+        {
+            "kb_id": "kb",
+            "query": "问题",
+            "feedback": "thumbs_down",
+            "citations": [{"chunk_id": "c1", "source": "a.pdf"}],
+        },
+    )
+    app.state.retrieval_feedback_store.set_enabled(
+        records[0]["retrieval_feedback_id"], False
+    )
+
+    async with _client(app) as client:
+        approved = await client.post(
+            "/v1/knowledge",
+            json={"kb_id": "kb", "text": "已通过知识。", "enable_immediately": True},
+        )
+        rejected = await client.post(
+            "/v1/knowledge", json={"kb_id": "kb", "text": "驳回知识。"}
+        )
+        await client.post(
+            f"/v1/knowledge/{rejected.json()['knowledge']['knowledge_id']}/reject",
+            json={},
+        )
+        stale_id = approved.json()["knowledge"]["knowledge_id"]
+        app.state.knowledge_store.set_status(stale_id, "stale")
+        pending_count = await client.get(
+            "/v1/knowledge/pending-count", params={"kb_id": "kb"}
+        )
+        metrics = await client.get(
+            "/v1/feedback-loop-metrics",
+            params={"kb_id": "kb", "answer_count": 4},
+        )
+        app.state.knowledge_store.set_status(stale_id, "approved")
+        reviewed_metrics = await client.get(
+            "/v1/feedback-loop-metrics", params={"kb_id": "kb"}
+        )
+
+    assert pending_count.status_code == 200
+    assert pending_count.json()["stale"] == 1
+    assert pending_count.json()["feedback_analysis_needs_review"] == 1
+    assert pending_count.json()["total"] == 2
+    assert metrics.status_code == 200
+    body = metrics.json()
+    assert body["counts"]["feedback_total"] == 2
+    assert body["counts"]["negative_feedback_total"] == 2
+    assert body["rates"]["feedback_rate"] == 0.5
+    assert body["rates"]["negative_feedback_rate"] == 0.5
+    assert body["rates"]["pending_rejection_rate"] == 0.5
+    assert body["rates"]["feedback_to_pending_rate"] == 1.0
+    assert body["rates"]["retrieval_feedback_rollback_rate"] == 1.0
+    assert body["rates"]["stale_review_completion_rate"] == 0.0
+    assert reviewed_metrics.json()["rates"]["stale_review_completion_rate"] == 1.0
+
+
 # 验证批量审核报告缺失标识场景。
 @pytest.mark.anyio
 async def test_batch_review_reports_missing_ids(tmp_path, monkeypatch):

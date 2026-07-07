@@ -418,6 +418,29 @@ class CogDocClient:
             headers=self._headers,
         )
 
+    # 查询待审核计数。
+    def pending_knowledge_count(self, kb_id: str) -> httpx.Response:
+        return httpx.get(
+            self._url("/v1/knowledge/pending-count"),
+            params={"kb_id": kb_id},
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    # 查询反馈闭环指标。
+    def feedback_loop_metrics(
+        self,
+        kb_id: str,
+        answer_count: int | None = None,
+    ) -> httpx.Response:
+        params = {"kb_id": kb_id, "answer_count": answer_count}
+        return httpx.get(
+            self._url("/v1/feedback-loop-metrics"),
+            params={k: v for k, v in params.items() if v is not None},
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
     # 审核派生知识。
     def review_knowledge(
         self,

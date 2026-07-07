@@ -486,6 +486,24 @@ class ReviewQueueSummaryResponse(ApiModel):
     retrieval_feedback: dict[str, int] = Field(default_factory=dict)
 
 
+# 待审核计数响应。
+class KnowledgePendingCountResponse(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    kb_id: str
+    pending: int = 0
+    stale: int = 0
+    feedback_analysis_needs_review: int = 0
+    total: int = 0
+
+
+# 反馈闭环指标响应。
+class FeedbackLoopMetricsResponse(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    kb_id: str
+    counts: dict[str, int] = Field(default_factory=dict)
+    rates: dict[str, float | None] = Field(default_factory=dict)
+
+
 # 会话多轮历史，刷新后前端据此还原聊天记录。
 class SessionHistoryResponse(ApiModel):
     schema_version: Literal["v1"] = API_SCHEMA_VERSION

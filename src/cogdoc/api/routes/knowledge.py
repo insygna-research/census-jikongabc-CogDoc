@@ -5,6 +5,7 @@ from cogdoc.api.schemas import (
     DerivedKnowledge,
     ErrorCode,
     ErrorResponse,
+    FeedbackLoopMetricsResponse,
     KnowledgeBatchReviewRequest,
     KnowledgeBatchReviewResponse,
     KnowledgeConflictCandidate,
@@ -12,6 +13,7 @@ from cogdoc.api.schemas import (
     KnowledgeCreateResponse,
     KnowledgeListResponse,
     KnowledgeOrigin,
+    KnowledgePendingCountResponse,
     KnowledgeReviewRequest,
     KnowledgeReviseRequest,
     KnowledgeStatus,
@@ -25,6 +27,13 @@ _ERROR_RESPONSES = {
     400: {"model": ErrorResponse},
     404: {"model": ErrorResponse},
 }
+
+
+# 计算比率。
+def _rate(numerator: int, denominator: int | None) -> float | None:
+    if denominator is None or denominator <= 0:
+        return None
+    return round(numerator / denominator, 4)
 
 
 # 完成 错误响应 处理。
@@ -97,6 +106,83 @@ async def list_knowledge(
         created_before=created_before,
     )
     return KnowledgeListResponse(knowledge=[_public(row) for row in rows])
+
+
+# 查询待审核计数。
+@router.get("/knowledge/pending-count", response_model=KnowledgePendingCountResponse)
+async def pending_knowledge_count(
+    request: Request,
+    kb_id: str = Query(min_length=1),
+):
+    knowledge = request.app.state.knowledge_store.counts(kb_id=kb_id)
+    analysis = request.app.state.feedback_analysis_store.counts(kb_id=kb_id)
+    by_status = knowledge["by_status"]
+    pending = int(by_status.get(KnowledgeStatus.PENDING.value, 0))
+    stale = int(by_status.get(KnowledgeStatus.STALE.value, 0))
+    needs_review = int(analysis["needs_review"])
+    return KnowledgePendingCountResponse(
+        kb_id=kb_id,
+        pending=pending,
+        stale=stale,
+        feedback_analysis_needs_review=needs_review,
+        total=pending + stale + needs_review,
+    )
+
+
+# 查询反馈闭环指标。
+@router.get("/feedback-loop-metrics", response_model=FeedbackLoopMetricsResponse)
+async def feedback_loop_metrics(
+    request: Request,
+    kb_id: str = Query(min_length=1),
+    answer_count: int | None = Query(default=None, ge=0),
+):
+    feedback = request.app.state.feedback_store.counts(kb_id=kb_id)
+    knowledge = request.app.state.knowledge_store.counts(kb_id=kb_id)
+    stale_review = request.app.state.knowledge_store.stale_review_counts(kb_id=kb_id)
+    analysis = request.app.state.feedback_analysis_store.counts(kb_id=kb_id)
+    retrieval = request.app.state.retrieval_feedback_store.counts(kb_id=kb_id)
+    by_feedback = feedback["by_feedback"]
+    by_status = knowledge["by_status"]
+    by_action = analysis["by_action"]
+    feedback_total = int(feedback["total"])
+    negative_total = int(feedback["bad_cases"])
+    correction_total = int(by_feedback.get("correction", 0))
+    knowledge_total = int(knowledge["total"])
+    approved_total = int(by_status.get(KnowledgeStatus.APPROVED.value, 0))
+    rejected_total = int(by_status.get(KnowledgeStatus.REJECTED.value, 0))
+    pending_created = int(by_action.get("create_pending_knowledge", 0))
+    retrieval_total = int(retrieval["total"])
+    retrieval_disabled = int(retrieval["disabled"])
+    stale_total = int(stale_review["total"])
+    stale_reviewed = int(stale_review["reviewed"])
+    return FeedbackLoopMetricsResponse(
+        kb_id=kb_id,
+        counts={
+            "answer_total": answer_count or 0,
+            "feedback_total": feedback_total,
+            "negative_feedback_total": negative_total,
+            "correction_feedback_total": correction_total,
+            "knowledge_total": knowledge_total,
+            "approved_knowledge_total": approved_total,
+            "rejected_knowledge_total": rejected_total,
+            "pending_created_total": pending_created,
+            "retrieval_feedback_total": retrieval_total,
+            "retrieval_feedback_disabled": retrieval_disabled,
+            "stale_knowledge_total": stale_total,
+            "stale_knowledge_reviewed": stale_reviewed,
+        },
+        rates={
+            "feedback_rate": _rate(feedback_total, answer_count),
+            "negative_feedback_rate": _rate(negative_total, answer_count),
+            "pending_approval_rate": _rate(approved_total, knowledge_total),
+            "pending_rejection_rate": _rate(rejected_total, knowledge_total),
+            "feedback_to_pending_rate": _rate(pending_created, correction_total),
+            "retrieval_feedback_rollback_rate": _rate(
+                retrieval_disabled, retrieval_total
+            ),
+            "stale_review_completion_rate": _rate(stale_reviewed, stale_total),
+        },
+    )
 
 
 # 查询审核队列摘要。

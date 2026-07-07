@@ -999,6 +999,37 @@ def _summary_count(summary: Mapping, group: str, key: str) -> int:
     return int(value) if isinstance(value, int) else 0
 
 
+# 格式化比率。
+def _rate_label(value) -> str:
+    if isinstance(value, (int, float)):
+        return f"{value * 100:.0f}%"
+    return "-"
+
+
+# 统计当前会话回答数。
+def _answer_count_for(kb_id: str) -> int:
+    return sum(
+        1
+        for message in _messages_for(kb_id)
+        if message.get("role") == "assistant" and message.get("final")
+    )
+
+
+# 读取反馈闭环指标。
+def _feedback_loop_metrics(
+    client: CogDocClient, kb_id: str, answer_count: int
+) -> Mapping:
+    status_code, payload = _cached_api_value(
+        ("feedback-loop-metrics", client.base_url, kb_id, answer_count),
+        lambda: _response_status_payload(
+            client.feedback_loop_metrics(kb_id, answer_count=answer_count)
+        ),
+    )
+    if status_code != 200 or not isinstance(payload, Mapping):
+        return {}
+    return payload
+
+
 # 格式化页签计数。
 def _tab_label(label: str, count: int) -> str:
     return f"{label} ({count})" if count else label
@@ -1618,6 +1649,11 @@ def _knowledge_area(kb_id: str | None) -> None:
         summary = _review_queue_summary(client, kb_id)
     except Exception:
         summary = {}
+    answer_count = _answer_count_for(kb_id)
+    try:
+        loop_metrics = _feedback_loop_metrics(client, kb_id, answer_count)
+    except Exception:
+        loop_metrics = {}
     pending_count = _summary_count(summary, "knowledge", "pending")
     stale_count = _summary_count(summary, "knowledge", "stale")
     feedback_count = _summary_count(summary, "feedback_counts", "total")
@@ -1634,6 +1670,18 @@ def _knowledge_area(kb_id: str | None) -> None:
     metrics[3].metric("反馈分析", analysis_count, delta=needs_review_count)
     metrics[4].metric("检索调权", retrieval_count + retrieval_disabled_count)
     metrics[4].caption(f"启用 {retrieval_count} · 禁用 {retrieval_disabled_count}")
+    rates = loop_metrics.get("rates") if isinstance(loop_metrics, Mapping) else {}
+    if isinstance(rates, Mapping):
+        st.caption(
+            "审核通过率 "
+            f"{_rate_label(rates.get('pending_approval_rate'))} · "
+            "审核驳回率 "
+            f"{_rate_label(rates.get('pending_rejection_rate'))} · "
+            "反馈转知识 "
+            f"{_rate_label(rates.get('feedback_to_pending_rate'))} · "
+            "调权回滚 "
+            f"{_rate_label(rates.get('retrieval_feedback_rollback_rate'))}"
+        )
     (
         create_tab,
         pending_tab,
