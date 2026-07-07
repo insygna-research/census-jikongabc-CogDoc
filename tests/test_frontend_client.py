@@ -262,6 +262,14 @@ def test_knowledge_client_methods_call_expected_endpoints(monkeypatch):
         related_source_sha256="sha-new",
         related_chunk_ids=["c2"],
     )
+    client.revise_knowledge(
+        "K1",
+        text="新知识",
+        related_source="policy-v2.pdf",
+        related_chunk_ids=["c3"],
+        source_note="修订",
+        created_by="admin",
+    )
     client.batch_review_knowledge(["K1", "K2"], "batch-reject", note="重复")
 
     assert calls[0][0:2] == ("POST", "http://api/v1/knowledge")
@@ -283,8 +291,18 @@ def test_knowledge_client_methods_call_expected_endpoints(monkeypatch):
         "related_source_sha256": "sha-new",
         "related_chunk_ids": ["c2"],
     }
-    assert calls[3][0:2] == ("POST", "http://api/v1/knowledge/batch-reject")
-    assert calls[3][2]["json"] == {"knowledge_ids": ["K1", "K2"], "note": "重复"}
+    assert calls[3][0:2] == ("POST", "http://api/v1/knowledge/K1/revise")
+    assert calls[3][2]["json"] == {
+        "text": "新知识",
+        "related_source": "policy-v2.pdf",
+        "related_chunk_ids": ["c3"],
+        "source_note": "修订",
+        "certainty": "medium",
+        "created_by": "admin",
+        "enable_immediately": False,
+    }
+    assert calls[4][0:2] == ("POST", "http://api/v1/knowledge/batch-reject")
+    assert calls[4][2]["json"] == {"knowledge_ids": ["K1", "K2"], "note": "重复"}
 
 
 # 验证检索调权客户端方法调用稳定端点场景。

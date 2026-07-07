@@ -1122,6 +1122,102 @@ def _render_create_knowledge(client: CogDocClient, kb_id: str) -> None:
         st.error(_response_error(resp, "新增知识失败"))
 
 
+# 渲染知识修订表单。
+def _render_knowledge_revision_form(
+    client: CogDocClient, kb_id: str, item: Mapping, suffix: str
+) -> None:
+    knowledge_id = str(item.get("knowledge_id") or "")
+    if not knowledge_id or item.get("status") not in {"approved", "stale"}:
+        return
+    active_key = f"revise-active-{suffix}-{knowledge_id}"
+    if not st.session_state.get(active_key):
+        if st.button("修订版本", key=f"show-revise-{suffix}-{knowledge_id}"):
+            st.session_state[active_key] = True
+            st.rerun()
+        return
+    if st.button("收起修订", key=f"hide-revise-{suffix}-{knowledge_id}"):
+        st.session_state[active_key] = False
+        st.rerun()
+    with st.form(f"revise-knowledge-{suffix}-{knowledge_id}"):
+        text = st.text_area(
+            "修订内容",
+            value=str(item.get("text") or ""),
+            height=120,
+            key=f"revise-text-{suffix}-{knowledge_id}",
+        )
+        fields = st.columns([1, 1, 1])
+        related_document_id = fields[0].text_input(
+            "文档标识",
+            value=str(item.get("related_document_id") or ""),
+            key=f"revise-doc-{suffix}-{knowledge_id}",
+        )
+        related_source = fields[1].text_input(
+            "关联文档",
+            value=str(item.get("related_source") or ""),
+            key=f"revise-source-{suffix}-{knowledge_id}",
+        )
+        related_source_sha256 = fields[2].text_input(
+            "文档哈希",
+            value=str(item.get("related_source_sha256") or ""),
+            key=f"revise-sha-{suffix}-{knowledge_id}",
+        )
+        chunk_ids_text = st.text_input(
+            "关联分块",
+            value=", ".join(str(x) for x in item.get("related_chunk_ids") or []),
+            key=f"revise-chunks-{suffix}-{knowledge_id}",
+        )
+        source_note = st.text_area(
+            "修订说明",
+            value=str(item.get("source_note") or ""),
+            height=68,
+            key=f"revise-note-{suffix}-{knowledge_id}",
+        )
+        controls = st.columns([1, 1, 2])
+        certainty_options = ["medium", "high", "low"]
+        certainty_value = str(item.get("certainty") or "medium")
+        if certainty_value not in certainty_options:
+            certainty_value = "medium"
+        certainty = controls[0].selectbox(
+            "可信度",
+            certainty_options,
+            index=certainty_options.index(certainty_value),
+            format_func=lambda value: {"high": "高", "medium": "中", "low": "低"}[
+                value
+            ],
+            key=f"revise-certainty-{suffix}-{knowledge_id}",
+        )
+        enable_immediately = controls[1].checkbox(
+            "立即启用",
+            value=False,
+            key=f"revise-enable-{suffix}-{knowledge_id}",
+        )
+        submitted = controls[2].form_submit_button(
+            "创建修订版本", use_container_width=True
+        )
+    if not submitted:
+        return
+    if not text.strip():
+        st.warning("请输入修订内容。")
+        return
+    chunk_ids = [part.strip() for part in chunk_ids_text.split(",") if part.strip()]
+    _handle_knowledge_response(
+        client.revise_knowledge(
+            knowledge_id,
+            text=text.strip(),
+            related_document_id=related_document_id.strip() or None,
+            related_source=related_source.strip() or None,
+            related_source_sha256=related_source_sha256.strip() or None,
+            related_chunk_ids=chunk_ids,
+            source_note=source_note.strip() or None,
+            certainty=certainty,
+            created_by="frontend",
+            enable_immediately=enable_immediately,
+        ),
+        client,
+        kb_id,
+    )
+
+
 # 渲染单条派生知识。
 def _render_knowledge_item(
     client: CogDocClient, kb_id: str, item: Mapping, suffix: str
@@ -1140,6 +1236,7 @@ def _render_knowledge_item(
         meta[3].caption(f"创建时间: {item.get('created_at') or '-'}")
         if item.get("source_note"):
             st.caption(str(item["source_note"]))
+        _render_knowledge_revision_form(client, kb_id, item, suffix)
         if item.get("status") == "stale":
             with st.form(f"stale-rebind-{knowledge_id}"):
                 stale_cols = st.columns([1, 1, 1, 1])

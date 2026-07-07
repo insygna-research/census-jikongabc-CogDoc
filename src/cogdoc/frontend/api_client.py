@@ -445,6 +445,41 @@ class CogDocClient:
             headers=self._headers,
         )
 
+    # 创建知识修订版本。
+    def revise_knowledge(
+        self,
+        knowledge_id: str,
+        *,
+        text: str,
+        related_document_id: str | None = None,
+        related_source: str | None = None,
+        related_source_sha256: str | None = None,
+        related_chunk_ids: list[str] | None = None,
+        source_note: str | None = None,
+        certainty: str = "medium",
+        created_from_trace_id: str | None = None,
+        created_by: str | None = None,
+        enable_immediately: bool = False,
+    ) -> httpx.Response:
+        payload = {
+            "text": text,
+            "related_document_id": related_document_id,
+            "related_source": related_source,
+            "related_source_sha256": related_source_sha256,
+            "related_chunk_ids": related_chunk_ids,
+            "source_note": source_note,
+            "certainty": certainty,
+            "created_from_trace_id": created_from_trace_id,
+            "created_by": created_by,
+            "enable_immediately": enable_immediately,
+        }
+        return httpx.post(
+            self._url(f"/v1/knowledge/{knowledge_id}/revise"),
+            json={k: v for k, v in payload.items() if v is not None},
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
     # 批量审核派生知识。
     def batch_review_knowledge(
         self,

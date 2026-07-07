@@ -15,6 +15,7 @@ from cogdoc.config.settings import get_settings
 
 ACTIVE_STATUSES = {"pending", "approved", "stale"}
 VALID_STATUSES = ACTIVE_STATUSES | {"rejected", "archived"}
+REVISION_SOURCE_STATUSES = {"approved", "stale"}
 ALLOWED_BINDING_UPDATE_FIELDS = {
     "related_document_id",
     "related_source",
@@ -90,6 +91,71 @@ class DerivedKnowledgeStore:
             }
             self._append(entry)
             return entry, False
+
+    # 创建修订版本，不覆盖原知识。
+    def revise(
+        self, knowledge_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            raise ValueError("text must not be blank")
+        with self._lock:
+            current = self._latest().get(knowledge_id)
+            if current is None:
+                return None
+            if current.get("status") not in REVISION_SOURCE_STATUSES:
+                raise ValueError(
+                    f"knowledge with status {current.get('status')} cannot be revised"
+                )
+            normalized_text = normalize_knowledge_text(text)
+            normalized_hash = normalized_knowledge_hash(text)
+            existing = self._find_duplicate(str(current["kb_id"]), normalized_hash)
+            if existing is not None:
+                raise ValueError(
+                    f"duplicate active knowledge exists: {existing['knowledge_id']}"
+                )
+            now = _now_iso()
+            entry = {
+                "knowledge_id": f"K{uuid4().hex[:12]}",
+                "kb_id": current["kb_id"],
+                "text": text,
+                "normalized_text": normalized_text,
+                "normalized_hash": normalized_hash,
+                "version": int(current.get("version") or 1) + 1,
+                "previous_version_id": current["knowledge_id"],
+                "conflict_group_id": current.get("conflict_group_id"),
+                "related_document_id": payload.get(
+                    "related_document_id", current.get("related_document_id")
+                ),
+                "related_source": payload.get(
+                    "related_source", current.get("related_source")
+                ),
+                "related_source_sha256": payload.get(
+                    "related_source_sha256", current.get("related_source_sha256")
+                ),
+                "related_chunk_ids": list(
+                    payload.get("related_chunk_ids", current.get("related_chunk_ids"))
+                    or []
+                ),
+                "source_note": payload.get("source_note", current.get("source_note")),
+                "certainty": payload.get("certainty") or current.get("certainty"),
+                "status": payload.get("status") or "pending",
+                "origin": current.get("origin") or "manual_entry",
+                "created_from_trace_id": payload.get("created_from_trace_id"),
+                "created_by": payload.get("created_by"),
+                "created_at": now,
+                "updated_at": now,
+                "archived_at": None,
+                "reviewed_by": None,
+                "reviewed_at": None,
+                "review_note": payload.get("review_note"),
+            }
+            self._append(entry)
+            if entry["status"] == "approved":
+                self._archive_previous_version(
+                    entry, payload.get("created_by"), entry["knowledge_id"]
+                )
+            return entry
 
     # 查询最新知识快照。
     def list(
@@ -193,6 +259,8 @@ class DerivedKnowledgeStore:
             if status == "archived":
                 updated["archived_at"] = now
             self._append(updated)
+            if status == "approved" and current.get("previous_version_id"):
+                self._archive_previous_version(current, actor, knowledge_id)
             return updated
 
     # 批量修改审核状态。
@@ -244,6 +312,28 @@ class DerivedKnowledgeStore:
             ):
                 return row
         return None
+
+    # 新版本通过后归档旧版本。
+    def _archive_previous_version(
+        self, current: dict[str, Any], actor: str | None, replacement_id: str
+    ) -> None:
+        previous_id = str(current.get("previous_version_id") or "")
+        if not previous_id:
+            return
+        previous = self._latest().get(previous_id)
+        if previous is None or previous.get("status") == "archived":
+            return
+        now = _now_iso()
+        archived = {
+            **previous,
+            "status": "archived",
+            "updated_at": now,
+            "archived_at": now,
+            "reviewed_by": actor,
+            "reviewed_at": now,
+            "review_note": f"由新版本 {replacement_id} 替代",
+        }
+        self._append(archived)
 
     # 读取最新快照。
     def _latest(self) -> dict[str, dict[str, Any]]:

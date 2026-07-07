@@ -382,6 +382,30 @@ class KnowledgeReviewRequest(ApiModel):
     related_chunk_ids: list[str] | None = None
 
 
+# 知识修订请求体。
+class KnowledgeReviseRequest(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    text: str = Field(min_length=1)
+    related_document_id: str | None = None
+    related_source: str | None = None
+    related_source_sha256: str | None = None
+    related_chunk_ids: list[str] | None = None
+    source_note: str | None = None
+    certainty: KnowledgeCertainty = KnowledgeCertainty.MEDIUM
+    created_from_trace_id: str | None = None
+    created_by: str | None = None
+    enable_immediately: bool = False
+
+    # 清理修订正文。
+    @field_validator("text")
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be blank")
+        return stripped
+
+
 # 批量审核请求体。
 class KnowledgeBatchReviewRequest(ApiModel):
     schema_version: Literal["v1"] = API_SCHEMA_VERSION

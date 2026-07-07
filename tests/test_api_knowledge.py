@@ -6,6 +6,7 @@ from httpx import ASGITransport, AsyncClient
 from cogdoc.api.app import create_app
 from cogdoc.api.derived_knowledge_store import DerivedKnowledgeStore
 from cogdoc.api.feedback_analysis_store import FeedbackAnalysisStore
+from cogdoc.api.feedback_store import FeedbackStore
 from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
 
 
@@ -24,11 +25,16 @@ def _make_app(tmp_path, monkeypatch):
     feedback_analysis_store = FeedbackAnalysisStore(
         path=str(tmp_path / "feedback_analysis.jsonl")
     )
+    feedback_store = FeedbackStore(
+        feedback_path=str(tmp_path / "feedback.jsonl"),
+        bad_cases_path=str(tmp_path / "bad_cases.jsonl"),
+    )
     retrieval_feedback_store = RetrievalFeedbackStore(
         path=str(tmp_path / "retrieval_feedback.jsonl")
     )
     return create_app(
         knowledge_store=store,
+        feedback_store=feedback_store,
         feedback_analysis_store=feedback_analysis_store,
         retrieval_feedback_store=retrieval_feedback_store,
     )
@@ -206,6 +212,130 @@ def test_knowledge_binding_updates_are_allowlisted(tmp_path):
 
     assert updated["status"] == "approved"
     assert updated["related_source_sha256"] == "sha-new"
+
+
+# 验证知识修订创建新版本且通过后归档旧版本。
+@pytest.mark.anyio
+async def test_knowledge_revision_supersedes_previous_version(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+
+    async with _client(app) as client:
+        created = await client.post(
+            "/v1/knowledge",
+            json={
+                "kb_id": "kb",
+                "text": "旧规则。",
+                "related_source": "policy.pdf",
+                "enable_immediately": True,
+            },
+        )
+        previous = created.json()["knowledge"]
+        revised = await client.post(
+            f"/v1/knowledge/{previous['knowledge_id']}/revise",
+            json={
+                "text": "新规则。",
+                "related_source": "policy-v2.pdf",
+                "related_chunk_ids": ["c2"],
+                "source_note": "人工修订",
+                "created_by": "admin",
+            },
+        )
+        revision = revised.json()["knowledge"]
+        approved = await client.post(
+            f"/v1/knowledge/{revision['knowledge_id']}/approve",
+            json={"actor": "admin", "note": "新版确认"},
+        )
+        archived = await client.get(
+            "/v1/knowledge", params={"kb_id": "kb", "status": "archived"}
+        )
+
+    assert created.status_code == 201
+    assert revised.status_code == 201
+    assert revision["version"] == 2
+    assert revision["previous_version_id"] == previous["knowledge_id"]
+    assert revision["status"] == "pending"
+    assert revision["related_source"] == "policy-v2.pdf"
+    assert revision["related_chunk_ids"] == ["c2"]
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "approved"
+    archived_rows = archived.json()["knowledge"]
+    assert [row["knowledge_id"] for row in archived_rows] == [previous["knowledge_id"]]
+    assert archived_rows[0]["review_note"].startswith("由新版本 ")
+
+
+# 验证立即启用修订版本会归档旧版本。
+@pytest.mark.anyio
+async def test_knowledge_revision_enable_immediately_archives_previous(
+    tmp_path, monkeypatch
+):
+    app = _make_app(tmp_path, monkeypatch)
+
+    async with _client(app) as client:
+        created = await client.post(
+            "/v1/knowledge",
+            json={"kb_id": "kb", "text": "旧规则。", "enable_immediately": True},
+        )
+        previous = created.json()["knowledge"]
+        revised = await client.post(
+            f"/v1/knowledge/{previous['knowledge_id']}/revise",
+            json={
+                "text": "新规则。",
+                "enable_immediately": True,
+                "created_by": "admin",
+            },
+        )
+        archived = await client.get(
+            "/v1/knowledge", params={"kb_id": "kb", "status": "archived"}
+        )
+
+    assert revised.status_code == 201
+    assert revised.json()["knowledge"]["status"] == "approved"
+    archived_rows = archived.json()["knowledge"]
+    assert [row["knowledge_id"] for row in archived_rows] == [previous["knowledge_id"]]
+
+
+# 验证待审核和驳回知识不能修订。
+@pytest.mark.anyio
+async def test_knowledge_revision_rejects_non_reviewed_statuses(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+
+    async with _client(app) as client:
+        pending = await client.post(
+            "/v1/knowledge", json={"kb_id": "kb", "text": "待审核知识。"}
+        )
+        pending_id = pending.json()["knowledge"]["knowledge_id"]
+        pending_revision = await client.post(
+            f"/v1/knowledge/{pending_id}/revise", json={"text": "新知识。"}
+        )
+        await client.post(f"/v1/knowledge/{pending_id}/reject", json={})
+        rejected_revision = await client.post(
+            f"/v1/knowledge/{pending_id}/revise", json={"text": "新知识。"}
+        )
+
+    assert pending_revision.status_code == 400
+    assert rejected_revision.status_code == 400
+
+
+# 验证知识修订拒绝活跃重复文本。
+@pytest.mark.anyio
+async def test_knowledge_revision_rejects_duplicate_active_text(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+
+    async with _client(app) as client:
+        first = await client.post(
+            "/v1/knowledge",
+            json={"kb_id": "kb", "text": "第一条。", "enable_immediately": True},
+        )
+        await client.post(
+            "/v1/knowledge",
+            json={"kb_id": "kb", "text": "第二条。", "enable_immediately": True},
+        )
+        knowledge_id = first.json()["knowledge"]["knowledge_id"]
+        duplicate = await client.post(
+            f"/v1/knowledge/{knowledge_id}/revise", json={"text": "第二条。"}
+        )
+
+    assert duplicate.status_code == 400
 
 
 # 验证审核队列摘要聚合多类待处理事项场景。

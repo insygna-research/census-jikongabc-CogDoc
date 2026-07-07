@@ -12,6 +12,7 @@ from cogdoc.api.schemas import (
     KnowledgeListResponse,
     KnowledgeOrigin,
     KnowledgeReviewRequest,
+    KnowledgeReviseRequest,
     KnowledgeStatus,
     ReviewQueueSummaryResponse,
     build_error_response,
@@ -175,6 +176,31 @@ async def archive_knowledge(
     knowledge_id: str, body: KnowledgeReviewRequest, request: Request
 ):
     return _set_status(request, knowledge_id, KnowledgeStatus.ARCHIVED.value, body)
+
+
+# 创建知识修订版本。
+@router.post(
+    "/knowledge/{knowledge_id}/revise",
+    status_code=201,
+    response_model=KnowledgeCreateResponse,
+    responses=_ERROR_RESPONSES,
+)
+async def revise_knowledge(
+    knowledge_id: str, body: KnowledgeReviseRequest, request: Request
+):
+    payload = body.model_dump(exclude_none=True)
+    payload["status"] = (
+        KnowledgeStatus.APPROVED.value
+        if body.enable_immediately
+        else KnowledgeStatus.PENDING.value
+    )
+    try:
+        row = request.app.state.knowledge_store.revise(knowledge_id, payload)
+    except ValueError as exc:
+        return _error(ErrorCode.BAD_REQUEST, str(exc), 400)
+    if row is None:
+        return _error(ErrorCode.KNOWLEDGE_NOT_FOUND, f"知识不存在: {knowledge_id}", 404)
+    return KnowledgeCreateResponse(knowledge=_public(row), deduplicated=False)
 
 
 # 批量审核。
