@@ -288,6 +288,25 @@ class CogDocClient:
             headers=self._headers,
         )
 
+    # 查询反馈理解结果。
+    def list_feedback_analysis(
+        self,
+        kb_id: str,
+        recommended_action: str | None = None,
+        limit: int = 100,
+    ) -> httpx.Response:
+        params = {
+            "kb_id": kb_id,
+            "recommended_action": recommended_action,
+            "limit": limit,
+        }
+        return httpx.get(
+            self._url("/v1/feedback-analysis"),
+            params={k: v for k, v in params.items() if v is not None},
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
     # 新增派生知识。
     def create_knowledge(
         self,

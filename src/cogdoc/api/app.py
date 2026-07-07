@@ -9,6 +9,7 @@ from cogdoc.api.access_control import (
     build_rate_limiter,
 )
 from cogdoc.api.derived_knowledge_store import DerivedKnowledgeStore
+from cogdoc.api.feedback_analysis_store import FeedbackAnalysisStore
 from cogdoc.api.feedback_store import FeedbackStore
 from cogdoc.api.ingest import IndexJobManager, KnowledgeBaseRegistry
 from cogdoc.api.metrics import Metrics, MetricsMiddleware
@@ -66,6 +67,7 @@ def create_app(
     kb_registry: KnowledgeBaseRegistry | None = None,
     index_jobs: IndexJobManager | None = None,
     feedback_store: FeedbackStore | None = None,
+    feedback_analysis_store: FeedbackAnalysisStore | None = None,
     knowledge_store: DerivedKnowledgeStore | None = None,
     retrieval_feedback_store: RetrievalFeedbackStore | None = None,
     api_keys: set[str] | None = None,
@@ -204,6 +206,9 @@ def create_app(
         kb_exists=app.state.kb_registry.exists
     )
     app.state.feedback_store = feedback_store or FeedbackStore()
+    app.state.feedback_analysis_store = (
+        feedback_analysis_store or FeedbackAnalysisStore()
+    )
     app.state.knowledge_store = knowledge_store or DerivedKnowledgeStore()
     app.state.retrieval_feedback_store = (
         retrieval_feedback_store or RetrievalFeedbackStore()

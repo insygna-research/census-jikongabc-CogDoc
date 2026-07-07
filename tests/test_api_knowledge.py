@@ -102,6 +102,32 @@ async def test_exact_duplicate_returns_existing_knowledge(tmp_path, monkeypatch)
         )
 
 
+# 验证保存回答来源可以创建待审核知识场景。
+@pytest.mark.anyio
+async def test_saved_answer_origin_creates_pending_knowledge(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+
+    async with _client(app) as client:
+        created = await client.post(
+            "/v1/knowledge",
+            json={
+                "kb_id": "kb",
+                "text": "系统回答中的高价值结论。",
+                "origin": "saved_answer",
+                "created_from_trace_id": "trace-1",
+                "related_chunk_ids": ["c1", "c2"],
+                "source_note": "保存自问答",
+            },
+        )
+
+        assert created.status_code == 201
+        row = created.json()["knowledge"]
+        assert row["origin"] == "saved_answer"
+        assert row["status"] == "pending"
+        assert row["created_from_trace_id"] == "trace-1"
+        assert row["related_chunk_ids"] == ["c1", "c2"]
+
+
 # 验证批量审核报告缺失标识场景。
 @pytest.mark.anyio
 async def test_batch_review_reports_missing_ids(tmp_path, monkeypatch):

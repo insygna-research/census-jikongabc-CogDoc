@@ -54,7 +54,7 @@ class ErrorCode(str, Enum):
     KNOWLEDGE_NOT_FOUND = "KNOWLEDGE_NOT_FOUND"
 
 
-# 带 query/doc_id 的请求基类。
+# 带查询和知识库标识的请求基类。
 class QueryDocRequest(ApiModel):
     schema_version: Literal["v1"] = API_SCHEMA_VERSION
     query: str = Field(min_length=1)
@@ -124,20 +124,20 @@ class ChatResponse(ApiModel):
     is_valid: bool
 
 
-# 独立任务接口请求体，显式指定 summary/compare 由路由层固定。
+# 独立任务接口请求体，摘要和对比任务由路由层固定。
 class TaskRequest(QueryDocRequest):
     session_id: str | None = None
     is_local: bool = False
 
 
-# 检索接口请求体，不调用 LLM。
+# 检索接口请求体，不调用模型。
 class RetrieveRequest(QueryDocRequest):
     top_k: int = Field(default=8, ge=1, le=50)
     rerank: bool = False
     rerank_top_n: int | None = Field(default=None, ge=1, le=50)
 
 
-# 检索命中项，供前端 evidence 面板和调试面板直接消费。
+# 检索命中项，供前端证据面板和调试面板直接消费。
 class RetrieveHit(Evidence):
     rank: int
     retrieval: dict[str, Any] = Field(default_factory=dict)
@@ -212,7 +212,7 @@ class SourceListResponse(ApiModel):
     sources: list[str] = Field(default_factory=list)
 
 
-# 文档 chunk 预览，不返回完整正文。
+# 文档分块预览，不返回完整正文。
 class ChunkPreview(ApiModel):
     chunk_id: str = ""
     chunk_index: int | None = None
@@ -224,7 +224,7 @@ class ChunkPreview(ApiModel):
     context_preview: str = ""
 
 
-# 单个来源文件的 chunk 预览响应。
+# 单个来源文件的分块预览响应。
 class SourceChunksResponse(ApiModel):
     schema_version: Literal["v1"] = API_SCHEMA_VERSION
     kb_id: str
@@ -306,6 +306,9 @@ class FeedbackResponse(ApiModel):
     feedback_id: str
     status: str = "recorded"
     is_bad_case: bool
+    feedback_analysis_id: str | None = None
+    feedback_analysis_action: str | None = None
+    feedback_analysis_confidence: float | None = None
     knowledge_id: str | None = None
     knowledge_status: str | None = None
     knowledge_deduplicated: bool = False

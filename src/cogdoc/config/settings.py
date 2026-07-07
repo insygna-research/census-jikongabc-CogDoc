@@ -204,6 +204,11 @@ class Settings(BaseSettings):
         # 点踩和纠错自动归集到此，供离线质量评测使用。
         return str(self.data_dir / "feedback" / "bad_cases.jsonl")
 
+    # 完成 反馈分析路径 处理。
+    @property
+    def feedback_analysis_path(self) -> str:
+        return str(self.data_dir / "feedback" / "feedback_analysis.jsonl")
+
     # 完成 派生知识路径 处理。
     @property
     def derived_knowledge_path(self) -> str:

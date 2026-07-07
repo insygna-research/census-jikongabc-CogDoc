@@ -215,6 +215,8 @@ def test_knowledge_client_methods_call_expected_endpoints(monkeypatch):
         related_chunk_ids=["c1"],
         source_note="人工确认",
         certainty="high",
+        origin="saved_answer",
+        created_from_trace_id="trace-1",
     )
     client.list_knowledge("kb", status="pending", origin="manual_entry")
     client.review_knowledge("K1", "approve", actor="admin")
@@ -223,6 +225,8 @@ def test_knowledge_client_methods_call_expected_endpoints(monkeypatch):
     assert calls[0][0:2] == ("POST", "http://api/v1/knowledge")
     assert calls[0][2]["headers"] == {"Authorization": "Bearer secret"}
     assert calls[0][2]["json"]["related_chunk_ids"] == ["c1"]
+    assert calls[0][2]["json"]["origin"] == "saved_answer"
+    assert calls[0][2]["json"]["created_from_trace_id"] == "trace-1"
     assert calls[1][0:2] == ("GET", "http://api/v1/knowledge")
     assert calls[1][2]["params"] == {
         "kb_id": "kb",
@@ -274,3 +278,27 @@ def test_retrieval_feedback_client_methods_call_expected_endpoints(monkeypatch):
         "http://api/v1/retrieval-feedback/rf1/enable",
     )
     assert "json" not in calls[2][2]
+
+
+# 验证反馈分析客户端方法调用稳定端点场景。
+def test_feedback_analysis_client_method_calls_expected_endpoint(monkeypatch):
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return httpx.Response(200, json={"feedback_analysis": []})
+
+    monkeypatch.setattr("cogdoc.frontend.api_client.httpx.get", fake_get)
+
+    response = CogDocClient("http://api", api_key="secret").list_feedback_analysis(
+        "kb", recommended_action="create_pending_knowledge", limit=25
+    )
+
+    assert response.status_code == 200
+    assert calls[0][0] == "http://api/v1/feedback-analysis"
+    assert calls[0][1]["headers"] == {"Authorization": "Bearer secret"}
+    assert calls[0][1]["params"] == {
+        "kb_id": "kb",
+        "recommended_action": "create_pending_knowledge",
+        "limit": 25,
+    }

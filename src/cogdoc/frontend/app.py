@@ -323,6 +323,45 @@ def _submit_feedback(
     )
 
 
+# 保存回答为派生知识。
+def _save_answer_as_knowledge(
+    final: Mapping,
+    query: str,
+    *,
+    source_note: str | None = None,
+    certainty: str = "medium",
+    enable_immediately: bool = False,
+) -> None:
+    kb_id = st.session_state.kb_id
+    answer = str(final.get("answer") or "").strip()
+    if not kb_id:
+        st.toast("先选择知识库")
+        return
+    if not answer:
+        st.toast("当前回答为空，无法保存")
+        return
+    note = source_note or (f"保存自问答：{query}" if query else "保存自问答")
+    client = _client()
+    resp = client.create_knowledge(
+        kb_id=kb_id,
+        text=answer,
+        related_source=_first_citation_source(final),
+        related_source_sha256=_first_evidence_source_sha(final),
+        related_chunk_ids=_citation_chunk_ids(final),
+        source_note=note,
+        certainty=certainty,
+        origin="saved_answer",
+        created_from_trace_id=str(final.get("trace_id") or "") or None,
+        created_by="frontend",
+        enable_immediately=enable_immediately,
+    )
+    if resp.status_code in (200, 201):
+        _clear_knowledge_cache(client, kb_id)
+        st.toast("答案已保存为知识")
+    else:
+        st.toast(f"保存失败: {resp.status_code}")
+
+
 # 读取首个引用来源。
 def _first_citation_source(final: Mapping) -> str | None:
     for item in final.get("citations") or []:
@@ -714,6 +753,32 @@ def _render_evidence(final: dict, key: str, query: str = "") -> None:
         _send_feedback(final, query, "thumbs_up")
     if fb[1].button("👎", key=f"down-{key}"):
         _send_feedback(final, query, "thumbs_down")
+    with st.expander("保存答案"):
+        with st.form(f"save-answer-{key}", clear_on_submit=True):
+            save_note = st.text_area("来源说明", key=f"save-note-{key}", height=80)
+            save_cols = st.columns([1, 1])
+            save_certainty = save_cols[0].selectbox(
+                "可信度",
+                ["medium", "high", "low"],
+                format_func=lambda value: {
+                    "high": "高",
+                    "medium": "中",
+                    "low": "低",
+                }[value],
+                key=f"save-answer-certainty-{key}",
+            )
+            enable_saved = save_cols[1].checkbox(
+                "立即启用", key=f"enable-saved-answer-{key}", value=False
+            )
+            save_submitted = st.form_submit_button("保存为知识")
+        if save_submitted:
+            _save_answer_as_knowledge(
+                final,
+                query,
+                source_note=save_note.strip() or None,
+                certainty=save_certainty,
+                enable_immediately=enable_saved,
+            )
     with st.expander("纠错"):
         with st.form(f"correction-{key}", clear_on_submit=True):
             comment = st.text_area("备注", key=f"comment-{key}", height=80)
@@ -904,6 +969,28 @@ def _retrieval_feedback_rows(
             format_api_error(payload, status_code, "读取检索调权失败")
         )
     rows = payload.get("retrieval_feedback", []) if isinstance(payload, Mapping) else []
+    return [row for row in rows if isinstance(row, Mapping)]
+
+
+# 读取反馈理解结果列表。
+def _feedback_analysis_rows(
+    client: CogDocClient,
+    kb_id: str,
+    recommended_action: str | None,
+) -> list[Mapping]:
+    status_code, payload = _cached_api_value(
+        ("feedback-analysis", client.base_url, kb_id, recommended_action),
+        lambda: _response_status_payload(
+            client.list_feedback_analysis(
+                kb_id, recommended_action=recommended_action, limit=200
+            )
+        ),
+    )
+    if status_code != 200:
+        raise CogDocAPIError(
+            format_api_error(payload, status_code, "读取反馈分析失败")
+        )
+    rows = payload.get("feedback_analysis", []) if isinstance(payload, Mapping) else []
     return [row for row in rows if isinstance(row, Mapping)]
 
 
@@ -1115,6 +1202,56 @@ def _render_retrieval_feedback_area(client: CogDocClient, kb_id: str) -> None:
         _render_retrieval_feedback_item(client, kb_id, item)
 
 
+# 渲染单条反馈理解结果。
+def _render_feedback_analysis_item(item: Mapping) -> None:
+    target = item.get("target") if isinstance(item.get("target"), Mapping) else {}
+    feedback_type = item.get("feedback_type") or "-"
+    action = item.get("recommended_action") or "-"
+    raw_confidence = item.get("confidence")
+    confidence = (
+        f"{raw_confidence:.2f}" if isinstance(raw_confidence, (int, float)) else "-"
+    )
+    title = f"{feedback_type} · {action} · {confidence}"
+    with st.expander(title):
+        if item.get("extracted_claim"):
+            st.write(item["extracted_claim"])
+        st.caption(f"query: {item.get('query') or '-'}")
+        meta = st.columns(4)
+        meta[0].caption(f"情绪: {item.get('sentiment') or '-'}")
+        meta[1].caption(f"权重: {item.get('weight_delta') or 0}")
+        meta[2].caption(f"需复核: {'是' if item.get('needs_review') else '否'}")
+        meta[3].caption(f"创建时间: {item.get('created_at') or '-'}")
+        if target:
+            st.caption(f"chunks: {', '.join(target.get('chunk_ids') or []) or '-'}")
+            st.caption(f"sources: {', '.join(target.get('sources') or []) or '-'}")
+
+
+# 渲染反馈理解结果列表。
+def _render_feedback_analysis_area(client: CogDocClient, kb_id: str) -> None:
+    action_options = {
+        "全部": None,
+        "生成知识": "create_pending_knowledge",
+        "调权": "adjust_retrieval",
+        "仅记录": "record_only",
+    }
+    selected = st.radio(
+        "建议",
+        list(action_options),
+        horizontal=True,
+        key=f"feedback-analysis-action-{kb_id}",
+    )
+    try:
+        rows = _feedback_analysis_rows(client, kb_id, action_options[selected])
+    except Exception as exc:
+        st.warning(str(exc))
+        return
+    if not rows:
+        st.info("暂无反馈分析。")
+        return
+    for item in rows:
+        _render_feedback_analysis_item(item)
+
+
 # 渲染派生知识页。
 def _knowledge_area(kb_id: str | None) -> None:
     st.subheader("派生知识")
@@ -1122,8 +1259,8 @@ def _knowledge_area(kb_id: str | None) -> None:
         st.info("先选择知识库。")
         return
     client = _client()
-    create_tab, pending_tab, stale_tab, retrieval_tab = st.tabs(
-        ["新增", "待审核", "过期", "调权"]
+    create_tab, pending_tab, stale_tab, retrieval_tab, analysis_tab = st.tabs(
+        ["新增", "待审核", "过期", "调权", "反馈分析"]
     )
     with create_tab:
         _render_create_knowledge(client, kb_id)
@@ -1133,6 +1270,8 @@ def _knowledge_area(kb_id: str | None) -> None:
         _render_knowledge_review_list(client, kb_id, "stale", "过期")
     with retrieval_tab:
         _render_retrieval_feedback_area(client, kb_id)
+    with analysis_tab:
+        _render_feedback_analysis_area(client, kb_id)
 
 
 # 检索调试后台线程。

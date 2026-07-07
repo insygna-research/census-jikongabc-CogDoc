@@ -3,6 +3,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from cogdoc.api.app import create_app
 from cogdoc.api.derived_knowledge_store import DerivedKnowledgeStore
+from cogdoc.api.feedback_analysis_store import FeedbackAnalysisStore
 from cogdoc.api.feedback_store import FeedbackStore
 from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
 
@@ -23,12 +24,16 @@ def _make_app(tmp_path, monkeypatch):
         bad_cases_path=str(tmp_path / "bad_cases.jsonl"),
     )
     knowledge_store = DerivedKnowledgeStore(path=str(tmp_path / "knowledge.jsonl"))
+    feedback_analysis_store = FeedbackAnalysisStore(
+        path=str(tmp_path / "feedback_analysis.jsonl")
+    )
     retrieval_feedback_store = RetrievalFeedbackStore(
         path=str(tmp_path / "retrieval_feedback.jsonl")
     )
     return (
         create_app(
             feedback_store=store,
+            feedback_analysis_store=feedback_analysis_store,
             knowledge_store=knowledge_store,
             retrieval_feedback_store=retrieval_feedback_store,
         ),
@@ -135,6 +140,9 @@ async def test_thumbs_down_lands_in_bad_cases(tmp_path, monkeypatch):
     assert len(retrieval_feedback) == 1
     assert retrieval_feedback[0]["chunk_id"] == "c1"
     assert retrieval_feedback[0]["weight_delta"] < 0
+    feedback_analysis = _read_jsonl(root / "feedback_analysis.jsonl")
+    assert feedback_analysis[0]["recommended_action"] == "adjust_retrieval"
+    assert feedback_analysis[0]["target"]["chunk_ids"] == ["c1"]
 
 
 # 验证纠错样本草稿优先使用纠正答案场景。
@@ -160,6 +168,9 @@ async def test_correction_uses_correction_text_in_eval_draft(tmp_path, monkeypat
     assert draft["answer"] == "纠正后的答案"
     assert draft["correction"] == "纠正后的答案"
     assert draft["comment"] == "引用不支撑结论"
+    knowledge = _read_jsonl(root / "knowledge.jsonl")[0]
+    assert knowledge["origin"] == "agent_suggested"
+    assert knowledge["text"] == "纠正后的答案"
 
 
 # 验证纠错可以创建待审核知识场景。
@@ -195,6 +206,109 @@ async def test_correction_can_create_pending_knowledge(tmp_path, monkeypatch):
     assert knowledge["created_from_trace_id"] == "t5"
     assert knowledge["related_source"] == "policy.pdf"
     assert knowledge["related_chunk_ids"] == ["c1"]
+
+
+# 验证反馈理解结果可以查询场景。
+@pytest.mark.anyio
+async def test_feedback_analysis_can_be_listed(tmp_path, monkeypatch):
+    app, _ = _make_app(tmp_path, monkeypatch)
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            created = await client.post(
+                "/v1/feedback",
+                json={
+                    "trace_id": "t7",
+                    "feedback": "correction",
+                    "kb_id": "kb",
+                    "query": "问题",
+                    "correction_text": "正确答案",
+                    "feedback_text": "回答错误",
+                },
+            )
+            listed = await client.get(
+                "/v1/feedback-analysis",
+                params={
+                    "kb_id": "kb",
+                    "recommended_action": "create_pending_knowledge",
+                },
+            )
+
+    assert created.status_code == 201
+    assert created.json()["feedback_analysis_action"] == "create_pending_knowledge"
+    assert created.json()["feedback_analysis_confidence"] >= 0.8
+    assert listed.status_code == 200
+    rows = listed.json()["feedback_analysis"]
+    assert rows[0]["feedback_analysis_id"] == created.json()["feedback_analysis_id"]
+    assert rows[0]["extracted_claim"] == "正确答案"
+
+
+# 验证反馈理解失败不阻断反馈提交场景。
+@pytest.mark.anyio
+async def test_feedback_analysis_failure_does_not_block_feedback(
+    tmp_path, monkeypatch
+):
+    import cogdoc.api.routes.feedback as feedback_route
+
+    app, root = _make_app(tmp_path, monkeypatch)
+
+    def broken_analysis(payload):
+        raise RuntimeError("broken")
+
+    monkeypatch.setattr(feedback_route, "analyze_feedback", broken_analysis)
+
+    resp = await _post(
+        app,
+        {
+            "trace_id": "t8",
+            "feedback": "thumbs_down",
+            "kb_id": "kb",
+            "query": "问题",
+        },
+    )
+
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["feedback_id"]
+    assert body["feedback_analysis_id"] is None
+    assert _read_jsonl(root / "feedback.jsonl")[0]["trace_id"] == "t8"
+    assert _read_jsonl(root / "feedback_analysis.jsonl") == []
+
+
+# 验证知识草稿创建失败不阻断反馈提交场景。
+@pytest.mark.anyio
+async def test_knowledge_create_failure_does_not_block_feedback(
+    tmp_path, monkeypatch
+):
+    app, root = _make_app(tmp_path, monkeypatch)
+
+    class BrokenKnowledgeStore:
+        def create(self, payload):
+            raise RuntimeError("broken")
+
+    app.state.knowledge_store = BrokenKnowledgeStore()
+
+    resp = await _post(
+        app,
+        {
+            "trace_id": "t9",
+            "feedback": "correction",
+            "kb_id": "kb",
+            "query": "问题",
+            "correction_text": "正确答案",
+            "save_as_knowledge": True,
+        },
+    )
+
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["feedback_id"]
+    assert body["knowledge_id"] is None
+    assert body["knowledge_status"] is None
+    assert _read_jsonl(root / "feedback.jsonl")[0]["trace_id"] == "t9"
 
 
 # 验证检索反馈可以禁用和启用场景。
