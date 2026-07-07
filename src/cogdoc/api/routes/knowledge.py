@@ -1,0 +1,158 @@
+from fastapi import APIRouter, Query, Request
+from fastapi.responses import JSONResponse
+
+from cogdoc.api.schemas import (
+    DerivedKnowledge,
+    ErrorCode,
+    ErrorResponse,
+    KnowledgeBatchReviewRequest,
+    KnowledgeBatchReviewResponse,
+    KnowledgeCreateRequest,
+    KnowledgeCreateResponse,
+    KnowledgeListResponse,
+    KnowledgeOrigin,
+    KnowledgeReviewRequest,
+    KnowledgeStatus,
+    build_error_response,
+)
+
+router = APIRouter(prefix="/v1", tags=["knowledge"])
+
+_ERROR_RESPONSES = {
+    400: {"model": ErrorResponse},
+    404: {"model": ErrorResponse},
+}
+
+
+# 完成 错误响应 处理。
+def _error(code: ErrorCode, message: str, status: int) -> JSONResponse:
+    return JSONResponse(
+        status_code=status, content=build_error_response(code, message).model_dump()
+    )
+
+
+# 构建公开知识视图。
+def _public(row: dict) -> DerivedKnowledge:
+    return DerivedKnowledge(**row)
+
+
+# 新增派生知识。
+@router.post("/knowledge", status_code=201, responses=_ERROR_RESPONSES)
+async def create_knowledge(body: KnowledgeCreateRequest, request: Request):
+    payload = body.model_dump(exclude_none=True)
+    payload["status"] = (
+        KnowledgeStatus.APPROVED.value
+        if body.enable_immediately
+        else KnowledgeStatus.PENDING.value
+    )
+    try:
+        row, deduplicated = request.app.state.knowledge_store.create(payload)
+    except ValueError as exc:
+        return _error(ErrorCode.BAD_REQUEST, str(exc), 400)
+    return KnowledgeCreateResponse(knowledge=_public(row), deduplicated=deduplicated)
+
+
+# 查询派生知识。
+@router.get("/knowledge", response_model=KnowledgeListResponse)
+async def list_knowledge(
+    request: Request,
+    kb_id: str = Query(min_length=1),
+    status: KnowledgeStatus | None = None,
+    document_id: str | None = None,
+    origin: KnowledgeOrigin | None = None,
+    created_by: str | None = None,
+    created_after: str | None = None,
+    created_before: str | None = None,
+):
+    rows = request.app.state.knowledge_store.list(
+        kb_id=kb_id,
+        status=status.value if status is not None else None,
+        document_id=document_id,
+        origin=origin.value if origin is not None else None,
+        created_by=created_by,
+        created_after=created_after,
+        created_before=created_before,
+    )
+    return KnowledgeListResponse(knowledge=[_public(row) for row in rows])
+
+
+# 审核状态流转。
+def _set_status(request: Request, knowledge_id: str, status: str, body):
+    try:
+        row = request.app.state.knowledge_store.set_status(
+            knowledge_id, status, actor=body.actor, note=body.note
+        )
+    except ValueError as exc:
+        return _error(ErrorCode.BAD_REQUEST, str(exc), 400)
+    if row is None:
+        return _error(ErrorCode.KNOWLEDGE_NOT_FOUND, f"知识不存在: {knowledge_id}", 404)
+    return _public(row)
+
+
+# 审核通过知识。
+@router.post(
+    "/knowledge/{knowledge_id}/approve",
+    response_model=DerivedKnowledge,
+    responses=_ERROR_RESPONSES,
+)
+async def approve_knowledge(
+    knowledge_id: str, body: KnowledgeReviewRequest, request: Request
+):
+    return _set_status(request, knowledge_id, KnowledgeStatus.APPROVED.value, body)
+
+
+# 驳回知识。
+@router.post(
+    "/knowledge/{knowledge_id}/reject",
+    response_model=DerivedKnowledge,
+    responses=_ERROR_RESPONSES,
+)
+async def reject_knowledge(
+    knowledge_id: str, body: KnowledgeReviewRequest, request: Request
+):
+    return _set_status(request, knowledge_id, KnowledgeStatus.REJECTED.value, body)
+
+
+# 归档知识。
+@router.post(
+    "/knowledge/{knowledge_id}/archive",
+    response_model=DerivedKnowledge,
+    responses=_ERROR_RESPONSES,
+)
+async def archive_knowledge(
+    knowledge_id: str, body: KnowledgeReviewRequest, request: Request
+):
+    return _set_status(request, knowledge_id, KnowledgeStatus.ARCHIVED.value, body)
+
+
+# 批量审核。
+def _batch_set_status(request: Request, body: KnowledgeBatchReviewRequest, status: str):
+    try:
+        updated, missing = request.app.state.knowledge_store.batch_set_status(
+            body.knowledge_ids, status, actor=body.actor, note=body.note
+        )
+    except ValueError as exc:
+        return _error(ErrorCode.BAD_REQUEST, str(exc), 400)
+    return KnowledgeBatchReviewResponse(
+        updated=[_public(row) for row in updated], missing_ids=missing
+    )
+
+
+# 批量审核通过。
+@router.post(
+    "/knowledge/batch-approve",
+    response_model=KnowledgeBatchReviewResponse,
+    responses=_ERROR_RESPONSES,
+)
+async def batch_approve_knowledge(body: KnowledgeBatchReviewRequest, request: Request):
+    return _batch_set_status(request, body, KnowledgeStatus.APPROVED.value)
+
+
+# 批量驳回。
+@router.post(
+    "/knowledge/batch-reject",
+    response_model=KnowledgeBatchReviewResponse,
+    responses=_ERROR_RESPONSES,
+)
+async def batch_reject_knowledge(body: KnowledgeBatchReviewRequest, request: Request):
+    return _batch_set_status(request, body, KnowledgeStatus.REJECTED.value)

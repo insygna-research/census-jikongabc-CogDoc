@@ -51,6 +51,7 @@ class ErrorCode(str, Enum):
     INGEST_FAILED = "INGEST_FAILED"
     KB_CLEANUP_FAILED = "KB_CLEANUP_FAILED"
     TRACE_NOT_FOUND = "TRACE_NOT_FOUND"
+    KNOWLEDGE_NOT_FOUND = "KNOWLEDGE_NOT_FOUND"
 
 
 # 带 query/doc_id 的请求基类。
@@ -250,18 +251,49 @@ class FeedbackType(str, Enum):
     CORRECTION = "correction"
 
 
+# 回答反馈原因，用于后续结构化分析和调权。
+class FeedbackIssueType(str, Enum):
+    NO_EVIDENCE = "no_evidence"
+    WRONG_ANSWER = "wrong_answer"
+    BAD_RETRIEVAL = "bad_retrieval"
+    CORRECTION = "correction"
+    OTHER = "other"
+
+
+# 被反馈来源类型。
+class FeedbackSourceType(str, Enum):
+    DOCUMENT = "document"
+    DERIVED_KNOWLEDGE = "derived_knowledge"
+    MIXED = "mixed"
+    NONE = "none"
+
+
 # 反馈请求体，跟踪标识关联被反馈的那次回答。
 class FeedbackRequest(ApiModel):
     schema_version: Literal["v1"] = API_SCHEMA_VERSION
     trace_id: str = Field(min_length=1)
     feedback: FeedbackType
     kb_id: str | None = None
+    session_id: str | None = None
     query: str | None = None
     answer: str | None = None
     citations: list[Citation] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
+    source_type: FeedbackSourceType | None = None
+    rating: int | None = Field(default=None, ge=1, le=5)
+    feedback_type: FeedbackIssueType | None = None
+    feedback_text: str | None = None
+    correction_text: str | None = None
     comment: str | None = None
     correction: str | None = None
+    save_as_knowledge: bool = False
+    related_document_id: str | None = None
+    related_source: str | None = None
+    related_source_sha256: str | None = None
+    related_chunk_ids: list[str] = Field(default_factory=list)
+    source_note: str | None = None
+    certainty: Literal["high", "medium", "low"] = "medium"
+    created_by: str | None = None
 
 
 # 反馈落盘结果，标记是否进入坏样本集。
@@ -270,6 +302,119 @@ class FeedbackResponse(ApiModel):
     feedback_id: str
     status: str = "recorded"
     is_bad_case: bool
+    knowledge_id: str | None = None
+    knowledge_status: str | None = None
+    knowledge_deduplicated: bool = False
+
+
+# 派生知识状态。
+class KnowledgeStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    STALE = "stale"
+    ARCHIVED = "archived"
+
+
+# 派生知识来源。
+class KnowledgeOrigin(str, Enum):
+    MANUAL_ENTRY = "manual_entry"
+    CORRECTION = "correction"
+    SAVED_ANSWER = "saved_answer"
+    AGENT_SUGGESTED = "agent_suggested"
+
+
+# 派生知识可信度。
+class KnowledgeCertainty(str, Enum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+# 主动新增知识请求体。
+class KnowledgeCreateRequest(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    kb_id: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    related_document_id: str | None = None
+    related_source: str | None = None
+    related_source_sha256: str | None = None
+    related_chunk_ids: list[str] = Field(default_factory=list)
+    source_note: str | None = None
+    certainty: KnowledgeCertainty = KnowledgeCertainty.MEDIUM
+    origin: KnowledgeOrigin = KnowledgeOrigin.MANUAL_ENTRY
+    created_from_trace_id: str | None = None
+    created_by: str | None = None
+    enable_immediately: bool = False
+
+    # 清理必填文本。
+    @field_validator("kb_id", "text")
+    @classmethod
+    def _strip_required_text(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be blank")
+        return stripped
+
+
+# 审核操作请求体。
+class KnowledgeReviewRequest(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    actor: str | None = None
+    note: str | None = None
+
+
+# 批量审核请求体。
+class KnowledgeBatchReviewRequest(KnowledgeReviewRequest):
+    knowledge_ids: list[str] = Field(min_length=1)
+
+
+# 派生知识公开视图。
+class DerivedKnowledge(ApiModel):
+    knowledge_id: str
+    kb_id: str
+    text: str
+    normalized_text: str
+    normalized_hash: str
+    version: int = 1
+    previous_version_id: str | None = None
+    conflict_group_id: str | None = None
+    related_document_id: str | None = None
+    related_source: str | None = None
+    related_source_sha256: str | None = None
+    related_chunk_ids: list[str] = Field(default_factory=list)
+    source_note: str | None = None
+    certainty: KnowledgeCertainty = KnowledgeCertainty.MEDIUM
+    status: KnowledgeStatus = KnowledgeStatus.PENDING
+    origin: KnowledgeOrigin = KnowledgeOrigin.MANUAL_ENTRY
+    created_from_trace_id: str | None = None
+    created_by: str | None = None
+    created_at: str
+    updated_at: str
+    archived_at: str | None = None
+    reviewed_by: str | None = None
+    reviewed_at: str | None = None
+    review_note: str | None = None
+
+
+# 新增知识响应。
+class KnowledgeCreateResponse(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    knowledge: DerivedKnowledge
+    deduplicated: bool = False
+
+
+# 知识列表响应。
+class KnowledgeListResponse(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    knowledge: list[DerivedKnowledge] = Field(default_factory=list)
+
+
+# 批量审核响应。
+class KnowledgeBatchReviewResponse(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    updated: list[DerivedKnowledge] = Field(default_factory=list)
+    missing_ids: list[str] = Field(default_factory=list)
 
 
 # 会话多轮历史，刷新后前端据此还原聊天记录。

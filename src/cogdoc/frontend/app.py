@@ -663,7 +663,9 @@ def _render_evidence(final: dict, key: str, query: str = "") -> None:
     with st.expander("纠错"):
         with st.form(f"correction-{key}", clear_on_submit=True):
             comment = st.text_area("备注", key=f"comment-{key}", height=80)
-            correction = st.text_area("纠正答案", key=f"correction-text-{key}", height=120)
+            correction = st.text_area(
+                "纠正答案", key=f"correction-text-{key}", height=120
+            )
             submitted = st.form_submit_button("提交纠错")
         if submitted:
             _submit_feedback(
@@ -759,7 +761,9 @@ def _score_label(value) -> str:
 def _render_retrieve_hit(hit: Mapping) -> None:
     rank = hit.get("rank", "-")
     source = hit.get("source") or "-"
-    page = _page_range_label(hit.get("page_start", hit.get("page")), hit.get("page_end"))
+    page = _page_range_label(
+        hit.get("page_start", hit.get("page")), hit.get("page_end")
+    )
     chunk_id = hit.get("chunk_id") or "-"
     score = _score_label(hit.get("rerank_score"))
     title = f"#{rank} · {source}"

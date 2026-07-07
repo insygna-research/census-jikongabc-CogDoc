@@ -582,7 +582,9 @@ def warm_up_runtime(engine) -> None:
     if rerank_device != "cpu" or settings.qa_rerank_on_cpu:
         BGEReranker.warm_up()
     else:
-        print("ℹ️ 未预热 CPU reranker；如需强制 CPU 精排，请设置 QA_RERANK_ON_CPU=true。")
+        print(
+            "ℹ️ 未预热 CPU reranker；如需强制 CPU 精排，请设置 QA_RERANK_ON_CPU=true。"
+        )
     print("✅ 模型与分词资源预热完成。")
 
 

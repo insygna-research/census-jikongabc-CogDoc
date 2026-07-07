@@ -355,13 +355,17 @@ async def _run_smoke(data_dir: Path, timeout: float, verbose: bool) -> None:
             )
             path = trace_path(chat_body["trace_id"])
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(trace_payload, ensure_ascii=False), encoding="utf-8")
+            path.write_text(
+                json.dumps(trace_payload, ensure_ascii=False), encoding="utf-8"
+            )
 
             traces = await client.get(
                 "/v1/traces", params={"doc_id": kb_id, "session_id": session_id}
             )
             _assert_status(traces, 200, "list traces")
-            assert traces.json()["traces"][0]["trace_id"] == chat_body["trace_id"], traces.text
+            assert traces.json()["traces"][0]["trace_id"] == chat_body["trace_id"], (
+                traces.text
+            )
             trace = await client.get(f"/v1/traces/{chat_body['trace_id']}")
             _assert_status(trace, 200, "get trace")
             assert trace.json()["summary"]["step_count"] == 1, trace.text

@@ -92,7 +92,9 @@ class Settings(BaseSettings):
     reranker_min_cuda_free_mb: int = Field(
         default=2800, validation_alias="RERANKER_MIN_CUDA_FREE_MB"
     )
-    torch_num_threads: int = Field(default=2, validation_alias="COGDOC_TORCH_NUM_THREADS")
+    torch_num_threads: int = Field(
+        default=2, validation_alias="COGDOC_TORCH_NUM_THREADS"
+    )
     cogdoc_embedder_max_concurrency: int = Field(
         default=1, validation_alias="COGDOC_EMBEDDER_MAX_CONCURRENCY"
     )
@@ -201,6 +203,11 @@ class Settings(BaseSettings):
     def bad_cases_path(self) -> str:
         # 点踩/纠错自动归集到此，喂离线质量评测 harness。
         return str(self.data_dir / "feedback" / "bad_cases.jsonl")
+
+    # 完成 派生知识路径 处理。
+    @property
+    def derived_knowledge_path(self) -> str:
+        return str(self.data_dir / "knowledge" / "derived_knowledge.jsonl")
 
     # 返回根目录。
     @property

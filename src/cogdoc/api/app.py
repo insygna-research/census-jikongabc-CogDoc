@@ -8,6 +8,7 @@ from cogdoc.api.access_control import (
     TokenBucketRateLimiter,
     build_rate_limiter,
 )
+from cogdoc.api.derived_knowledge_store import DerivedKnowledgeStore
 from cogdoc.api.feedback_store import FeedbackStore
 from cogdoc.api.ingest import IndexJobManager, KnowledgeBaseRegistry
 from cogdoc.api.metrics import Metrics, MetricsMiddleware
@@ -18,6 +19,7 @@ from cogdoc.api.routes import (
     documents_router,
     feedback_router,
     health_router,
+    knowledge_router,
     traces_router,
 )
 from cogdoc.api.schemas import ErrorCode, build_error_response
@@ -63,6 +65,7 @@ def create_app(
     kb_registry: KnowledgeBaseRegistry | None = None,
     index_jobs: IndexJobManager | None = None,
     feedback_store: FeedbackStore | None = None,
+    knowledge_store: DerivedKnowledgeStore | None = None,
     api_keys: set[str] | None = None,
     rate_limiter: TokenBucketRateLimiter | None = None,
     offload_workers: int | None = None,
@@ -199,6 +202,7 @@ def create_app(
         kb_exists=app.state.kb_registry.exists
     )
     app.state.feedback_store = feedback_store or FeedbackStore()
+    app.state.knowledge_store = knowledge_store or DerivedKnowledgeStore()
 
     # 访问控制留空则鉴权关闭，限流默认按配置令牌桶。
     settings = get_settings()
@@ -226,6 +230,7 @@ def create_app(
     app.include_router(health_router)
     app.include_router(documents_router)
     app.include_router(feedback_router)
+    app.include_router(knowledge_router)
     app.include_router(traces_router)
     return app
 
