@@ -398,8 +398,19 @@ class CogDocClient:
         action: str,
         actor: str | None = None,
         note: str | None = None,
+        related_document_id: str | None = None,
+        related_source: str | None = None,
+        related_source_sha256: str | None = None,
+        related_chunk_ids: list[str] | None = None,
     ) -> httpx.Response:
-        payload = {"actor": actor, "note": note}
+        payload = {
+            "actor": actor,
+            "note": note,
+            "related_document_id": related_document_id,
+            "related_source": related_source,
+            "related_source_sha256": related_source_sha256,
+            "related_chunk_ids": related_chunk_ids,
+        }
         return httpx.post(
             self._url(f"/v1/knowledge/{knowledge_id}/{action}"),
             json={k: v for k, v in payload.items() if v is not None},

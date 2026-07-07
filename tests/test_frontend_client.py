@@ -219,7 +219,15 @@ def test_knowledge_client_methods_call_expected_endpoints(monkeypatch):
         created_from_trace_id="trace-1",
     )
     client.list_knowledge("kb", status="pending", origin="manual_entry")
-    client.review_knowledge("K1", "approve", actor="admin")
+    client.review_knowledge(
+        "K1",
+        "approve",
+        actor="admin",
+        related_document_id="doc-new",
+        related_source="policy.pdf",
+        related_source_sha256="sha-new",
+        related_chunk_ids=["c2"],
+    )
     client.batch_review_knowledge(["K1", "K2"], "batch-reject", note="重复")
 
     assert calls[0][0:2] == ("POST", "http://api/v1/knowledge")
@@ -234,7 +242,13 @@ def test_knowledge_client_methods_call_expected_endpoints(monkeypatch):
         "origin": "manual_entry",
     }
     assert calls[2][0:2] == ("POST", "http://api/v1/knowledge/K1/approve")
-    assert calls[2][2]["json"] == {"actor": "admin"}
+    assert calls[2][2]["json"] == {
+        "actor": "admin",
+        "related_document_id": "doc-new",
+        "related_source": "policy.pdf",
+        "related_source_sha256": "sha-new",
+        "related_chunk_ids": ["c2"],
+    }
     assert calls[3][0:2] == ("POST", "http://api/v1/knowledge/batch-reject")
     assert calls[3][2]["json"] == {"knowledge_ids": ["K1", "K2"], "note": "重复"}
 

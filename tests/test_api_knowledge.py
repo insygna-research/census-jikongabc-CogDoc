@@ -140,6 +140,74 @@ async def test_saved_answer_origin_creates_pending_knowledge(tmp_path, monkeypat
         assert row["related_chunk_ids"] == ["c1", "c2"]
 
 
+# 验证过期知识复核通过时刷新绑定场景。
+@pytest.mark.anyio
+async def test_stale_knowledge_approve_refreshes_binding(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+
+    async with _client(app) as client:
+        created = await client.post(
+            "/v1/knowledge",
+            json={
+                "kb_id": "kb",
+                "text": "旧文档中的规则。",
+                "related_document_id": "doc-old",
+                "related_source": "policy.pdf",
+                "related_source_sha256": "sha-old",
+                "related_chunk_ids": ["old-c1"],
+                "enable_immediately": True,
+            },
+        )
+        knowledge_id = created.json()["knowledge"]["knowledge_id"]
+        app.state.knowledge_store.set_status(knowledge_id, "stale")
+
+        approved = await client.post(
+            f"/v1/knowledge/{knowledge_id}/approve",
+            json={
+                "actor": "admin",
+                "note": "新版文档确认仍有效",
+                "related_document_id": "doc-new",
+                "related_source": "policy.pdf",
+                "related_source_sha256": "sha-new",
+                "related_chunk_ids": ["new-c1", "new-c2"],
+            },
+        )
+
+    assert approved.status_code == 200
+    row = approved.json()
+    assert row["status"] == "approved"
+    assert row["related_document_id"] == "doc-new"
+    assert row["related_source_sha256"] == "sha-new"
+    assert row["related_chunk_ids"] == ["new-c1", "new-c2"]
+    assert row["reviewed_by"] == "admin"
+    assert row["review_note"] == "新版文档确认仍有效"
+
+
+# 验证绑定更新不会覆盖非绑定字段。
+def test_knowledge_binding_updates_are_allowlisted(tmp_path):
+    store = DerivedKnowledgeStore(path=str(tmp_path / "knowledge.jsonl"))
+    row, _ = store.create(
+        {
+            "kb_id": "kb",
+            "text": "知识",
+            "status": "approved",
+            "related_source_sha256": "sha-old",
+        }
+    )
+
+    updated = store.set_status(
+        row["knowledge_id"],
+        "approved",
+        binding_updates={
+            "status": "rejected",
+            "related_source_sha256": "sha-new",
+        },
+    )
+
+    assert updated["status"] == "approved"
+    assert updated["related_source_sha256"] == "sha-new"
+
+
 # 验证审核队列摘要聚合多类待处理事项场景。
 @pytest.mark.anyio
 async def test_review_queue_summary_counts_pending_work(tmp_path, monkeypatch):
@@ -215,3 +283,26 @@ async def test_batch_review_reports_missing_ids(tmp_path, monkeypatch):
         body = batch.json()
         assert [item["knowledge_id"] for item in body["updated"]] == [knowledge_id]
         assert body["missing_ids"] == ["missing"]
+
+
+# 验证批量审核拒绝绑定字段场景。
+@pytest.mark.anyio
+async def test_batch_review_rejects_binding_fields(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+
+    async with _client(app) as client:
+        created = await client.post(
+            "/v1/knowledge", json={"kb_id": "kb", "text": "知识 A"}
+        )
+        knowledge_id = created.json()["knowledge"]["knowledge_id"]
+
+        batch = await client.post(
+            "/v1/knowledge/batch-approve",
+            json={
+                "knowledge_ids": [knowledge_id],
+                "actor": "admin",
+                "related_source_sha256": "sha-new",
+            },
+        )
+
+    assert batch.status_code == 422

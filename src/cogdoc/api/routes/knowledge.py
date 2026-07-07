@@ -114,9 +114,23 @@ async def review_queue_summary(
 
 # 审核状态流转。
 def _set_status(request: Request, knowledge_id: str, status: str, body):
+    binding_updates = {
+        key: value
+        for key, value in {
+            "related_document_id": body.related_document_id,
+            "related_source": body.related_source,
+            "related_source_sha256": body.related_source_sha256,
+            "related_chunk_ids": body.related_chunk_ids,
+        }.items()
+        if value is not None
+    }
     try:
         row = request.app.state.knowledge_store.set_status(
-            knowledge_id, status, actor=body.actor, note=body.note
+            knowledge_id,
+            status,
+            actor=body.actor,
+            note=body.note,
+            binding_updates=binding_updates,
         )
     except ValueError as exc:
         return _error(ErrorCode.BAD_REQUEST, str(exc), 400)

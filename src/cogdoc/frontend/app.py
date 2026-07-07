@@ -1111,8 +1111,56 @@ def _render_knowledge_item(
         meta[3].caption(f"创建时间: {item.get('created_at') or '-'}")
         if item.get("source_note"):
             st.caption(str(item["source_note"]))
+        if item.get("status") == "stale":
+            with st.form(f"stale-rebind-{knowledge_id}"):
+                stale_cols = st.columns([1, 1, 1, 1])
+                related_document_id = stale_cols[0].text_input(
+                    "文档标识",
+                    value=str(item.get("related_document_id") or ""),
+                    key=f"stale-document-{knowledge_id}",
+                )
+                related_source = stale_cols[1].text_input(
+                    "新版文档",
+                    value=str(item.get("related_source") or ""),
+                    key=f"stale-source-{knowledge_id}",
+                )
+                source_sha = stale_cols[2].text_input(
+                    "新版哈希",
+                    value=str(item.get("related_source_sha256") or ""),
+                    key=f"stale-sha-{knowledge_id}",
+                )
+                chunk_ids_text = stale_cols[3].text_input(
+                    "新版分块",
+                    value=", ".join(
+                        str(x) for x in item.get("related_chunk_ids") or []
+                    ),
+                    key=f"stale-chunks-{knowledge_id}",
+                )
+                note = st.text_input("复核说明", key=f"stale-note-{knowledge_id}")
+                if st.form_submit_button("确认仍有效并通过"):
+                    chunk_ids = [
+                        part.strip()
+                        for part in chunk_ids_text.split(",")
+                        if part.strip()
+                    ]
+                    _handle_knowledge_response(
+                        client.review_knowledge(
+                            knowledge_id,
+                            "approve",
+                            actor="frontend",
+                            note=note.strip() or None,
+                            related_document_id=related_document_id.strip() or None,
+                            related_source=related_source.strip() or None,
+                            related_source_sha256=source_sha.strip() or None,
+                            related_chunk_ids=chunk_ids,
+                        ),
+                        client,
+                        kb_id,
+                    )
         actions = st.columns([1, 1, 1, 4])
-        if actions[0].button("通过", key=f"approve-{suffix}-{knowledge_id}"):
+        if item.get("status") != "stale" and actions[0].button(
+            "通过", key=f"approve-{suffix}-{knowledge_id}"
+        ):
             _handle_knowledge_response(
                 client.review_knowledge(knowledge_id, "approve"),
                 client,

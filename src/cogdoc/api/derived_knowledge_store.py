@@ -15,6 +15,12 @@ from cogdoc.config.settings import get_settings
 
 ACTIVE_STATUSES = {"pending", "approved", "stale"}
 VALID_STATUSES = ACTIVE_STATUSES | {"rejected", "archived"}
+ALLOWED_BINDING_UPDATE_FIELDS = {
+    "related_document_id",
+    "related_source",
+    "related_source_sha256",
+    "related_chunk_ids",
+}
 
 
 # 返回当前协调世界时时间字符串。
@@ -165,6 +171,7 @@ class DerivedKnowledgeStore:
         *,
         actor: str | None = None,
         note: str | None = None,
+        binding_updates: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         if status not in VALID_STATUSES:
             raise ValueError(f"invalid status: {status}")
@@ -179,6 +186,10 @@ class DerivedKnowledgeStore:
             updated["reviewed_by"] = actor
             updated["reviewed_at"] = now
             updated["review_note"] = note
+            if binding_updates:
+                for key, value in binding_updates.items():
+                    if key in ALLOWED_BINDING_UPDATE_FIELDS and value is not None:
+                        updated[key] = value
             if status == "archived":
                 updated["archived_at"] = now
             self._append(updated)

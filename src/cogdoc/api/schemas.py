@@ -370,10 +370,17 @@ class KnowledgeReviewRequest(ApiModel):
     schema_version: Literal["v1"] = API_SCHEMA_VERSION
     actor: str | None = None
     note: str | None = None
+    related_document_id: str | None = None
+    related_source: str | None = None
+    related_source_sha256: str | None = None
+    related_chunk_ids: list[str] | None = None
 
 
 # 批量审核请求体。
-class KnowledgeBatchReviewRequest(KnowledgeReviewRequest):
+class KnowledgeBatchReviewRequest(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    actor: str | None = None
+    note: str | None = None
     knowledge_ids: list[str] = Field(min_length=1)
 
 
