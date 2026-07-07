@@ -191,6 +191,8 @@ class DerivedKnowledgeStore:
         document_id: str | None = None,
         origin: str | None = None,
         created_by: str | None = None,
+        conflict_group_id: str | None = None,
+        has_conflict: bool | None = None,
         created_after: str | None = None,
         created_before: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -210,6 +212,16 @@ class DerivedKnowledgeStore:
             rows = [row for row in rows if row.get("origin") == origin]
         if created_by is not None:
             rows = [row for row in rows if row.get("created_by") == created_by]
+        if conflict_group_id is not None:
+            rows = [
+                row for row in rows if row.get("conflict_group_id") == conflict_group_id
+            ]
+        if has_conflict is not None:
+            rows = [
+                row
+                for row in rows
+                if bool(row.get("conflict_group_id")) == has_conflict
+            ]
         if created_after is not None:
             rows = [
                 row for row in rows if str(row.get("created_at", "")) >= created_after
@@ -252,6 +264,40 @@ class DerivedKnowledgeStore:
             "total": len(rows),
             "by_status": by_status,
             "by_origin": by_origin,
+        }
+
+    # 统计冲突组审核规模。
+    def conflict_counts(
+        self,
+        *,
+        kb_id: str,
+        document_id: str | None = None,
+        origin: str | None = None,
+        created_by: str | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
+    ) -> dict[str, int]:
+        rows = self.list(
+            kb_id=kb_id,
+            document_id=document_id,
+            origin=origin,
+            created_by=created_by,
+            has_conflict=True,
+            created_after=created_after,
+            created_before=created_before,
+        )
+        groups = {
+            str(row.get("conflict_group_id"))
+            for row in rows
+            if row.get("conflict_group_id")
+        }
+        pending = sum(1 for row in rows if row.get("status") == "pending")
+        stale = sum(1 for row in rows if row.get("status") == "stale")
+        return {
+            "total": len(rows),
+            "groups": len(groups),
+            "pending": pending,
+            "stale": stale,
         }
 
     # 查询同一冲突组的其他知识。

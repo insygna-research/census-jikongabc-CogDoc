@@ -93,6 +93,8 @@ async def list_knowledge(
     document_id: str | None = None,
     origin: KnowledgeOrigin | None = None,
     created_by: str | None = None,
+    conflict_group_id: str | None = None,
+    has_conflict: bool | None = None,
     created_after: str | None = None,
     created_before: str | None = None,
 ):
@@ -102,6 +104,8 @@ async def list_knowledge(
         document_id=document_id,
         origin=origin.value if origin is not None else None,
         created_by=created_by,
+        conflict_group_id=conflict_group_id,
+        has_conflict=has_conflict,
         created_after=created_after,
         created_before=created_before,
     )
@@ -204,6 +208,14 @@ async def review_queue_summary(
         created_after=created_after,
         created_before=created_before,
     )
+    knowledge_conflicts = request.app.state.knowledge_store.conflict_counts(
+        kb_id=kb_id,
+        document_id=document_id,
+        origin=origin.value if origin is not None else None,
+        created_by=created_by,
+        created_after=created_after,
+        created_before=created_before,
+    )
     feedback_rows = request.app.state.feedback_store.counts(kb_id=kb_id)
     feedback = request.app.state.feedback_analysis_store.counts(kb_id=kb_id)
     retrieval = request.app.state.retrieval_feedback_store.counts(kb_id=kb_id)
@@ -211,6 +223,7 @@ async def review_queue_summary(
         kb_id=kb_id,
         knowledge=knowledge["by_status"],
         knowledge_origin=knowledge["by_origin"],
+        knowledge_conflicts=knowledge_conflicts,
         feedback_counts=feedback_rows,
         feedback_analysis={
             **feedback["by_action"],

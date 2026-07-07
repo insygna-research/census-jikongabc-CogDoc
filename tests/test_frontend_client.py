@@ -252,7 +252,13 @@ def test_knowledge_client_methods_call_expected_endpoints(monkeypatch):
         origin="saved_answer",
         created_from_trace_id="trace-1",
     )
-    client.list_knowledge("kb", status="pending", origin="manual_entry")
+    client.list_knowledge(
+        "kb",
+        status="pending",
+        origin="manual_entry",
+        conflict_group_id="C1",
+        has_conflict=True,
+    )
     client.review_knowledge(
         "K1",
         "approve",
@@ -282,6 +288,8 @@ def test_knowledge_client_methods_call_expected_endpoints(monkeypatch):
         "kb_id": "kb",
         "status": "pending",
         "origin": "manual_entry",
+        "conflict_group_id": "C1",
+        "has_conflict": True,
     }
     assert calls[2][0:2] == ("POST", "http://api/v1/knowledge/K1/approve")
     assert calls[2][2]["json"] == {

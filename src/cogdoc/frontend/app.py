@@ -964,12 +964,25 @@ def _knowledge_rows(
     status: str,
     origin: str | None = None,
     created_by: str | None = None,
+    has_conflict: bool | None = None,
 ) -> list[Mapping]:
     status_code, payload = _cached_api_value(
-        ("knowledge", client.base_url, kb_id, status, origin, created_by),
+        (
+            "knowledge",
+            client.base_url,
+            kb_id,
+            status,
+            origin,
+            created_by,
+            has_conflict,
+        ),
         lambda: _response_status_payload(
             client.list_knowledge(
-                kb_id, status=status, origin=origin, created_by=created_by
+                kb_id,
+                status=status,
+                origin=origin,
+                created_by=created_by,
+                has_conflict=has_conflict,
             )
         ),
     )
@@ -1280,8 +1293,11 @@ def _render_knowledge_item(
     knowledge_id = str(item.get("knowledge_id") or "")
     title = f"{knowledge_id} · {item.get('status') or '-'}"
     source = item.get("related_source")
+    conflict_group = item.get("conflict_group_id")
     if source:
         title += f" · {source}"
+    if conflict_group:
+        title += f" · 冲突 {conflict_group}"
     with st.expander(title):
         st.write(item.get("text") or "")
         meta = st.columns(4)
@@ -1289,6 +1305,8 @@ def _render_knowledge_item(
         meta[1].caption(f"可信度: {item.get('certainty') or '-'}")
         meta[2].caption(f"创建者: {item.get('created_by') or '-'}")
         meta[3].caption(f"创建时间: {item.get('created_at') or '-'}")
+        if conflict_group:
+            st.caption(f"冲突组: {conflict_group}")
         if item.get("source_note"):
             st.caption(str(item["source_note"]))
         _render_knowledge_revision_form(client, kb_id, item, suffix)
@@ -1372,7 +1390,7 @@ def _render_knowledge_review_list(
         "saved_answer": "保存答案",
         "agent_suggested": "分析建议",
     }
-    filters = st.columns([1, 1])
+    filters = st.columns([1, 1, 1])
     origin = filters[0].selectbox(
         "来源",
         list(origin_labels),
@@ -1384,6 +1402,10 @@ def _render_knowledge_review_list(
         key=f"knowledge-created-by-{status}-{kb_id}",
         placeholder="全部",
     )
+    conflict_only = filters[2].checkbox(
+        "只看冲突",
+        key=f"knowledge-conflict-only-{status}-{kb_id}",
+    )
     try:
         rows = _knowledge_rows(
             client,
@@ -1391,6 +1413,7 @@ def _render_knowledge_review_list(
             status,
             origin=origin or None,
             created_by=created_by.strip() or None,
+            has_conflict=True if conflict_only else None,
         )
     except Exception as exc:
         st.warning(str(exc))
@@ -1656,6 +1679,8 @@ def _knowledge_area(kb_id: str | None) -> None:
         loop_metrics = {}
     pending_count = _summary_count(summary, "knowledge", "pending")
     stale_count = _summary_count(summary, "knowledge", "stale")
+    conflict_count = _summary_count(summary, "knowledge_conflicts", "total")
+    conflict_group_count = _summary_count(summary, "knowledge_conflicts", "groups")
     feedback_count = _summary_count(summary, "feedback_counts", "total")
     bad_case_count = _summary_count(summary, "feedback_counts", "bad_cases")
     retrieval_count = _summary_count(summary, "retrieval_feedback", "enabled")
@@ -1664,6 +1689,7 @@ def _knowledge_area(kb_id: str | None) -> None:
     needs_review_count = _summary_count(summary, "feedback_analysis", "needs_review")
     metrics = st.columns(5)
     metrics[0].metric("待审核知识", pending_count)
+    metrics[0].caption(f"冲突 {conflict_count} · 组 {conflict_group_count}")
     metrics[1].metric("过期知识", stale_count)
     metrics[2].metric("原始反馈", feedback_count)
     metrics[2].caption(f"坏样本 {bad_case_count}")

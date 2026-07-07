@@ -480,6 +480,7 @@ class ReviewQueueSummaryResponse(ApiModel):
     kb_id: str
     knowledge: dict[str, int] = Field(default_factory=dict)
     knowledge_origin: dict[str, int] = Field(default_factory=dict)
+    knowledge_conflicts: dict[str, int] = Field(default_factory=dict)
     feedback_counts: dict[str, Any] = Field(default_factory=dict)
     feedback_analysis: dict[str, int] = Field(default_factory=dict)
     feedback_analysis_type: dict[str, int] = Field(default_factory=dict)

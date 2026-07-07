@@ -143,6 +143,10 @@ async def test_similar_knowledge_creates_conflict_group(tmp_path, monkeypatch):
             },
         )
         listed = await client.get("/v1/knowledge", params={"kb_id": "kb"})
+        conflict_only = await client.get(
+            "/v1/knowledge", params={"kb_id": "kb", "has_conflict": True}
+        )
+        summary = await client.get("/v1/review-queue", params={"kb_id": "kb"})
 
     assert first.status_code == 201
     assert second.status_code == 201
@@ -157,6 +161,25 @@ async def test_similar_knowledge_creates_conflict_group(tmp_path, monkeypatch):
     rows = listed.json()["knowledge"]
     groups = {row["knowledge_id"]: row["conflict_group_id"] for row in rows}
     assert len(set(groups.values())) == 1
+    conflict_group_id = body["knowledge"]["conflict_group_id"]
+    conflict_rows = conflict_only.json()["knowledge"]
+    assert {row["knowledge_id"] for row in conflict_rows} == set(groups)
+
+    async with _client(app) as client:
+        grouped = await client.get(
+            "/v1/knowledge",
+            params={"kb_id": "kb", "conflict_group_id": conflict_group_id},
+        )
+
+    assert grouped.status_code == 200
+    assert {row["knowledge_id"] for row in grouped.json()["knowledge"]} == set(groups)
+    assert summary.status_code == 200
+    assert summary.json()["knowledge_conflicts"] == {
+        "total": 2,
+        "groups": 1,
+        "pending": 1,
+        "stale": 0,
+    }
 
 
 # 验证保存回答来源可以创建待审核知识场景。
