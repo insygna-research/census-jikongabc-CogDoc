@@ -7,6 +7,7 @@ from cogdoc.api.schemas import (
     ErrorResponse,
     KnowledgeBatchReviewRequest,
     KnowledgeBatchReviewResponse,
+    KnowledgeConflictCandidate,
     KnowledgeCreateRequest,
     KnowledgeCreateResponse,
     KnowledgeListResponse,
@@ -38,6 +39,18 @@ def _public(row: dict) -> DerivedKnowledge:
     return DerivedKnowledge(**row)
 
 
+# 构建冲突候选视图。
+def _conflict_public(row: dict) -> KnowledgeConflictCandidate:
+    return KnowledgeConflictCandidate(
+        knowledge_id=row["knowledge_id"],
+        text=row["text"],
+        status=row["status"],
+        origin=row.get("origin") or "manual_entry",
+        related_source=row.get("related_source"),
+        created_at=row["created_at"],
+    )
+
+
 # 新增派生知识。
 @router.post("/knowledge", status_code=201, responses=_ERROR_RESPONSES)
 async def create_knowledge(body: KnowledgeCreateRequest, request: Request):
@@ -51,7 +64,15 @@ async def create_knowledge(body: KnowledgeCreateRequest, request: Request):
         row, deduplicated = request.app.state.knowledge_store.create(payload)
     except ValueError as exc:
         return _error(ErrorCode.BAD_REQUEST, str(exc), 400)
-    return KnowledgeCreateResponse(knowledge=_public(row), deduplicated=deduplicated)
+    conflicts = (
+        [] if deduplicated else request.app.state.knowledge_store.conflicts_for(row)
+    )
+    return KnowledgeCreateResponse(
+        knowledge=_public(row),
+        deduplicated=deduplicated,
+        requires_review=bool(conflicts),
+        conflicts=[_conflict_public(item) for item in conflicts],
+    )
 
 
 # 查询派生知识。

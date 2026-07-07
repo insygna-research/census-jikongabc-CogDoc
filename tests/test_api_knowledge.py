@@ -120,6 +120,45 @@ async def test_exact_duplicate_returns_existing_knowledge(tmp_path, monkeypatch)
         )
 
 
+# 验证相似知识会进入冲突组等待审核。
+@pytest.mark.anyio
+async def test_similar_knowledge_creates_conflict_group(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+
+    async with _client(app) as client:
+        first = await client.post(
+            "/v1/knowledge",
+            json={
+                "kb_id": "kb",
+                "text": "差旅报销需要七天内提交。",
+                "enable_immediately": True,
+            },
+        )
+        second = await client.post(
+            "/v1/knowledge",
+            json={
+                "kb_id": "kb",
+                "text": "差旅报销需要7天内提交。",
+                "enable_immediately": True,
+            },
+        )
+        listed = await client.get("/v1/knowledge", params={"kb_id": "kb"})
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    body = second.json()
+    assert body["knowledge"]["status"] == "pending"
+    assert body["knowledge"]["conflict_group_id"]
+    assert body["requires_review"] is True
+    assert (
+        body["conflicts"][0]["knowledge_id"]
+        == first.json()["knowledge"]["knowledge_id"]
+    )
+    rows = listed.json()["knowledge"]
+    groups = {row["knowledge_id"]: row["conflict_group_id"] for row in rows}
+    assert len(set(groups.values())) == 1
+
+
 # 验证保存回答来源可以创建待审核知识场景。
 @pytest.mark.anyio
 async def test_saved_answer_origin_creates_pending_knowledge(tmp_path, monkeypatch):

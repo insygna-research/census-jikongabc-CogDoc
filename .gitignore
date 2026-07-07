@@ -7,7 +7,13 @@ env/
 venv/
 ENV/
 
-# Python 打包产物（pip install -e . / build）。
+# 本地工具配置目录。
+.cursor/
+.vscode/
+.claude/
+.codex/
+
+# 打包产物。
 *.egg-info/
 build/
 dist/
@@ -29,7 +35,7 @@ backups/
 测试论文/
 your_documents/
 
-# 真实评测集绑定私有语料名与本机索引 id，不入库；只提交匿名 example。
+# 真实评测集绑定私有语料名与本机索引标识，不入库；只提交匿名样例。
 eval/*.jsonl
 !eval/*.example.jsonl
 eval/eval_suite_report.json

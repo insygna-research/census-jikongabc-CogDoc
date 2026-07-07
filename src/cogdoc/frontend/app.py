@@ -1079,6 +1079,18 @@ def _handle_knowledge_response(resp, client: CogDocClient, kb_id: str) -> None:
 
 # 渲染主动新增知识。
 def _render_create_knowledge(client: CogDocClient, kb_id: str) -> None:
+    notice_key = f"create-knowledge-notice-{kb_id}"
+    notice = st.session_state.pop(notice_key, None)
+    if isinstance(notice, Mapping):
+        st.success(str(notice.get("message") or "知识已保存。"))
+        if notice.get("warning"):
+            st.warning(str(notice["warning"]))
+        for item in notice.get("conflicts") or []:
+            if isinstance(item, Mapping):
+                st.caption(
+                    f"{item.get('knowledge_id')} · "
+                    f"{item.get('status')} · {item.get('text')}"
+                )
     docs = _document_rows(client, kb_id)
     doc_options = [""] + [str(doc["name"]) for doc in docs]
     doc_by_name = {str(doc["name"]): doc for doc in docs}
@@ -1115,8 +1127,20 @@ def _render_create_knowledge(client: CogDocClient, kb_id: str) -> None:
         enable_immediately=enable_immediately,
     )
     if resp.status_code == 201:
+        payload = response_payload(resp)
         _clear_knowledge_cache(client, kb_id)
+        conflicts = payload.get("conflicts", []) if isinstance(payload, Mapping) else []
         st.success("知识已保存。")
+        if conflicts:
+            warning = "发现相似知识，已转为待审核并加入冲突组。"
+            if enable_immediately:
+                warning += " 立即启用请求未执行，需审核后启用。"
+            st.session_state[notice_key] = {
+                "message": "知识已保存。",
+                "warning": warning,
+                "conflicts": conflicts[:3],
+            }
+            st.rerun()
         st.rerun()
     else:
         st.error(_response_error(resp, "新增知识失败"))

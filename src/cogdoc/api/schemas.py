@@ -442,11 +442,23 @@ class DerivedKnowledge(ApiModel):
     review_note: str | None = None
 
 
+# 知识冲突候选。
+class KnowledgeConflictCandidate(ApiModel):
+    knowledge_id: str
+    text: str
+    status: KnowledgeStatus
+    origin: KnowledgeOrigin = KnowledgeOrigin.MANUAL_ENTRY
+    related_source: str | None = None
+    created_at: str
+
+
 # 新增知识响应。
 class KnowledgeCreateResponse(ApiModel):
     schema_version: Literal["v1"] = API_SCHEMA_VERSION
     knowledge: DerivedKnowledge
     deduplicated: bool = False
+    requires_review: bool = False
+    conflicts: list[KnowledgeConflictCandidate] = Field(default_factory=list)
 
 
 # 知识列表响应。

@@ -16,6 +16,7 @@ from cogdoc.config.settings import get_settings
 ACTIVE_STATUSES = {"pending", "approved", "stale"}
 VALID_STATUSES = ACTIVE_STATUSES | {"rejected", "archived"}
 REVISION_SOURCE_STATUSES = {"approved", "stale"}
+SIMILARITY_CONFLICT_THRESHOLD = 0.72
 ALLOWED_BINDING_UPDATE_FIELDS = {
     "related_document_id",
     "related_source",
@@ -40,6 +41,26 @@ def normalized_knowledge_hash(text: str) -> str:
     return hashlib.sha256(normalize_knowledge_text(text).encode("utf-8")).hexdigest()
 
 
+# 提取相似度计算用的字词片段。
+def _similarity_terms(text: str) -> set[str]:
+    compact = re.sub(r"[^\w\u4e00-\u9fff]+", "", normalize_knowledge_text(text))
+    if len(compact) <= 2:
+        return {compact} if compact else set()
+    return {compact[i : i + 2] for i in range(len(compact) - 1)}
+
+
+# 计算文本片段重叠度。
+def _text_similarity(left: str, right: str) -> float:
+    left_terms = _similarity_terms(left)
+    right_terms = _similarity_terms(right)
+    if not left_terms or not right_terms:
+        return 0.0
+    overlap = len(left_terms & right_terms)
+    jaccard = overlap / len(left_terms | right_terms)
+    containment = overlap / min(len(left_terms), len(right_terms))
+    return max(jaccard, containment)
+
+
 # 逐行对象格式派生知识存储：追加快照，读取时按知识标识折叠最新状态。
 class DerivedKnowledgeStore:
     def __init__(self, path: str | None = None):
@@ -62,6 +83,10 @@ class DerivedKnowledgeStore:
             existing = self._find_duplicate(kb_id, normalized_hash)
             if existing is not None:
                 return existing, True
+            similar = self._find_similar(kb_id, normalized_text)
+            conflict_group_id = None
+            if similar:
+                conflict_group_id = self._ensure_conflict_group(similar)
             now = _now_iso()
             entry = {
                 "knowledge_id": f"K{uuid4().hex[:12]}",
@@ -71,14 +96,14 @@ class DerivedKnowledgeStore:
                 "normalized_hash": normalized_hash,
                 "version": int(payload.get("version") or 1),
                 "previous_version_id": payload.get("previous_version_id"),
-                "conflict_group_id": payload.get("conflict_group_id"),
+                "conflict_group_id": conflict_group_id,
                 "related_document_id": payload.get("related_document_id"),
                 "related_source": payload.get("related_source"),
                 "related_source_sha256": payload.get("related_source_sha256"),
                 "related_chunk_ids": list(payload.get("related_chunk_ids") or []),
                 "source_note": payload.get("source_note"),
                 "certainty": payload.get("certainty") or "medium",
-                "status": payload.get("status") or "pending",
+                "status": "pending" if similar else payload.get("status") or "pending",
                 "origin": payload.get("origin") or "manual_entry",
                 "created_from_trace_id": payload.get("created_from_trace_id"),
                 "created_by": payload.get("created_by"),
@@ -229,6 +254,23 @@ class DerivedKnowledgeStore:
             "by_origin": by_origin,
         }
 
+    # 查询同一冲突组的其他知识。
+    def conflicts_for(self, row: dict[str, Any]) -> list[dict[str, Any]]:
+        group_id = row.get("conflict_group_id")
+        if not group_id:
+            return []
+        with self._lock:
+            rows = list(self._latest().values())
+        conflicts = [
+            item
+            for item in rows
+            if item.get("conflict_group_id") == group_id
+            and item.get("knowledge_id") != row.get("knowledge_id")
+            and item.get("status") in ACTIVE_STATUSES
+        ]
+        conflicts.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        return conflicts
+
     # 修改审核状态，保留历史快照。
     def set_status(
         self,
@@ -312,6 +354,45 @@ class DerivedKnowledgeStore:
             ):
                 return row
         return None
+
+    # 查找同库活跃相似知识。
+    def _find_similar(self, kb_id: str, normalized_text: str) -> list[dict[str, Any]]:
+        rows = []
+        for row in self._latest().values():
+            if row.get("kb_id") != kb_id or row.get("status") not in ACTIVE_STATUSES:
+                continue
+            score = _text_similarity(
+                normalized_text, str(row.get("normalized_text") or "")
+            )
+            if score >= SIMILARITY_CONFLICT_THRESHOLD:
+                rows.append({**row, "similarity": round(score, 4)})
+        rows.sort(key=lambda item: float(item.get("similarity") or 0.0), reverse=True)
+        return rows
+
+    # 确保相似知识属于同一个冲突组。
+    def _ensure_conflict_group(self, rows: list[dict[str, Any]]) -> str:
+        group_id = next(
+            (
+                str(row.get("conflict_group_id"))
+                for row in rows
+                if row.get("conflict_group_id")
+            ),
+            "",
+        )
+        if not group_id:
+            group_id = f"C{uuid4().hex[:12]}"
+        now = _now_iso()
+        for row in rows:
+            if row.get("conflict_group_id") == group_id:
+                continue
+            updated = {
+                **row,
+                "conflict_group_id": group_id,
+                "updated_at": now,
+            }
+            updated.pop("similarity", None)
+            self._append(updated)
+        return group_id
 
     # 新版本通过后归档旧版本。
     def _archive_previous_version(
