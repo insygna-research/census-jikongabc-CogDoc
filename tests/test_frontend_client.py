@@ -191,6 +191,40 @@ def test_feedback_client_sends_save_as_knowledge_payload(monkeypatch):
     assert payload["certainty"] == "high"
 
 
+# 验证反馈查询客户端方法调用稳定端点场景。
+def test_feedback_client_list_method_calls_expected_endpoint(monkeypatch):
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return httpx.Response(200, json={"feedback": []})
+
+    monkeypatch.setattr("cogdoc.frontend.api_client.httpx.get", fake_get)
+
+    response = CogDocClient("http://api", api_key="secret").list_feedback(
+        "kb",
+        trace_id="t1",
+        session_id="s1",
+        feedback="thumbs_down",
+        feedback_type="bad_retrieval",
+        is_bad_case=False,
+        limit=25,
+    )
+
+    assert response.status_code == 200
+    assert calls[0][0] == "http://api/v1/feedback"
+    assert calls[0][1]["headers"] == {"Authorization": "Bearer secret"}
+    assert calls[0][1]["params"] == {
+        "kb_id": "kb",
+        "trace_id": "t1",
+        "session_id": "s1",
+        "feedback": "thumbs_down",
+        "feedback_type": "bad_retrieval",
+        "is_bad_case": False,
+        "limit": 25,
+    }
+
+
 # 验证派生知识客户端方法调用稳定端点场景。
 def test_knowledge_client_methods_call_expected_endpoints(monkeypatch):
     calls = []

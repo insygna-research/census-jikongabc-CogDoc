@@ -227,6 +227,14 @@ async def test_review_queue_summary_counts_pending_work(tmp_path, monkeypatch):
             "needs_review": True,
         },
     )
+    app.state.feedback_store.record(
+        {
+            "kb_id": "kb",
+            "trace_id": "t0",
+            "query": "问题",
+            "feedback": "thumbs_down",
+        }
+    )
     app.state.retrieval_feedback_store.record_from_feedback(
         "fb2",
         {
@@ -258,6 +266,8 @@ async def test_review_queue_summary_counts_pending_work(tmp_path, monkeypatch):
     assert body["knowledge"]["pending"] == 1
     assert body["knowledge"]["approved"] == 1
     assert body["knowledge_origin"]["saved_answer"] == 1
+    assert body["feedback_counts"]["total"] == 1
+    assert body["feedback_counts"]["bad_cases"] == 1
     assert body["feedback_analysis"]["create_pending_knowledge"] == 1
     assert body["feedback_analysis"]["needs_review"] == 1
     assert body["retrieval_feedback"]["enabled"] == 1

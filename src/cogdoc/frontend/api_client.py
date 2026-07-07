@@ -288,6 +288,33 @@ class CogDocClient:
             headers=self._headers,
         )
 
+    # 查询反馈记录。
+    def list_feedback(
+        self,
+        kb_id: str,
+        trace_id: str | None = None,
+        session_id: str | None = None,
+        feedback: str | None = None,
+        feedback_type: str | None = None,
+        is_bad_case: bool | None = None,
+        limit: int = 100,
+    ) -> httpx.Response:
+        params = {
+            "kb_id": kb_id,
+            "trace_id": trace_id,
+            "session_id": session_id,
+            "feedback": feedback,
+            "feedback_type": feedback_type,
+            "is_bad_case": is_bad_case,
+            "limit": limit,
+        }
+        return httpx.get(
+            self._url("/v1/feedback"),
+            params={k: v for k, v in params.items() if v is not None},
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
     # 查询反馈理解结果。
     def list_feedback_analysis(
         self,

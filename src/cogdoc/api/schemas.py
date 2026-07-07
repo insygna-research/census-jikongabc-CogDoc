@@ -315,6 +315,12 @@ class FeedbackResponse(ApiModel):
     knowledge_deduplicated: bool = False
 
 
+# 反馈列表响应。
+class FeedbackListResponse(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    feedback: list[dict[str, Any]] = Field(default_factory=list)
+
+
 # 派生知识状态。
 class KnowledgeStatus(str, Enum):
     PENDING = "pending"
@@ -438,6 +444,7 @@ class ReviewQueueSummaryResponse(ApiModel):
     kb_id: str
     knowledge: dict[str, int] = Field(default_factory=dict)
     knowledge_origin: dict[str, int] = Field(default_factory=dict)
+    feedback_counts: dict[str, Any] = Field(default_factory=dict)
     feedback_analysis: dict[str, int] = Field(default_factory=dict)
     feedback_analysis_type: dict[str, int] = Field(default_factory=dict)
     retrieval_feedback: dict[str, int] = Field(default_factory=dict)

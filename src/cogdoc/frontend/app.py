@@ -299,7 +299,8 @@ def _submit_feedback(
     if not trace_id:
         st.toast("缺少 trace_id，无法提交反馈")
         return
-    resp = _client().submit_feedback(
+    client = _client()
+    resp = client.submit_feedback(
         trace_id=trace_id,
         feedback=feedback,
         kb_id=st.session_state.kb_id,
@@ -318,6 +319,13 @@ def _submit_feedback(
         related_chunk_ids=_citation_chunk_ids(final),
         certainty=certainty,
     )
+    if resp.status_code == 201 and st.session_state.kb_id:
+        _clear_api_cache(("feedback", client.base_url, st.session_state.kb_id))
+        _clear_api_cache(("feedback-analysis", client.base_url, st.session_state.kb_id))
+        _clear_api_cache(
+            ("retrieval-feedback", client.base_url, st.session_state.kb_id)
+        )
+        _clear_api_cache(("review-queue", client.base_url, st.session_state.kb_id))
     st.toast(
         "反馈已记录" if resp.status_code == 201 else f"反馈失败: {resp.status_code}"
     )
@@ -1019,6 +1027,27 @@ def _retrieval_feedback_rows(
     return [row for row in rows if isinstance(row, Mapping)]
 
 
+# 读取反馈记录列表。
+def _feedback_rows(
+    client: CogDocClient,
+    kb_id: str,
+    feedback: str | None,
+    is_bad_case: bool | None,
+) -> list[Mapping]:
+    status_code, payload = _cached_api_value(
+        ("feedback", client.base_url, kb_id, feedback, is_bad_case),
+        lambda: _response_status_payload(
+            client.list_feedback(
+                kb_id, feedback=feedback, is_bad_case=is_bad_case, limit=200
+            )
+        ),
+    )
+    if status_code != 200:
+        raise CogDocAPIError(format_api_error(payload, status_code, "读取反馈失败"))
+    rows = payload.get("feedback", []) if isinstance(payload, Mapping) else []
+    return [row for row in rows if isinstance(row, Mapping)]
+
+
 # 读取反馈理解结果列表。
 def _feedback_analysis_rows(
     client: CogDocClient,
@@ -1318,6 +1347,95 @@ def _render_retrieval_feedback_area(client: CogDocClient, kb_id: str) -> None:
         _render_retrieval_feedback_item(client, kb_id, item)
 
 
+# 渲染单条反馈记录。
+def _render_feedback_item(item: Mapping) -> None:
+    feedback_id = str(item.get("feedback_id") or "")
+    feedback = str(item.get("feedback") or "-")
+    issue_type = str(item.get("feedback_type") or "-")
+    trace_id = str(item.get("trace_id") or "-")
+    title = f"{feedback} · {issue_type} · {trace_id}"
+    with st.expander(title):
+        if item.get("query"):
+            st.caption(f"query: {item.get('query')}")
+        if item.get("answer"):
+            st.write(item.get("answer"))
+        if item.get("correction"):
+            st.success(str(item.get("correction")))
+        if item.get("comment"):
+            st.caption(str(item.get("comment")))
+        meta = st.columns(4)
+        meta[0].caption(f"反馈: {feedback_id or '-'}")
+        meta[1].caption(f"会话: {item.get('session_id') or '-'}")
+        meta[2].caption(f"评分: {item.get('rating') or '-'}")
+        meta[3].caption(f"创建时间: {item.get('created_at') or '-'}")
+        citations = (
+            item.get("citations") if isinstance(item.get("citations"), list) else []
+        )
+        evidence = (
+            item.get("evidence") if isinstance(item.get("evidence"), list) else []
+        )
+        if citations:
+            st.caption(
+                "引用: "
+                + ", ".join(
+                    str(ref.get("chunk_id") or ref.get("source") or "-")
+                    for ref in citations
+                    if isinstance(ref, Mapping)
+                )
+            )
+        if evidence:
+            previews = [
+                str(ref.get("text_preview") or "")
+                for ref in evidence
+                if isinstance(ref, Mapping) and ref.get("text_preview")
+            ]
+            if previews:
+                st.caption(f"证据: {previews[0]}")
+
+
+# 渲染反馈记录列表。
+def _render_feedback_area(client: CogDocClient, kb_id: str) -> None:
+    feedback_options = {
+        "全部": None,
+        "点赞": "thumbs_up",
+        "点踩": "thumbs_down",
+        "纠错": "correction",
+    }
+    bad_case_options = {
+        "全部": None,
+        "坏样本": True,
+        "普通反馈": False,
+    }
+    filters = st.columns([1, 1])
+    selected_feedback = filters[0].radio(
+        "反馈",
+        list(feedback_options),
+        horizontal=True,
+        key=f"feedback-kind-{kb_id}",
+    )
+    selected_bad_case = filters[1].radio(
+        "样本",
+        list(bad_case_options),
+        horizontal=True,
+        key=f"feedback-bad-case-{kb_id}",
+    )
+    try:
+        rows = _feedback_rows(
+            client,
+            kb_id,
+            feedback_options[selected_feedback],
+            bad_case_options[selected_bad_case],
+        )
+    except Exception as exc:
+        st.warning(str(exc))
+        return
+    if not rows:
+        st.info("暂无反馈记录。")
+        return
+    for item in rows:
+        _render_feedback_item(item)
+
+
 # 渲染单条反馈理解结果。
 def _render_feedback_analysis_item(item: Mapping) -> None:
     target = item.get("target") if isinstance(item.get("target"), Mapping) else {}
@@ -1381,21 +1499,33 @@ def _knowledge_area(kb_id: str | None) -> None:
         summary = {}
     pending_count = _summary_count(summary, "knowledge", "pending")
     stale_count = _summary_count(summary, "knowledge", "stale")
+    feedback_count = _summary_count(summary, "feedback_counts", "total")
+    bad_case_count = _summary_count(summary, "feedback_counts", "bad_cases")
     retrieval_count = _summary_count(summary, "retrieval_feedback", "enabled")
     retrieval_disabled_count = _summary_count(summary, "retrieval_feedback", "disabled")
     analysis_count = _summary_count(summary, "feedback_analysis", "total")
     needs_review_count = _summary_count(summary, "feedback_analysis", "needs_review")
-    metrics = st.columns(4)
+    metrics = st.columns(5)
     metrics[0].metric("待审核知识", pending_count)
     metrics[1].metric("过期知识", stale_count)
-    metrics[2].metric("反馈分析", analysis_count, delta=needs_review_count)
-    metrics[3].metric("检索调权", retrieval_count + retrieval_disabled_count)
-    metrics[3].caption(f"启用 {retrieval_count} · 禁用 {retrieval_disabled_count}")
-    create_tab, pending_tab, stale_tab, retrieval_tab, analysis_tab = st.tabs(
+    metrics[2].metric("原始反馈", feedback_count)
+    metrics[2].caption(f"坏样本 {bad_case_count}")
+    metrics[3].metric("反馈分析", analysis_count, delta=needs_review_count)
+    metrics[4].metric("检索调权", retrieval_count + retrieval_disabled_count)
+    metrics[4].caption(f"启用 {retrieval_count} · 禁用 {retrieval_disabled_count}")
+    (
+        create_tab,
+        pending_tab,
+        stale_tab,
+        feedback_tab,
+        retrieval_tab,
+        analysis_tab,
+    ) = st.tabs(
         [
             "新增",
             _tab_label("待审核", pending_count),
             _tab_label("过期", stale_count),
+            _tab_label("原始反馈", feedback_count),
             _tab_label("调权", retrieval_count),
             _tab_label("反馈分析", analysis_count),
         ]
@@ -1406,6 +1536,8 @@ def _knowledge_area(kb_id: str | None) -> None:
         _render_knowledge_review_list(client, kb_id, "pending", "待审核")
     with stale_tab:
         _render_knowledge_review_list(client, kb_id, "stale", "过期")
+    with feedback_tab:
+        _render_feedback_area(client, kb_id)
     with retrieval_tab:
         _render_retrieval_feedback_area(client, kb_id)
     with analysis_tab:

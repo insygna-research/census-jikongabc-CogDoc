@@ -96,12 +96,14 @@ async def review_queue_summary(
         created_after=created_after,
         created_before=created_before,
     )
+    feedback_rows = request.app.state.feedback_store.counts(kb_id=kb_id)
     feedback = request.app.state.feedback_analysis_store.counts(kb_id=kb_id)
     retrieval = request.app.state.retrieval_feedback_store.counts(kb_id=kb_id)
     return ReviewQueueSummaryResponse(
         kb_id=kb_id,
         knowledge=knowledge["by_status"],
         knowledge_origin=knowledge["by_origin"],
+        feedback_counts=feedback_rows,
         feedback_analysis={
             **feedback["by_action"],
             "needs_review": feedback["needs_review"],

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 from datetime import datetime, timezone
@@ -9,6 +11,7 @@ from cogdoc.config.settings import get_settings
 
 _BAD_CASE_TYPES = {"thumbs_down", "correction"}
 _EVIDENCE_PREVIEW_LIMIT = 6
+_MISSING_MTIME = -1.0
 
 
 # 清理评测草稿引用项。
@@ -66,8 +69,12 @@ class FeedbackStore:
         self._feedback_path = feedback_path or settings.feedback_log_path
         self._bad_cases_path = bad_cases_path or settings.bad_cases_path
         self._lock = RLock()
+        self._cache_mtime: float | None = None
+        self._cache_rows: list[dict[str, Any]] | None = None
         for path in (self._feedback_path, self._bad_cases_path):
-            os.makedirs(os.path.dirname(path), exist_ok=True)
+            directory = os.path.dirname(path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
 
     # 记录结果。
     def record(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -82,7 +89,86 @@ class FeedbackStore:
                 self._append(self._bad_cases_path, entry)
         return {"feedback_id": feedback_id, "is_bad_case": is_bad_case}
 
+    # 查询反馈记录。
+    def list(
+        self,
+        *,
+        kb_id: str,
+        trace_id: str | None = None,
+        session_id: str | None = None,
+        feedback: str | None = None,
+        feedback_type: str | None = None,
+        is_bad_case: bool | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._read_all()
+        rows = [row for row in rows if row.get("kb_id") == kb_id]
+        if trace_id is not None:
+            rows = [row for row in rows if row.get("trace_id") == trace_id]
+        if session_id is not None:
+            rows = [row for row in rows if row.get("session_id") == session_id]
+        if feedback is not None:
+            rows = [row for row in rows if row.get("feedback") == feedback]
+        if feedback_type is not None:
+            rows = [row for row in rows if row.get("feedback_type") == feedback_type]
+        if is_bad_case is not None:
+            rows = [
+                row
+                for row in rows
+                if (row.get("feedback") in _BAD_CASE_TYPES) is is_bad_case
+            ]
+        rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+        return rows[:limit]
+
+    # 统计反馈记录。
+    def counts(self, *, kb_id: str) -> dict[str, Any]:
+        with self._lock:
+            rows = self._read_all()
+        rows = [row for row in rows if row.get("kb_id") == kb_id]
+        by_feedback: dict[str, int] = {}
+        by_type: dict[str, int] = {}
+        bad_cases = 0
+        for row in rows:
+            feedback = str(row.get("feedback") or "unknown")
+            feedback_type = str(row.get("feedback_type") or "unknown")
+            by_feedback[feedback] = by_feedback.get(feedback, 0) + 1
+            by_type[feedback_type] = by_type.get(feedback_type, 0) + 1
+            if row.get("feedback") in _BAD_CASE_TYPES:
+                bad_cases += 1
+        return {
+            "total": len(rows),
+            "bad_cases": bad_cases,
+            "by_feedback": by_feedback,
+            "by_type": by_type,
+        }
+
+    # 读取全部反馈。
+    def _read_all(self) -> list[dict[str, Any]]:
+        mtime = (
+            os.path.getmtime(self._feedback_path)
+            if os.path.exists(self._feedback_path)
+            else _MISSING_MTIME
+        )
+        if self._cache_mtime == mtime and self._cache_rows is not None:
+            return self._cache_rows
+        if not os.path.exists(self._feedback_path):
+            self._cache_mtime = mtime
+            self._cache_rows = []
+            return []
+        rows = []
+        with open(self._feedback_path, encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    rows.append(json.loads(line))
+        self._cache_mtime = mtime
+        self._cache_rows = rows
+        return rows
+
     # 追加。
     def _append(self, path: str, entry: dict[str, Any]) -> None:
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        if path == self._feedback_path:
+            self._cache_mtime = None
+            self._cache_rows = None

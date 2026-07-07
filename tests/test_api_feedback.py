@@ -246,6 +246,58 @@ async def test_feedback_analysis_can_be_listed(tmp_path, monkeypatch):
     assert rows[0]["extracted_claim"] == "正确答案"
 
 
+# 验证反馈记录可以按条件查询场景。
+@pytest.mark.anyio
+async def test_feedback_records_can_be_listed(tmp_path, monkeypatch):
+    app, _ = _make_app(tmp_path, monkeypatch)
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            first = await client.post(
+                "/v1/feedback",
+                json={
+                    "trace_id": "t10",
+                    "session_id": "s1",
+                    "feedback": "thumbs_down",
+                    "feedback_type": "bad_retrieval",
+                    "kb_id": "kb",
+                    "query": "问题",
+                },
+            )
+            await client.post(
+                "/v1/feedback",
+                json={
+                    "trace_id": "t11",
+                    "feedback": "thumbs_up",
+                    "kb_id": "kb",
+                    "query": "问题",
+                },
+            )
+            listed = await client.get(
+                "/v1/feedback",
+                params={
+                    "kb_id": "kb",
+                    "feedback": "thumbs_down",
+                    "feedback_type": "bad_retrieval",
+                    "is_bad_case": True,
+                },
+            )
+            traced = await client.get(
+                "/v1/feedback", params={"kb_id": "kb", "trace_id": "t10"}
+            )
+
+    assert first.status_code == 201
+    assert listed.status_code == 200
+    rows = listed.json()["feedback"]
+    assert len(rows) == 1
+    assert rows[0]["feedback_id"] == first.json()["feedback_id"]
+    assert rows[0]["session_id"] == "s1"
+    assert traced.json()["feedback"][0]["trace_id"] == "t10"
+
+
 # 验证反馈理解失败不阻断反馈提交场景。
 @pytest.mark.anyio
 async def test_feedback_analysis_failure_does_not_block_feedback(tmp_path, monkeypatch):

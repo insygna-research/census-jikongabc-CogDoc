@@ -3,7 +3,13 @@ import logging
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from cogdoc.agents.feedback_understanding import FeedbackAnalysis, analyze_feedback
-from cogdoc.api.schemas import FeedbackRequest, FeedbackResponse
+from cogdoc.api.schemas import (
+    FeedbackIssueType,
+    FeedbackListResponse,
+    FeedbackRequest,
+    FeedbackResponse,
+    FeedbackType,
+)
 from cogdoc.observability.logger import log_event
 
 router = APIRouter(prefix="/v1", tags=["feedback"])
@@ -180,6 +186,30 @@ async def submit_feedback(body: FeedbackRequest, request: Request):
         knowledge_status=knowledge_status,
         knowledge_deduplicated=knowledge_deduplicated,
     )
+
+
+# 查询反馈记录。
+@router.get("/feedback", response_model=FeedbackListResponse)
+async def list_feedback(
+    request: Request,
+    kb_id: str = Query(min_length=1),
+    trace_id: str | None = None,
+    session_id: str | None = None,
+    feedback: FeedbackType | None = None,
+    feedback_type: FeedbackIssueType | None = None,
+    is_bad_case: bool | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    rows = request.app.state.feedback_store.list(
+        kb_id=kb_id,
+        trace_id=trace_id,
+        session_id=session_id,
+        feedback=feedback.value if feedback is not None else None,
+        feedback_type=feedback_type.value if feedback_type is not None else None,
+        is_bad_case=is_bad_case,
+        limit=limit,
+    )
+    return FeedbackListResponse(feedback=rows)
 
 
 # 查询反馈理解结果。
