@@ -379,6 +379,39 @@ class CogDocClient:
             headers=self._headers,
         )
 
+    # 查询检索调权反馈。
+    def list_retrieval_feedback(
+        self,
+        kb_id: str,
+        enabled: bool | None = None,
+        limit: int = 100,
+    ) -> httpx.Response:
+        params = {"kb_id": kb_id, "enabled": enabled, "limit": limit}
+        return httpx.get(
+            self._url("/v1/retrieval-feedback"),
+            params={k: v for k, v in params.items() if v is not None},
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    # 设置检索调权反馈状态。
+    def set_retrieval_feedback_enabled(
+        self,
+        feedback_id: str,
+        enabled: bool,
+        actor: str | None = None,
+        reason: str | None = None,
+    ) -> httpx.Response:
+        action = "enable" if enabled else "disable"
+        payload = {"actor": actor, "reason": reason}
+        kwargs = {"timeout": self.timeout, "headers": self._headers}
+        if not enabled:
+            kwargs["json"] = {k: v for k, v in payload.items() if v is not None}
+        return httpx.post(
+            self._url(f"/v1/retrieval-feedback/{feedback_id}/{action}"),
+            **kwargs,
+        )
+
     # 构造对话请求体。
     def _chat_payload(
         self, kb_id: str, query: str, mode: str, session_id: str | None, is_local: bool

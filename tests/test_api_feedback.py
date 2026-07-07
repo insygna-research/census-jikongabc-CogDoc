@@ -217,6 +217,9 @@ async def test_retrieval_feedback_can_disable_and_enable(tmp_path, monkeypatch):
                     "citations": [{"chunk_id": "c1", "source": "a.pdf"}],
                 },
             )
+            listed = await client.get(
+                "/v1/retrieval-feedback", params={"kb_id": "kb"}
+            )
             feedback_id = _read_jsonl(root / "retrieval_feedback.jsonl")[0][
                 "retrieval_feedback_id"
             ]
@@ -224,10 +227,18 @@ async def test_retrieval_feedback_can_disable_and_enable(tmp_path, monkeypatch):
                 f"/v1/retrieval-feedback/{feedback_id}/disable",
                 json={"actor": "admin", "reason": "误点"},
             )
+            disabled_listed = await client.get(
+                "/v1/retrieval-feedback",
+                params={"kb_id": "kb", "enabled": False},
+            )
             enabled = await client.post(f"/v1/retrieval-feedback/{feedback_id}/enable")
 
+    assert listed.status_code == 200
+    assert listed.json()["retrieval_feedback"][0]["chunk_id"] == "c1"
     assert disabled.status_code == 200
     assert disabled.json()["status"] == "disabled"
+    assert disabled_listed.status_code == 200
+    assert disabled_listed.json()["retrieval_feedback"][0]["enabled"] is False
     assert enabled.status_code == 200
     assert enabled.json()["status"] == "enabled"
     rows = _read_jsonl(root / "retrieval_feedback.jsonl")

@@ -233,3 +233,44 @@ def test_knowledge_client_methods_call_expected_endpoints(monkeypatch):
     assert calls[2][2]["json"] == {"actor": "admin"}
     assert calls[3][0:2] == ("POST", "http://api/v1/knowledge/batch-reject")
     assert calls[3][2]["json"] == {"knowledge_ids": ["K1", "K2"], "note": "重复"}
+
+
+# 验证检索调权客户端方法调用稳定端点场景。
+def test_retrieval_feedback_client_methods_call_expected_endpoints(monkeypatch):
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append(("POST", url, kwargs))
+        return httpx.Response(200, json={"ok": True})
+
+    def fake_get(url, **kwargs):
+        calls.append(("GET", url, kwargs))
+        return httpx.Response(200, json={"retrieval_feedback": []})
+
+    monkeypatch.setattr("cogdoc.frontend.api_client.httpx.post", fake_post)
+    monkeypatch.setattr("cogdoc.frontend.api_client.httpx.get", fake_get)
+
+    client = CogDocClient("http://api", api_key="secret")
+    client.list_retrieval_feedback("kb", enabled=False, limit=50)
+    client.set_retrieval_feedback_enabled(
+        "rf1", False, actor="admin", reason="误点"
+    )
+    client.set_retrieval_feedback_enabled("rf1", True)
+
+    assert calls[0][0:2] == ("GET", "http://api/v1/retrieval-feedback")
+    assert calls[0][2]["headers"] == {"Authorization": "Bearer secret"}
+    assert calls[0][2]["params"] == {
+        "kb_id": "kb",
+        "enabled": False,
+        "limit": 50,
+    }
+    assert calls[1][0:2] == (
+        "POST",
+        "http://api/v1/retrieval-feedback/rf1/disable",
+    )
+    assert calls[1][2]["json"] == {"actor": "admin", "reason": "误点"}
+    assert calls[2][0:2] == (
+        "POST",
+        "http://api/v1/retrieval-feedback/rf1/enable",
+    )
+    assert "json" not in calls[2][2]

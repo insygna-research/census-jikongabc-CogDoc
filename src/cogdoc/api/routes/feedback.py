@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from cogdoc.api.schemas import FeedbackRequest, FeedbackResponse
 
@@ -62,6 +62,20 @@ async def submit_feedback(body: FeedbackRequest, request: Request):
         knowledge_status=knowledge_status,
         knowledge_deduplicated=knowledge_deduplicated,
     )
+
+
+# 查询检索反馈。
+@router.get("/retrieval-feedback")
+async def list_retrieval_feedback(
+    request: Request,
+    kb_id: str = Query(min_length=1),
+    enabled: bool | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    rows = request.app.state.retrieval_feedback_store.list(
+        kb_id=kb_id, enabled=enabled, limit=limit
+    )
+    return {"retrieval_feedback": rows}
 
 
 # 禁用检索反馈。

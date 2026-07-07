@@ -882,6 +882,31 @@ def _knowledge_rows(client: CogDocClient, kb_id: str, status: str) -> list[Mappi
     return [row for row in rows if isinstance(row, Mapping)]
 
 
+# 清理检索调权反馈缓存。
+def _clear_retrieval_feedback_cache(client: CogDocClient, kb_id: str) -> None:
+    _clear_api_cache(("retrieval-feedback", client.base_url, kb_id))
+
+
+# 读取检索调权反馈列表。
+def _retrieval_feedback_rows(
+    client: CogDocClient,
+    kb_id: str,
+    enabled: bool | None,
+) -> list[Mapping]:
+    status_code, payload = _cached_api_value(
+        ("retrieval-feedback", client.base_url, kb_id, enabled),
+        lambda: _response_status_payload(
+            client.list_retrieval_feedback(kb_id, enabled=enabled, limit=200)
+        ),
+    )
+    if status_code != 200:
+        raise CogDocAPIError(
+            format_api_error(payload, status_code, "读取检索调权失败")
+        )
+    rows = payload.get("retrieval_feedback", []) if isinstance(payload, Mapping) else []
+    return [row for row in rows if isinstance(row, Mapping)]
+
+
 # 处理审核响应。
 def _handle_knowledge_response(resp, client: CogDocClient, kb_id: str) -> None:
     if resp.status_code >= 400:
@@ -1008,6 +1033,88 @@ def _render_knowledge_review_list(
         _render_knowledge_item(client, kb_id, item, status)
 
 
+# 处理检索调权反馈响应。
+def _handle_retrieval_feedback_response(
+    resp, client: CogDocClient, kb_id: str
+) -> None:
+    if resp.status_code >= 400:
+        st.error(_response_error(resp, "检索调权操作失败"))
+        return
+    _clear_retrieval_feedback_cache(client, kb_id)
+    st.rerun()
+
+
+# 渲染单条检索调权反馈。
+def _render_retrieval_feedback_item(
+    client: CogDocClient, kb_id: str, item: Mapping
+) -> None:
+    feedback_id = str(item.get("retrieval_feedback_id") or "")
+    chunk_id = str(item.get("chunk_id") or "-")
+    status = "启用" if item.get("enabled") is True else "禁用"
+    delta = item.get("weight_delta")
+    title = f"{chunk_id} · {status} · {delta}"
+    with st.expander(title):
+        st.write(item.get("query_text") or "")
+        meta = st.columns(4)
+        meta[0].caption(f"来源: {item.get('source_type') or '-'}")
+        meta[1].caption(f"置信度: {item.get('confidence') or '-'}")
+        meta[2].caption(f"反馈: {item.get('feedback_id') or '-'}")
+        meta[3].caption(f"创建时间: {item.get('created_at') or '-'}")
+        if item.get("trace_id"):
+            st.caption(f"trace: {item.get('trace_id')}")
+        if item.get("disable_reason"):
+            st.caption(f"停用原因: {item.get('disable_reason')}")
+        action_cols = st.columns([1, 2, 5])
+        if item.get("enabled") is True:
+            reason = action_cols[1].text_input(
+                "停用原因",
+                key=f"disable-reason-{feedback_id}",
+                label_visibility="collapsed",
+            )
+            if action_cols[0].button("禁用", key=f"disable-rf-{feedback_id}"):
+                _handle_retrieval_feedback_response(
+                    client.set_retrieval_feedback_enabled(
+                        feedback_id,
+                        False,
+                        actor="frontend",
+                        reason=reason.strip() or None,
+                    ),
+                    client,
+                    kb_id,
+                )
+        elif action_cols[0].button("启用", key=f"enable-rf-{feedback_id}"):
+            _handle_retrieval_feedback_response(
+                client.set_retrieval_feedback_enabled(feedback_id, True),
+                client,
+                kb_id,
+            )
+
+
+# 渲染检索调权反馈列表。
+def _render_retrieval_feedback_area(client: CogDocClient, kb_id: str) -> None:
+    status_options = {
+        "启用": True,
+        "禁用": False,
+        "全部": None,
+    }
+    selected = st.radio(
+        "状态",
+        list(status_options),
+        horizontal=True,
+        key=f"retrieval-feedback-status-{kb_id}",
+    )
+    try:
+        rows = _retrieval_feedback_rows(client, kb_id, status_options[selected])
+    except Exception as exc:
+        st.warning(str(exc))
+        return
+    if not rows:
+        st.info("暂无检索调权反馈。")
+        return
+    for item in rows:
+        _render_retrieval_feedback_item(client, kb_id, item)
+
+
 # 渲染派生知识页。
 def _knowledge_area(kb_id: str | None) -> None:
     st.subheader("派生知识")
@@ -1015,13 +1122,17 @@ def _knowledge_area(kb_id: str | None) -> None:
         st.info("先选择知识库。")
         return
     client = _client()
-    create_tab, pending_tab, stale_tab = st.tabs(["新增", "待审核", "过期"])
+    create_tab, pending_tab, stale_tab, retrieval_tab = st.tabs(
+        ["新增", "待审核", "过期", "调权"]
+    )
     with create_tab:
         _render_create_knowledge(client, kb_id)
     with pending_tab:
         _render_knowledge_review_list(client, kb_id, "pending", "待审核")
     with stale_tab:
         _render_knowledge_review_list(client, kb_id, "stale", "过期")
+    with retrieval_tab:
+        _render_retrieval_feedback_area(client, kb_id)
 
 
 # 检索调试后台线程。

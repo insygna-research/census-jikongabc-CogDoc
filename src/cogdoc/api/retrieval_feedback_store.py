@@ -147,6 +147,22 @@ class RetrievalFeedbackStore:
                     ) * float(row.get("confidence") or 1.0)
         return boosts
 
+    # 列出检索反馈。
+    def list(
+        self,
+        *,
+        kb_id: str,
+        enabled: bool | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = list(self._latest_cached().values())
+        rows = [row for row in rows if row.get("kb_id") == kb_id]
+        if enabled is not None:
+            rows = [row for row in rows if row.get("enabled") is enabled]
+        rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+        return rows[:limit]
+
     # 设置启用状态。
     def set_enabled(
         self,
@@ -174,7 +190,11 @@ class RetrievalFeedbackStore:
 
     # 读取带缓存的最新快照。
     def _latest_cached(self) -> dict[str, dict[str, Any]]:
-        mtime = os.path.getmtime(self._path) if os.path.exists(self._path) else _MISSING_MTIME
+        mtime = (
+            os.path.getmtime(self._path)
+            if os.path.exists(self._path)
+            else _MISSING_MTIME
+        )
         if self._cache_mtime == mtime and self._cache_latest is not None:
             return self._cache_latest
         latest = self._latest()
