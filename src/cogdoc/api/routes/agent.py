@@ -84,7 +84,7 @@ def _record_task_session(
     )
 
 
-# 执行 summary 或 compare。
+# 执行摘要或对比。
 async def _task_endpoint(
     body: TaskRequest,
     request: Request,
@@ -138,10 +138,23 @@ def _run_retrieve(body: RetrieveRequest) -> list:
     from cogdoc.graph.subgraphs.qa import RetrieverFactory
     from cogdoc.service.kb_readers import kb_read_lease
     from cogdoc.tools.reranker import BGEReranker, skipped_cpu_rerank_docs
+    from cogdoc.tools.retriever.derived_knowledge import DerivedKnowledgeRetriever
 
     with kb_read_lease(body.doc_id):
         engine = RetrieverFactory.get_engine(body.doc_id)
         docs = engine.search(body.query, top_k=body.top_k)
+        seen_chunk_ids = {
+            str(doc.get("meta", {}).get("chunk_id") or "")
+            for doc in docs
+            if isinstance(doc, Mapping)
+        }
+        for doc in DerivedKnowledgeRetriever().search(
+            body.doc_id, body.query, top_k=body.top_k
+        ):
+            chunk_id = str(doc.get("meta", {}).get("chunk_id") or "")
+            if chunk_id and chunk_id not in seen_chunk_ids:
+                seen_chunk_ids.add(chunk_id)
+                docs.append(doc)
         if not body.rerank or not docs:
             return docs
         target_device = BGEReranker.default_device()
@@ -163,7 +176,7 @@ def _safe_mapping(value: Any) -> dict[str, Any]:
     return {str(key): _json_safe(item) for key, item in value.items()}
 
 
-# 转换为 JSON 可序列化值。
+# 转换为可序列化值。
 def _json_safe(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
@@ -182,6 +195,8 @@ def _retrieve_hit(rank: int, doc: Mapping[str, Any]) -> RetrieveHit:
     return RetrieveHit(
         rank=rank,
         chunk_id=str(meta.get("chunk_id", "")),
+        source_type=str(meta.get("source_type", "document") or "document"),
+        knowledge_id=str(meta.get("knowledge_id", "") or ""),
         chunk_index=meta.get("chunk_index"),
         source=str(meta.get("source", "") or ""),
         page=page,

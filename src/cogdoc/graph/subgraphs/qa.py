@@ -19,6 +19,7 @@ from cogdoc.tools.retriever.vector_retriever import (
 from cogdoc.tools.retriever.bm25_retriever import BM25Retriever
 from cogdoc.tools.retriever.derived_knowledge import DerivedKnowledgeRetriever
 from cogdoc.tools.retriever.hybrid import HybridRetriever, IndexCorruptError
+from cogdoc.tools.retriever.metadata import safe_retrieval_metadata
 from cogdoc.tools.reranker import BGEReranker, skipped_cpu_rerank_docs
 from cogdoc.agents.qa_generator import Generator
 from cogdoc.agents.query_rewriter import QueryRewriteAgent
@@ -421,6 +422,7 @@ def generate_node(state: GraphState) -> dict:
             rerank_score=doc.get("retrieval", {}).get("rerank_score"),
             rewrite_query=doc.get("retrieval", {}).get("rewrite_query"),
             text_preview=doc["text"][:100],
+            retrieval=safe_retrieval_metadata(doc.get("retrieval")),
         )
         for doc in final_docs
     ]

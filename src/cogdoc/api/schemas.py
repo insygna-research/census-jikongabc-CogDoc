@@ -3,6 +3,7 @@ from enum import Enum
 from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from cogdoc.config.settings import get_settings
+from cogdoc.tools.retriever.metadata import safe_retrieval_metadata
 
 
 API_SCHEMA_VERSION = "v1"
@@ -107,6 +108,7 @@ class Evidence(ApiModel):
     rerank_score: float | None = None
     rewrite_query: str | None = None
     text_preview: str = ""
+    retrieval: dict[str, Any] = Field(default_factory=dict)
 
 
 # 对话接口结构化响应。
@@ -140,7 +142,6 @@ class RetrieveRequest(QueryDocRequest):
 # 检索命中项，供前端证据面板和调试面板直接消费。
 class RetrieveHit(Evidence):
     rank: int
-    retrieval: dict[str, Any] = Field(default_factory=dict)
 
 
 # 检索接口结构化响应。
@@ -566,6 +567,7 @@ def _evidence_from_mapping(item: Any) -> Evidence:
         rerank_score=_float_or_none(data.get("rerank_score")),
         rewrite_query=data.get("rewrite_query"),
         text_preview=str(data.get("text_preview", "") or ""),
+        retrieval=safe_retrieval_metadata(data.get("retrieval")),
     )
 
 

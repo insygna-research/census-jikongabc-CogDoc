@@ -31,3 +31,9 @@ def test_derived_knowledge_retriever_returns_approved_only(tmp_path):
     assert docs[0]["meta"]["source_type"] == "derived_knowledge"
     assert docs[0]["meta"]["source"] == f"knowledge:{approved['knowledge_id']}"
     assert docs[0]["meta"]["related_chunk_ids"] == ["chunk-1"]
+    assert docs[0]["retrieval"]["search_channel"] == "derived_knowledge"
+    assert docs[0]["retrieval"]["status_filter"] == "approved"
+    assert docs[0]["retrieval"]["match_coverage"] > 0
+    assert docs[0]["retrieval"]["query_term_count"] > 0
+    assert docs[0]["retrieval"]["knowledge_term_count"] > 0
+    assert "差旅" in docs[0]["retrieval"]["matched_terms"]

@@ -20,7 +20,7 @@ class DerivedKnowledgeRetriever:
         if not query_terms:
             return []
 
-        scored: list[tuple[float, dict[str, Any]]] = []
+        scored: list[tuple[float, dict[str, Any], dict[str, Any]]] = []
         for row in rows:
             text = str(row.get("text") or "")
             source_note = str(row.get("source_note") or "")
@@ -34,16 +34,32 @@ class DerivedKnowledgeRetriever:
                 continue
             coverage = overlap / max(sum(query_terms.values()), 1)
             density = overlap / max(sum(terms.values()), 1)
-            scored.append((coverage + density, row))
+            matched_terms = sorted(
+                term for term in query_terms if terms.get(term, 0) > 0
+            )
+            explanation = {
+                "matched_terms": matched_terms[:12],
+                "query_term_count": sum(query_terms.values()),
+                "knowledge_term_count": sum(terms.values()),
+                "match_coverage": round(coverage, 6),
+                "match_density": round(density, 6),
+            }
+            scored.append((coverage + density, row, explanation))
 
         scored.sort(key=lambda item: item[0], reverse=True)
         return [
-            self._row_to_doc(row, score, rank)
-            for rank, (score, row) in enumerate(scored[:top_k])
+            self._row_to_doc(row, score, rank, explanation)
+            for rank, (score, row, explanation) in enumerate(scored[:top_k])
         ]
 
     # 将派生知识记录转换成检索文档。
-    def _row_to_doc(self, row: dict[str, Any], score: float, rank: int) -> RetrievedDoc:
+    def _row_to_doc(
+        self,
+        row: dict[str, Any],
+        score: float,
+        rank: int,
+        explanation: dict[str, Any],
+    ) -> RetrievedDoc:
         knowledge_id = str(row.get("knowledge_id") or "")
         related_source = str(row.get("related_source") or "")
         chunk_ids = [str(item) for item in row.get("related_chunk_ids") or []]
@@ -70,7 +86,10 @@ class DerivedKnowledgeRetriever:
             "text": str(row.get("text") or ""),
             "meta": meta,
             "retrieval": {
+                **explanation,
                 "knowledge_score": score,
+                "retrieval_score": score,
                 "search_channel": "derived_knowledge",
+                "status_filter": "approved",
             },
         }

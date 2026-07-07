@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from cogdoc.config.settings import Settings, get_settings
+from cogdoc.tools.retriever.metadata import safe_retrieval_metadata
 
 
 TRACE_SCHEMA_VERSION = "v1"
@@ -27,11 +28,14 @@ def _doc_ref(doc: Mapping[str, Any]) -> dict:
     retrieval = doc.get("retrieval") or {}
     return {
         "chunk_id": meta.get("chunk_id", ""),
+        "source_type": meta.get("source_type", "document"),
+        "knowledge_id": meta.get("knowledge_id", ""),
         "source": meta.get("source", ""),
         "page": meta.get("page", 0),
         "page_start": meta.get("page_start", meta.get("page", 0)),
         "page_end": meta.get("page_end", meta.get("page", 0)),
         "rewrite_query": retrieval.get("rewrite_query", ""),
+        "retrieval": safe_retrieval_metadata(retrieval),
         "text_preview": _preview(doc.get("text", "")),
     }
 
@@ -40,10 +44,13 @@ def _doc_ref(doc: Mapping[str, Any]) -> dict:
 def _evidence_ref(item: Mapping[str, Any]) -> dict:
     return {
         "chunk_id": item.get("chunk_id", ""),
+        "source_type": item.get("source_type", "document"),
+        "knowledge_id": item.get("knowledge_id", ""),
         "source": item.get("source", ""),
         "page": item.get("page", 0),
         "page_start": item.get("page_start", item.get("page", 0)),
         "page_end": item.get("page_end", item.get("page", 0)),
+        "retrieval": safe_retrieval_metadata(item.get("retrieval") or {}),
         "text_preview": _preview(item.get("text_preview", "")),
     }
 

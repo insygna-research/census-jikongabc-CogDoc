@@ -11,6 +11,16 @@ _BAD_CASE_TYPES = {"thumbs_down", "correction"}
 _EVIDENCE_PREVIEW_LIMIT = 6
 
 
+# 清理评测草稿引用项。
+def _eval_ref(item: Any) -> Any:
+    if not isinstance(item, dict):
+        return item
+    cleaned = dict(item)
+    if not cleaned.get("retrieval"):
+        cleaned.pop("retrieval", None)
+    return cleaned
+
+
 # 构建可转入质量评测集的坏样本草稿。
 def _build_eval_draft(entry: dict[str, Any]) -> dict[str, Any]:
     feedback = str(entry.get("feedback") or "")
@@ -31,20 +41,22 @@ def _build_eval_draft(entry: dict[str, Any]) -> dict[str, Any]:
     if correction:
         draft["correction"] = correction
     if entry.get("citations"):
-        draft["citations"] = entry["citations"]
+        draft["citations"] = [_eval_ref(item) for item in entry["citations"]]
     if entry.get("evidence"):
-        draft["evidence"] = entry["evidence"][:_EVIDENCE_PREVIEW_LIMIT]
+        draft["evidence"] = [
+            _eval_ref(item) for item in entry["evidence"][:_EVIDENCE_PREVIEW_LIMIT]
+        ]
     return draft
 
 
-# 返回当前 UTC 时间字符串。
+# 返回当前协调世界时时间字符串。
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# 反馈追加落 jsonl；点踩/纠错另写 bad_cases，供评测集自我进化。
+# 反馈追加落逐行对象文件；点踩和纠错另写坏样本，供评测集自我进化。
 class FeedbackStore:
-    # 反馈追加落 jsonl；点踩/纠错另写 bad_cases，供评测集自我进化。
+    # 反馈追加落逐行对象文件；点踩和纠错另写坏样本，供评测集自我进化。
     def __init__(
         self,
         feedback_path: str | None = None,

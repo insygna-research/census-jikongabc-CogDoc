@@ -21,6 +21,15 @@ def test_build_trace_step_keeps_only_safe_document_preview():
                     "page": 3,
                     "page_start": 3,
                     "page_end": 4,
+                    "source_type": "derived_knowledge",
+                    "knowledge_id": "K1",
+                },
+                "retrieval": {
+                    "search_channel": "derived_knowledge",
+                    "matched_terms": ["报名"],
+                    "match_coverage": 1.0,
+                    "query_term_count": 1,
+                    "unsafe": "不应保留",
                 },
             }
         ],
@@ -35,6 +44,12 @@ def test_build_trace_step_keeps_only_safe_document_preview():
     assert step["retrieval_top_k"] is None
     assert step["counts"]["retrieved_count"] == 1
     assert step["evidence"][0]["chunk_id"] == "chunk-1"
+    assert step["evidence"][0]["source_type"] == "derived_knowledge"
+    assert step["evidence"][0]["knowledge_id"] == "K1"
+    assert step["evidence"][0]["retrieval"]["search_channel"] == "derived_knowledge"
+    assert step["evidence"][0]["retrieval"]["matched_terms"] == ["报名"]
+    assert step["evidence"][0]["retrieval"]["query_term_count"] == 1
+    assert "unsafe" not in step["evidence"][0]["retrieval"]
     assert len(step["evidence"][0]["text_preview"]) <= 120
     assert "answer" not in step
 

@@ -57,6 +57,10 @@ def test_chat_result_to_response_maps_stable_fields_without_raw_text():
                 "rerank_score": "0.98",
                 "rewrite_query": "报名要求",
                 "text_preview": "报名要求摘要",
+                "retrieval": {
+                    "search_channel": "derived_knowledge",
+                    "matched_terms": ["报名"],
+                },
                 "text": "不应进入 API 响应的全文",
             }
         ],
@@ -92,6 +96,10 @@ def test_chat_result_to_response_maps_stable_fields_without_raw_text():
     assert payload["evidence"][0]["rerank_score"] == 0.98
     assert payload["evidence"][0]["source_type"] == "document"
     assert payload["evidence"][0]["text_preview"] == "报名要求摘要"
+    assert payload["evidence"][0]["retrieval"]["search_channel"] == (
+        "derived_knowledge"
+    )
+    assert payload["evidence"][0]["retrieval"]["matched_terms"] == ["报名"]
     assert "raw_output" not in payload
     assert "steps" not in payload
     assert "trace_path" not in payload

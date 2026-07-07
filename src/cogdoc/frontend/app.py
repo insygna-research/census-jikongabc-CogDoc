@@ -747,6 +747,19 @@ def _render_evidence(final: dict, key: str, query: str = "") -> None:
                         f"**{e.get('source', '')}**{_page_label(e.get('page'))}"
                     )
                 st.caption(e.get("text_preview", ""))
+                retrieval = e.get("retrieval") if isinstance(e, Mapping) else {}
+                if isinstance(retrieval, Mapping) and retrieval.get("search_channel"):
+                    terms = ", ".join(retrieval.get("matched_terms") or [])
+                    coverage = retrieval.get("match_coverage")
+                    density = retrieval.get("match_density")
+                    details = [f"通道: {retrieval.get('search_channel')}"]
+                    if terms:
+                        details.append(f"匹配词: {terms}")
+                    if isinstance(coverage, (int, float)):
+                        details.append(f"覆盖率: {coverage:.2f}")
+                    if isinstance(density, (int, float)):
+                        details.append(f"密度: {density:.2f}")
+                    st.caption(" · ".join(details))
 
     fb = st.columns([1, 1, 6])
     if fb[0].button("👍", key=f"up-{key}"):
