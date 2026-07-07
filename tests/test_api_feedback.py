@@ -98,10 +98,20 @@ async def test_thumbs_down_lands_in_bad_cases(tmp_path, monkeypatch):
         "trace_id": "t2",
         "kb_id": "kb",
         "feedback": "thumbs_down",
-        "citations": [{"chunk_id": "c1", "source": "a.pdf", "page": 1}],
+        "citations": [
+            {
+                "chunk_id": "c1",
+                "source_type": "document",
+                "knowledge_id": "",
+                "source": "a.pdf",
+                "page": 1,
+            }
+        ],
         "evidence": [
             {
                 "chunk_id": "c1",
+                "source_type": "document",
+                "knowledge_id": "",
                 "source": "a.pdf",
                 "page": 1,
                 "text_preview": "证据",

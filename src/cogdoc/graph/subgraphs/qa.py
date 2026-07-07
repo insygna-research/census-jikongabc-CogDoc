@@ -16,6 +16,7 @@ from cogdoc.tools.retriever.vector_retriever import (
     EmbeddingModelMismatchError,
 )
 from cogdoc.tools.retriever.bm25_retriever import BM25Retriever
+from cogdoc.tools.retriever.derived_knowledge import DerivedKnowledgeRetriever
 from cogdoc.tools.retriever.hybrid import HybridRetriever, IndexCorruptError
 from cogdoc.tools.reranker import BGEReranker, skipped_cpu_rerank_docs
 from cogdoc.agents.qa_generator import Generator
@@ -25,9 +26,10 @@ from cogdoc.agents.citation_validator import CitationValidatorAgent
 
 
 NEIGHBOR_CONTEXT_RADIUS = 1
+_derived_knowledge_retriever = DerivedKnowledgeRetriever()
 
 
-# 进程内按 (kb_id, gen_id) 缓存引擎，gen_id=None 代表无活跃代/空代；线程安全且有界；switch_active 后必须调用 invalidate(kb_id)，以强制下次 get_engine 重解析 active generation。
+# 进程内按知识库和索引代缓存引擎，切代后失效缓存。
 class RetrieverFactory:
     _engines: "OrderedDict[tuple, HybridRetriever]" = OrderedDict()
     _lock = RLock()
@@ -40,27 +42,27 @@ class RetrieverFactory:
         if shared_lifecycle_store().status(kb_id) != LIFECYCLE_ACTIVE:
             return HybridRetriever(NullRetriever(), NullRetriever())
 
-        # 锁外解析 active gen_id（读 state.json），以 (kb_id, gen_id) 为缓存键查缓存。
+        # 锁外解析活跃索引代，以知识库和索引代为缓存键查缓存。
         gen_id = cls._resolve_gen_id(kb_id)
         cache_key = (kb_id, gen_id)
 
         with cls._lock:
             engine = cls._engines.get(cache_key)
             if engine is not None:
-                # 缓存命中前再查一次 lifecycle：首检后删库可能已切 deleting，缓存引擎不得再供读。
+                # 缓存命中前再查一次生命周期，避免删库中继续读旧引擎。
                 if shared_lifecycle_store().status(kb_id) != LIFECYCLE_ACTIVE:
                     return HybridRetriever(NullRetriever(), NullRetriever())
                 cls._engines.move_to_end(cache_key)
                 return engine
 
-        # 锁外构造：不同 kb 冷启动互不阻塞。
+        # 锁外构造，不同知识库冷启动互不阻塞。
         built = cls._build_engine(kb_id, gen_id)
 
         with cls._lock:
-            # 构造期间被删库则丢弃，返回空引擎不缓存，关闭"构造窗口内转入 deleting"的竞态。
+            # 构造期间被删库则丢弃，返回空引擎且不缓存。
             if shared_lifecycle_store().status(kb_id) != LIFECYCLE_ACTIVE:
                 return HybridRetriever(NullRetriever(), NullRetriever())
-            # 插入前重新解析：防止构造期间 switch_active + invalidate 使 gen_id 已失效。
+            # 插入前重新解析，防止构造期间切代导致索引代已失效。
             current_gen_id = cls._resolve_gen_id(kb_id)
             if current_gen_id != gen_id:
                 # 代已切换，丢弃刚构造的引擎不写回缓存；下次请求自然构造新代引擎。
@@ -74,10 +76,10 @@ class RetrieverFactory:
             cls._engines.move_to_end(cache_key)
             return engine
 
-    # 解析genid。
+    # 解析索引代标识。
     @classmethod
     def _resolve_gen_id(cls, kb_id: str) -> str | None:
-        # 读 active generation id；无活跃代或合法空索引（expected_count=0）均返回 None。
+        # 读取活跃索引代标识；无活跃代或合法空索引均返回空。
         active = KBState(kb_id).active()
         if active is None or active.get("expected_count") == 0:
             return None
@@ -97,13 +99,13 @@ class RetrieverFactory:
                 bm25_retriever=BM25Retriever(collection_id=collection_id),
             )
         except EmbeddingModelMismatchError:
-            # 嵌入模型已更换，当前代向量集合不可用：返回空引擎。 Phase 4 coordinator 检测到 index_build_version 不符时将触发新代重建。
+            # 嵌入模型已更换，当前代向量集合不可用时返回空引擎。
             return HybridRetriever(NullRetriever(), NullRetriever())
 
-        # 按 gen_id 精确读取该代记录，避免构造期间切代后拿新代 expected_count 校验旧代引擎。
+        # 按索引代精确读取记录，避免切代时用新代计数校验旧代引擎。
         gen_state = KBState(kb_id).get(gen_id)
         if gen_state is None:
-            # 该代在构造期间已被 GC 回收：返回空引擎，get_engine 会因 gen_id 不符而不缓存。
+            # 该代在构造期间已被回收，返回空引擎且不缓存。
             return HybridRetriever(NullRetriever(), NullRetriever())
         expected = gen_state.get("expected_count")
         actual = engine.count()
@@ -118,21 +120,21 @@ class RetrieverFactory:
     # 使失效结果。
     @classmethod
     def invalidate(cls, kb_id: str) -> None:
-        # 删除该 kb 的全部代缓存；switch_active 后调用，强制下次重解析 active generation。
+        # 删除该知识库的全部代缓存，强制下次重解析活跃代。
         with cls._lock:
             stale_keys = [k for k in cls._engines if k[0] == kb_id]
             for k in stale_keys:
                 del cls._engines[k]
 
 
-# 完成 重写问题node 处理。
+# 处理问题改写节点。
 def rewrite_node(state: GraphState) -> dict:
     return QueryRewriteAgent.rewrite_query(state)
 
 
-# 校验重写问题node。
+# 校验问题改写节点。
 def verify_rewrite_node(state: GraphState) -> dict:
-    # 在检索前过滤语义漂移的 query rewrite。
+    # 在检索前过滤语义漂移的问题改写。
     return RewriteVerifyAgent.verify_rewrites(state)
 
 
@@ -184,6 +186,11 @@ def _expand_with_neighbor_chunks(
             engine = RetrieverFactory.get_engine(doc_id)
             for doc in reranked_docs:
                 meta = doc.get("meta", {})
+                if meta.get("source_type") == "derived_knowledge":
+                    expanded[
+                        str(meta.get("chunk_id", "")) or _missing_chunk_key(expanded)
+                    ] = copy.deepcopy(doc)
+                    continue
                 source = str(meta.get("source", "") or "")
                 parent_chunk_id = str(meta.get("chunk_id", ""))
                 if not source or not parent_chunk_id:
@@ -230,7 +237,7 @@ def _expand_with_neighbor_chunks(
     return list(expanded.values())
 
 
-# 检索 node。
+# 检索节点。
 def retrieve_node(state: GraphState) -> dict:
     original_query = state.get("query", "")
     doc_id = state.get("doc_id", "default")
@@ -250,11 +257,25 @@ def retrieve_node(state: GraphState) -> dict:
             docs = engine.search(query=query, top_k=settings.qa_retrieval_top_k)
             for doc in docs:
                 meta = doc["meta"]
-                # 检索去重只认稳定 chunk_id。
+                # 检索去重只认稳定分块标识。
                 chunk_key = meta["chunk_id"]
                 if chunk_key not in seen_chunk_keys:
                     seen_chunk_keys.add(chunk_key)
 
+                    if query != original_query:
+                        doc_copy = copy.deepcopy(doc)
+                        doc_copy.setdefault("retrieval", {})["rewrite_query"] = query
+                    else:
+                        doc_copy = doc
+                    retrieved_docs.append(doc_copy)
+            knowledge_docs = _derived_knowledge_retriever.search(
+                doc_id, query, top_k=settings.qa_retrieval_top_k
+            )
+            for doc in knowledge_docs:
+                meta = doc["meta"]
+                chunk_key = meta["chunk_id"]
+                if chunk_key not in seen_chunk_keys:
+                    seen_chunk_keys.add(chunk_key)
                     if query != original_query:
                         doc_copy = copy.deepcopy(doc)
                         doc_copy.setdefault("retrieval", {})["rewrite_query"] = query
@@ -273,7 +294,7 @@ def retrieve_node(state: GraphState) -> dict:
     return {"retrieved_docs": retrieved_docs}
 
 
-# 重排 node。
+# 重排节点。
 def rerank_node(state: GraphState) -> dict:
     query = state.get("query", "")
     docs = state.get("retrieved_docs", [])
@@ -313,7 +334,7 @@ def rerank_node(state: GraphState) -> dict:
     return {"reranked_docs": expanded_docs}
 
 
-# 生成 node。
+# 生成节点。
 def generate_node(state: GraphState) -> dict:
     query = state.get("query", "")
     is_local = state.get("is_local", False)
@@ -345,10 +366,12 @@ def generate_node(state: GraphState) -> dict:
 
     response_message = llm.invoke(messages_payload)
 
-    # Evidence 保留页跨度，引用校验仍按页级格式。
+    # 证据保留页跨度，引用校验仍按页级格式。
     evidence: list[Evidence] = [
         Evidence(
             chunk_id=doc.get("meta", {}).get("chunk_id", ""),
+            source_type=doc.get("meta", {}).get("source_type", "document"),
+            knowledge_id=doc.get("meta", {}).get("knowledge_id", ""),
             chunk_index=doc.get("meta", {}).get("chunk_index", -1),
             source=doc.get("meta", {}).get("source", ""),
             page=doc.get("meta", {}).get("page", 0),
@@ -373,7 +396,7 @@ def generate_node(state: GraphState) -> dict:
     }
 
 
-# 完成 引用node 处理。
+# 处理引用节点。
 def citation_node(state: GraphState) -> dict:
     answer = state.get("answer", "")
     final_docs = state.get("reranked_docs", [])
@@ -397,7 +420,7 @@ def citation_node(state: GraphState) -> dict:
     }
 
 
-# 完成 引用check 处理。
+# 处理引用检查。
 def citation_check(state: GraphState) -> str:
     critique = state.get("critique", "")
     iteration_count = state.get("iteration_count", 0)

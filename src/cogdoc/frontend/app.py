@@ -13,7 +13,7 @@ from cogdoc.frontend.api_client import (
 )
 
 DEFAULT_API_URL = os.getenv("COGDOC_API_URL", "http://localhost:8000")
-MAIN_VIEWS = ["对话", "调试"]
+MAIN_VIEWS = ["对话", "知识", "调试"]
 STREAM_RERUN_INTERVAL_SECONDS = 0.8
 STREAM_PREVIEW_HEAD_CHARS = 1200
 STREAM_PREVIEW_TAIL_CHARS = 3600
@@ -52,10 +52,10 @@ def _response_status_payload(response) -> tuple[int, object]:
     return response.status_code, response_payload(response)
 
 
-# 完成 init状态 处理。
+# 初始化状态。
 def _init_state() -> None:
     st.session_state.setdefault("api_url", DEFAULT_API_URL)
-    # session_id 持久化进 URL，刷新后复用同一会话（后端多轮记忆得以续上）。
+    # 会话标识持久化进地址栏，刷新后复用同一会话。
     if "session_id" not in st.session_state:
         st.session_state.session_id = st.query_params.get("sid") or uuid.uuid4().hex
         st.query_params["sid"] = st.session_state.session_id
@@ -75,7 +75,7 @@ def _init_state() -> None:
     st.session_state.setdefault("trace_session_loaded", set())
     st.session_state.setdefault("trace_session_error", {})
     st.session_state.setdefault("retrieve_debug_by_context", {})
-    # 兼容旧状态：升级前只有一份全局 messages，迁移到当前 (kb, session) 桶里。
+    # 兼容旧状态：升级前只有一份全局消息，迁移到当前上下文桶里。
     if "messages" in st.session_state:
         if st.session_state.kb_id and st.session_state.messages:
             st.session_state.messages_by_context.setdefault(
@@ -85,7 +85,7 @@ def _init_state() -> None:
         st.session_state.pop("messages", None)
     for legacy_key in ("restored_for", "answering", "pending_prompt", "pending_mode"):
         st.session_state.pop(legacy_key, None)
-    # 本会话内已知的对话 id（按 kb），与后端列表合并，保证空/新对话也留得住、点得到。
+    # 本会话内已知的对话标识按知识库保存，并与后端列表合并。
     st.session_state.setdefault("known_sessions", {})
 
 
@@ -113,7 +113,7 @@ def _sidebar_cache_ttl() -> float:
     )
 
 
-# 读取带 TTL 的 API 缓存。
+# 读取带时效的接口缓存。
 def _cached_api_value(key: tuple, loader):
     cache = st.session_state.api_cache
     now = time.monotonic()
@@ -130,7 +130,7 @@ def _cached_api_value(key: tuple, loader):
     return value
 
 
-# 清理 API 缓存。
+# 清理接口缓存。
 def _clear_api_cache(prefix: tuple | None = None) -> None:
     if prefix is None:
         st.session_state.api_cache.clear()
@@ -140,19 +140,19 @@ def _clear_api_cache(prefix: tuple | None = None) -> None:
             st.session_state.api_cache.pop(key, None)
 
 
-# 处理context键。
+# 处理上下文键。
 def _context_key(kb_id: str, session_id: str | None = None) -> tuple[str, str]:
     return (kb_id, session_id or st.session_state.session_id)
 
 
-# 处理消息FOR。
+# 处理消息列表。
 def _messages_for(kb_id: str, session_id: str | None = None) -> list[dict]:
     return st.session_state.messages_by_context.setdefault(
         _context_key(kb_id, session_id), []
     )
 
 
-# 处理消息from历史。
+# 从历史构造消息。
 def _message_from_history(turn: Mapping, fallback_query: str = "") -> dict:
     metadata = turn.get("metadata") if isinstance(turn.get("metadata"), Mapping) else {}
     trace_id = turn.get("trace_id") or metadata.get("trace_id")
@@ -174,7 +174,7 @@ def _message_from_history(turn: Mapping, fallback_query: str = "") -> dict:
     return msg
 
 
-# 处理消息from历史。
+# 从历史列表构造消息。
 def _messages_from_history(turns: list[Mapping]) -> list[dict]:
     messages = []
     last_user_query = ""
@@ -189,7 +189,7 @@ def _messages_from_history(turns: list[Mapping]) -> list[dict]:
 
 # 恢复历史记录。
 def _restore_history(kb_id: str) -> None:
-    # kb 或 session 变化时重载该 kb 的历史；同一 (kb, session) 内不重复拉，保留实时追加的消息。
+    # 知识库或会话变化时重载历史，同一上下文内不重复拉取。
     marker = _context_key(kb_id)
     if marker in st.session_state.restored_contexts:
         return
@@ -205,21 +205,21 @@ def _restore_history(kb_id: str) -> None:
     st.session_state.restored_contexts.add(marker)
 
 
-# 构造label。
+# 构造标签。
 def _page_label(page) -> str:
-    # page 可能为空（schema 默认 None），避免渲染成 "PNone"。
+    # 页码可能为空，避免渲染成无效页码。
     return f" · P{page}" if page is not None else ""
 
 
 # 切换会话。
 def _switch_session(session_id: str) -> None:
-    # 切换/新建对话：换 session_id（同步 URL）；消息按 (kb, session) 分桶，不清其他对话。
+    # 切换或新建对话时同步地址栏，消息按上下文分桶。
     st.session_state.session_id = session_id
     st.query_params["sid"] = session_id
     st.rerun()
 
 
-# 完成 conversations 处理。
+# 处理对话列表。
 def _conversations(client: CogDocClient, kb_id: str) -> None:
     # 多对话列表：前端已知会话 ∪ 后端已存会话，新建/切换/删除，全部可点。
     st.subheader("对话")
@@ -279,9 +279,9 @@ def _conversations(client: CogDocClient, kb_id: str) -> None:
             st.rerun()
 
 
-# 完成 send反馈 处理。
+# 发送反馈。
 def _send_feedback(final: dict, query: str, feedback: str) -> None:
-    # 凭该回答的 trace_id 提交赞/踩，关联 kb/query/answer 落到后端。
+    # 凭该回答的跟踪标识提交赞踩，并关联问题和答案。
     _submit_feedback(final, query, feedback)
 
 
@@ -292,6 +292,8 @@ def _submit_feedback(
     feedback: str,
     comment: str | None = None,
     correction: str | None = None,
+    save_as_knowledge: bool = False,
+    certainty: str | None = None,
 ) -> None:
     trace_id = final.get("trace_id")
     if not trace_id:
@@ -307,10 +309,43 @@ def _submit_feedback(
         evidence=final.get("evidence") or [],
         comment=comment,
         correction=correction,
+        feedback_type="correction" if feedback == "correction" else None,
+        feedback_text=comment,
+        correction_text=correction,
+        save_as_knowledge=save_as_knowledge,
+        related_source=_first_citation_source(final),
+        related_source_sha256=_first_evidence_source_sha(final),
+        related_chunk_ids=_citation_chunk_ids(final),
+        certainty=certainty,
     )
     st.toast(
         "反馈已记录" if resp.status_code == 201 else f"反馈失败: {resp.status_code}"
     )
+
+
+# 读取首个引用来源。
+def _first_citation_source(final: Mapping) -> str | None:
+    for item in final.get("citations") or []:
+        if isinstance(item, Mapping) and item.get("source"):
+            return str(item["source"])
+    return None
+
+
+# 读取首个证据来源哈希。
+def _first_evidence_source_sha(final: Mapping) -> str | None:
+    for item in final.get("evidence") or []:
+        if isinstance(item, Mapping) and item.get("source_sha256"):
+            return str(item["source_sha256"])
+    return None
+
+
+# 读取引用分块标识列表。
+def _citation_chunk_ids(final: Mapping) -> list[str]:
+    chunk_ids = []
+    for item in final.get("citations") or []:
+        if isinstance(item, Mapping) and item.get("chunk_id"):
+            chunk_ids.append(str(item["chunk_id"]))
+    return chunk_ids
 
 
 # 加载跟踪。
@@ -379,7 +414,7 @@ def _load_session_traces(kb_id: str | None, force: bool = False) -> None:
         st.session_state.trace_session_loaded.add(marker)
 
 
-# 处理跟踪optionlabel。
+# 处理跟踪选项标签。
 def _trace_option_label(trace_id: str) -> str:
     if not trace_id:
         return "选择最近 trace"
@@ -394,7 +429,7 @@ def _trace_option_label(trace_id: str) -> str:
     return _trace_query_title(trace_id, {})
 
 
-# 处理跟踪查询title。
+# 处理跟踪查询标题。
 def _trace_query_title(trace_id: str, trace: Mapping) -> str:
     query = str(trace.get("query_preview") or "").strip()
     if not query:
@@ -426,6 +461,19 @@ def _page_range_label(page_start, page_end=None) -> str:
     return f"P{page_start}-{page_end}"
 
 
+# 格式化引用来源标签。
+def _citation_label(item: Mapping) -> str:
+    if item.get("source_type") == "derived_knowledge":
+        knowledge_id = item.get("knowledge_id") or str(
+            item.get("chunk_id", "")
+        ).replace("knowledge:", "")
+        return f"补充知识 · `{knowledge_id}`"
+    return (
+        f"**{item.get('source', '')}**"
+        f"{_page_label(item.get('page'))} · `{item.get('chunk_id', '')}`"
+    )
+
+
 # 构建流式预览文本。
 def _stream_preview(answer: str | None) -> str:
     answer = str(answer or "")
@@ -440,7 +488,7 @@ def _stream_preview(answer: str | None) -> str:
     )
 
 
-# 处理current跟踪items。
+# 处理当前跟踪项。
 def _current_trace_items(kb_id: str | None) -> list[dict]:
     items = []
     seen = set()
@@ -478,7 +526,7 @@ def _current_trace_items(kb_id: str | None) -> list[dict]:
     return items
 
 
-# 处理跟踪node键。
+# 处理跟踪节点键。
 def _trace_node_key(node_name: str) -> str:
     tail = (node_name or "").rsplit(".", 1)[-1]
     if ":" in tail:
@@ -486,7 +534,7 @@ def _trace_node_key(node_name: str) -> str:
     return tail
 
 
-# 处理跟踪steplabel。
+# 处理跟踪步骤标签。
 def _trace_step_label(step: Mapping, idx: int) -> str:
     node_name = str(step.get("node_name") or f"step-{idx + 1}")
     node_key = _trace_node_key(node_name)
@@ -501,7 +549,7 @@ def _trace_step_label(step: Mapping, idx: int) -> str:
     return label
 
 
-# 渲染跟踪step。
+# 渲染跟踪步骤。
 def _render_trace_step(step: Mapping, idx: int) -> None:
     with st.expander(_trace_step_label(step, idx)):
         if step.get("node_name"):
@@ -570,7 +618,7 @@ def _render_trace_debug(trace: dict) -> None:
             _render_trace_step(step, idx)
 
 
-# 渲染跟踪lookup。
+# 渲染跟踪查询。
 def _render_trace_lookup(kb_id: str | None) -> None:
     st.subheader("Trace 调试")
     _load_session_traces(kb_id)
@@ -633,7 +681,7 @@ def _render_trace_lookup(kb_id: str | None) -> None:
             _render_trace_debug(st.session_state.trace_cache[active])
 
 
-# 渲染 evidence。
+# 渲染证据。
 def _render_evidence(final: dict, key: str, query: str = "") -> None:
     # 渲染一条回答的元信息 + 引用/证据面板 + 赞踩按钮（消费结构化字段）。
     meta = st.columns(3)
@@ -646,13 +694,19 @@ def _render_evidence(final: dict, key: str, query: str = "") -> None:
     if citations:
         with st.expander(f"📌 引用来源 ({len(citations)})"):
             for c in citations:
-                st.write(
-                    f"- **{c.get('source', '')}**{_page_label(c.get('page'))} · `{c.get('chunk_id', '')}`"
-                )
+                st.write(f"- {_citation_label(c)}")
     if evidence:
         with st.expander(f"🧩 证据片段 ({len(evidence)})"):
             for e in evidence:
-                st.markdown(f"**{e.get('source', '')}**{_page_label(e.get('page'))}")
+                if e.get("source_type") == "derived_knowledge":
+                    knowledge_id = e.get("knowledge_id") or str(
+                        e.get("chunk_id", "")
+                    ).replace("knowledge:", "")
+                    st.markdown(f"**补充知识** `{knowledge_id}`")
+                else:
+                    st.markdown(
+                        f"**{e.get('source', '')}**{_page_label(e.get('page'))}"
+                    )
                 st.caption(e.get("text_preview", ""))
 
     fb = st.columns([1, 1, 6])
@@ -666,6 +720,19 @@ def _render_evidence(final: dict, key: str, query: str = "") -> None:
             correction = st.text_area(
                 "纠正答案", key=f"correction-text-{key}", height=120
             )
+            save_as_knowledge = st.checkbox(
+                "保存为待审核知识", key=f"save-knowledge-{key}", value=False
+            )
+            certainty = st.selectbox(
+                "可信度",
+                ["medium", "high", "low"],
+                format_func=lambda value: {
+                    "high": "高",
+                    "medium": "中",
+                    "low": "低",
+                }[value],
+                key=f"correction-certainty-{key}",
+            )
             submitted = st.form_submit_button("提交纠错")
         if submitted:
             _submit_feedback(
@@ -674,6 +741,8 @@ def _render_evidence(final: dict, key: str, query: str = "") -> None:
                 "correction",
                 comment=comment.strip() or None,
                 correction=correction.strip() or None,
+                save_as_knowledge=save_as_knowledge,
+                certainty=certainty,
             )
 
     trace_id = final.get("trace_id")
@@ -682,7 +751,7 @@ def _render_evidence(final: dict, key: str, query: str = "") -> None:
             st.session_state.trace_labels[trace_id] = query
 
 
-# 渲染 source chunks 浏览。
+# 渲染来源分块浏览。
 def _render_source_browser(client: CogDocClient, kb_id: str) -> None:
     with st.expander("索引内容"):
         try:
@@ -782,7 +851,180 @@ def _render_retrieve_hit(hit: Mapping) -> None:
             st.json(retrieval)
 
 
-# 检索调试后台worker。
+# 读取知识库文档列表。
+def _document_rows(client: CogDocClient, kb_id: str) -> list[Mapping]:
+    try:
+        status_code, docs = _cached_api_value(
+            ("documents", client.base_url, kb_id),
+            lambda: _response_status_payload(client.list_documents(kb_id)),
+        )
+    except Exception:
+        return []
+    if status_code != 200 or not isinstance(docs, list):
+        return []
+    return [doc for doc in docs if isinstance(doc, Mapping) and doc.get("name")]
+
+
+# 清理知识缓存。
+def _clear_knowledge_cache(client: CogDocClient, kb_id: str) -> None:
+    _clear_api_cache(("knowledge", client.base_url, kb_id))
+
+
+# 读取派生知识列表。
+def _knowledge_rows(client: CogDocClient, kb_id: str, status: str) -> list[Mapping]:
+    status_code, payload = _cached_api_value(
+        ("knowledge", client.base_url, kb_id, status),
+        lambda: _response_status_payload(client.list_knowledge(kb_id, status=status)),
+    )
+    if status_code != 200:
+        raise CogDocAPIError(format_api_error(payload, status_code, "读取知识失败"))
+    rows = payload.get("knowledge", []) if isinstance(payload, Mapping) else []
+    return [row for row in rows if isinstance(row, Mapping)]
+
+
+# 处理审核响应。
+def _handle_knowledge_response(resp, client: CogDocClient, kb_id: str) -> None:
+    if resp.status_code >= 400:
+        st.error(_response_error(resp, "知识操作失败"))
+        return
+    _clear_knowledge_cache(client, kb_id)
+    st.rerun()
+
+
+# 渲染主动新增知识。
+def _render_create_knowledge(client: CogDocClient, kb_id: str) -> None:
+    docs = _document_rows(client, kb_id)
+    doc_options = [""] + [str(doc["name"]) for doc in docs]
+    doc_by_name = {str(doc["name"]): doc for doc in docs}
+    with st.form(f"create-knowledge-{kb_id}", clear_on_submit=True):
+        text = st.text_area("内容", height=140)
+        selected_source = st.selectbox("关联文档", doc_options)
+        related_chunk_ids = st.text_input("关联分块标识")
+        source_note = st.text_area("来源说明", height=80)
+        controls = st.columns([1, 1])
+        certainty = controls[0].selectbox(
+            "可信度",
+            ["medium", "high", "low"],
+            format_func=lambda value: {"high": "高", "medium": "中", "low": "低"}[
+                value
+            ],
+        )
+        enable_immediately = controls[1].checkbox("立即启用", value=False)
+        submitted = st.form_submit_button("新增知识", use_container_width=True)
+    if not submitted:
+        return
+    if not text.strip():
+        st.warning("请输入知识内容。")
+        return
+    doc = doc_by_name.get(selected_source) if selected_source else None
+    chunk_ids = [item.strip() for item in related_chunk_ids.split(",") if item.strip()]
+    resp = client.create_knowledge(
+        kb_id=kb_id,
+        text=text.strip(),
+        related_source=selected_source or None,
+        related_source_sha256=str(doc.get("sha256")) if doc else None,
+        related_chunk_ids=chunk_ids,
+        source_note=source_note.strip() or None,
+        certainty=certainty,
+        enable_immediately=enable_immediately,
+    )
+    if resp.status_code == 201:
+        _clear_knowledge_cache(client, kb_id)
+        st.success("知识已保存。")
+        st.rerun()
+    else:
+        st.error(_response_error(resp, "新增知识失败"))
+
+
+# 渲染单条派生知识。
+def _render_knowledge_item(
+    client: CogDocClient, kb_id: str, item: Mapping, suffix: str
+) -> None:
+    knowledge_id = str(item.get("knowledge_id") or "")
+    title = f"{knowledge_id} · {item.get('status') or '-'}"
+    source = item.get("related_source")
+    if source:
+        title += f" · {source}"
+    with st.expander(title):
+        st.write(item.get("text") or "")
+        meta = st.columns(4)
+        meta[0].caption(f"来源: {item.get('origin') or '-'}")
+        meta[1].caption(f"可信度: {item.get('certainty') or '-'}")
+        meta[2].caption(f"创建者: {item.get('created_by') or '-'}")
+        meta[3].caption(f"创建时间: {item.get('created_at') or '-'}")
+        if item.get("source_note"):
+            st.caption(str(item["source_note"]))
+        actions = st.columns([1, 1, 1, 4])
+        if actions[0].button("通过", key=f"approve-{suffix}-{knowledge_id}"):
+            _handle_knowledge_response(
+                client.review_knowledge(knowledge_id, "approve"),
+                client,
+                kb_id,
+            )
+        if actions[1].button("驳回", key=f"reject-{suffix}-{knowledge_id}"):
+            _handle_knowledge_response(
+                client.review_knowledge(knowledge_id, "reject"),
+                client,
+                kb_id,
+            )
+        if actions[2].button("归档", key=f"archive-{suffix}-{knowledge_id}"):
+            _handle_knowledge_response(
+                client.review_knowledge(knowledge_id, "archive"),
+                client,
+                kb_id,
+            )
+
+
+# 渲染知识审核列表。
+def _render_knowledge_review_list(
+    client: CogDocClient, kb_id: str, status: str, label: str
+) -> None:
+    try:
+        rows = _knowledge_rows(client, kb_id, status)
+    except Exception as exc:
+        st.warning(str(exc))
+        return
+    if not rows:
+        st.info(f"暂无{label}知识。")
+        return
+    options = [str(row.get("knowledge_id")) for row in rows if row.get("knowledge_id")]
+    selected = st.multiselect(f"批量选择{label}知识", options, key=f"batch-{status}")
+    batch = st.columns([1, 1, 3])
+    if batch[0].button(
+        "批量通过", key=f"batch-approve-{status}", disabled=not selected
+    ):
+        _handle_knowledge_response(
+            client.batch_review_knowledge(selected, "batch-approve"),
+            client,
+            kb_id,
+        )
+    if batch[1].button("批量驳回", key=f"batch-reject-{status}", disabled=not selected):
+        _handle_knowledge_response(
+            client.batch_review_knowledge(selected, "batch-reject"),
+            client,
+            kb_id,
+        )
+    for item in rows:
+        _render_knowledge_item(client, kb_id, item, status)
+
+
+# 渲染派生知识页。
+def _knowledge_area(kb_id: str | None) -> None:
+    st.subheader("派生知识")
+    if not kb_id:
+        st.info("先选择知识库。")
+        return
+    client = _client()
+    create_tab, pending_tab, stale_tab = st.tabs(["新增", "待审核", "过期"])
+    with create_tab:
+        _render_create_knowledge(client, kb_id)
+    with pending_tab:
+        _render_knowledge_review_list(client, kb_id, "pending", "待审核")
+    with stale_tab:
+        _render_knowledge_review_list(client, kb_id, "stale", "过期")
+
+
+# 检索调试后台线程。
 def _retrieve_debug_worker(
     *,
     api_url: str,
@@ -994,7 +1236,7 @@ def _sidebar() -> None:
             return
         kb_ids = [kb["kb_id"] for kb in kbs]
         if kb_ids:
-            # kb 选择也持久化进 URL，刷新后定位回原库（历史按 (kb, session) 存）。
+            # 知识库选择也持久化进地址栏，刷新后定位回原库。
             url_kb = st.query_params.get("kb")
             default_idx = kb_ids.index(url_kb) if url_kb in kb_ids else 0
             st.session_state.kb_id = st.selectbox(
@@ -1090,13 +1332,13 @@ def _sidebar() -> None:
 
 # 轮询任务。
 def _poll_job(client: CogDocClient, job_id: str) -> None:
-    # 轮询入库 job 直到终态，期间在 st.status 里实时显示进度。
+    # 轮询入库任务直到终态，期间实时显示进度。
     with st.status("后台入库中…", expanded=True) as status:
         job = {}
         for _ in range(300):
             resp = client.get_job(job_id)
             if resp.status_code != 200:
-                # job 端点出错（如任务过期）时响应没有 status 字段，直接报错退出。
+                # 任务端点出错时响应没有状态字段，直接报错退出。
                 status.update(
                     label=f"查询入库任务失败：{resp.text[:200]}", state="error"
                 )
@@ -1117,7 +1359,7 @@ def _poll_job(client: CogDocClient, job_id: str) -> None:
             )
 
 
-# 流式处理对话worker。
+# 流式处理对话后台线程。
 def _stream_chat_worker(
     *,
     api_url: str,
@@ -1129,7 +1371,7 @@ def _stream_chat_worker(
     stop_event: threading.Event,
     outbox: queue.Queue,
 ) -> None:
-    # 后台线程只碰队列和 stop_event，不直接写 Streamlit 状态，避免跨线程 UI 状态竞争。
+    # 后台线程只碰队列和停止事件，不直接写界面状态。
     try:
         client = CogDocClient(api_url)
         for event, data in client.stream_chat(
@@ -1152,7 +1394,7 @@ def _stream_chat_worker(
         outbox.put(("done", {"cancelled": stop_event.is_set()}))
 
 
-# 处理startstream。
+# 处理开始流式请求。
 def _start_stream(kb_id: str, prompt: str, mode: str) -> None:
     key = _context_key(kb_id)
     pending = st.session_state.pending_streams.get(key)
@@ -1207,7 +1449,7 @@ def _remove_message(kb_id: str, session_id: str, msg_id: int) -> None:
     ]
 
 
-# 处理cancelstream。
+# 处理取消流式请求。
 def _cancel_stream(key: tuple[str, str]) -> None:
     pending = st.session_state.pending_streams.get(key)
     if not pending:
@@ -1225,7 +1467,7 @@ def _cancel_stream(key: tuple[str, str]) -> None:
     )
 
 
-# 处理finishstream。
+# 处理完成流式请求。
 def _finish_stream(key: tuple[str, str], pending: dict) -> None:
     if pending.get("cancelled"):
         _remove_message(
@@ -1265,7 +1507,7 @@ def _finish_stream(key: tuple[str, str], pending: dict) -> None:
     st.session_state.pending_streams.pop(key, None)
 
 
-# 处理drainstreamevents。
+# 处理流式事件消费。
 def _drain_stream_events() -> None:
     for key, pending in list(st.session_state.pending_streams.items()):
         outbox = pending["queue"]
@@ -1296,9 +1538,9 @@ def _drain_stream_events() -> None:
             _finish_stream(key, pending)
 
 
-# 完成 chatarea 处理。
+# 处理对话区。
 def _chat_area() -> None:
-    # 主对话区：按 (kb, session) 还原历史 + 渲染气泡；SSE 在后台线程中归属到发送时上下文。
+    # 主对话区按上下文还原历史并渲染气泡。
     _drain_stream_events()
     _drain_retrieve_debug_events()
     kb_id = st.session_state.kb_id
@@ -1363,25 +1605,27 @@ def _chat_area() -> None:
         if prompt:
             _start_stream(kb_id, prompt, mode)
             st.rerun()
+    elif view == "知识":
+        _knowledge_area(kb_id)
     else:
         _debug_area(kb_id)
 
 
-# 完成 nextid 处理。
+# 生成下一个标识。
 def _next_id() -> int:
     st.session_state.msg_seq += 1
     return st.session_state.msg_seq
 
 
-# 隐藏default默认界面。
+# 隐藏默认界面。
 def _hide_default_chrome() -> None:
-    # 隐藏 Streamlit 右上角默认工具条（Deploy / 菜单 / 状态）与页脚，只留自家品牌。
+    # 隐藏右上角默认工具条与页脚，只留自家品牌。
     st.markdown(
         """
         <style>
         [data-testid="stToolbar"] {display: none;}
         [data-testid="stDecoration"] {display: none;}
-        #MainMenu {visibility: hidden;}
+        body #MainMenu {visibility: hidden;}
         footer {visibility: hidden;}
         </style>
         """,

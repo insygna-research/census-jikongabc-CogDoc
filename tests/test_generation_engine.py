@@ -8,6 +8,8 @@ from cogdoc.graph.subgraphs.qa import RetrieverFactory
 from cogdoc.tools.retriever.base_retriever import NullRetriever, NullWriteError
 from cogdoc.tools.retriever.hybrid import HybridRetriever, IndexCorruptError
 from cogdoc.tools.retriever.vector_retriever import EmbeddingModelMismatchError
+from cogdoc.agents.qa_generator import Generator
+from cogdoc.graph.subgraphs import qa
 
 
 # 构造状态。
@@ -18,14 +20,14 @@ def _make_state(tmp_path, kb_id="kb"):
 
 # 构造或驱动 新建实例工厂 测试场景。
 def _fresh_factory():
-    # 每个测试独立清空缓存，conftest autouse fixture 在 yield 后也会清，两者不冲突。
+    # 每个测试独立清空缓存，自动夹具结束后也会清理。
     RetrieverFactory._engines = OrderedDict()
 
 
 # 空检索器契约。
 
 
-# 验证 null retriever read safe。
+# 验证空检索器读路径安全。
 def test_null_retriever_read_safe():
     nr = NullRetriever()
     assert nr.exists() is False
@@ -39,9 +41,9 @@ def test_null_retriever_read_safe():
     nr.delete_by_source(["x"])
 
 
-# 验证 null retriever write raises。
+# 验证空检索器写路径报错。
 def test_null_retriever_write_raises():
-    # 写方法必须显式报错，不能静默 no-op，以便在 Phase 3 之前及早暴露误用。
+    # 写方法必须显式报错，不能静默忽略，以便及早暴露误用。
     nr = NullRetriever()
     with pytest.raises(NullWriteError):
         nr.index([])
@@ -51,28 +53,97 @@ def test_null_retriever_write_raises():
         nr.upsert_documents([], set())
 
 
-# 验证 null hybrid engine not corrupt。
+# 验证空混合引擎不视为损坏。
 def test_null_hybrid_engine_not_corrupt():
-    # 两路 NullRetriever count 相等（0==0），is_corrupt=False，检索返回空列表。
+    # 两路空检索器计数相等，检索返回空列表。
     engine = HybridRetriever(NullRetriever(), NullRetriever())
     assert engine.is_corrupt() is False
     assert engine.count() == 0
     assert engine.search("q") == []
 
 
+# 验证生成提示区分派生知识引用格式。
+def test_generator_prompt_includes_knowledge_citation_format():
+    docs = [
+        {
+            "text": "差旅报销需要七天内提交。",
+            "meta": {
+                "chunk_id": "knowledge:K123",
+                "knowledge_id": "K123",
+                "source_type": "derived_knowledge",
+                "source": "knowledge:K123",
+                "page": 0,
+                "certainty": "high",
+                "related_source": "policy.pdf",
+            },
+        }
+    ]
+
+    messages = Generator.format_prompt("报销规则是什么", docs)
+    rendered = "\n".join(str(message.content) for message in messages)
+
+    assert '<Knowledge knowledge_id="K123"' in rendered
+    assert "[knowledge:K123]" in rendered
+    assert "[source属性值:P+page属性值]" in rendered
+
+
+# 验证问答召回融合派生知识。
+def test_retrieve_node_merges_approved_knowledge(monkeypatch):
+    raw_doc = {
+        "text": "文档报名要求。",
+        "meta": {
+            "chunk_id": "chunk:a:1",
+            "source": "a.pdf",
+            "page": 1,
+            "page_start": 1,
+            "page_end": 1,
+        },
+    }
+    knowledge_doc = {
+        "text": "补充报名要求。",
+        "meta": {
+            "chunk_id": "knowledge:K123",
+            "knowledge_id": "K123",
+            "source_type": "derived_knowledge",
+            "source": "knowledge:K123",
+            "page": 0,
+            "page_start": 0,
+            "page_end": 0,
+        },
+    }
+
+    class Engine:
+        def search(self, query, top_k):
+            return [raw_doc]
+
+    class Knowledge:
+        def search(self, kb_id, query, top_k):
+            return [knowledge_doc]
+
+    monkeypatch.setattr(qa.RetrieverFactory, "get_engine", lambda doc_id: Engine())
+    monkeypatch.setattr(qa, "_derived_knowledge_retriever", Knowledge())
+
+    result = qa.retrieve_node({"query": "报名要求", "doc_id": "kb"})
+
+    assert [doc["meta"]["chunk_id"] for doc in result["retrieved_docs"]] == [
+        "chunk:a:1",
+        "knowledge:K123",
+    ]
+
+
 # 集合编号哈希命名。
 
 
-# 验证 collection id deterministic。
+# 验证集合标识稳定。
 def test_collection_id_deterministic():
     s = get_settings()
     assert s.kb_collection_id("kb1", "g123") == s.kb_collection_id("kb1", "g123")
     assert s.kb_collection_id("kb1", "g123") != s.kb_collection_id("kb2", "g123")
 
 
-# 验证 collection id within chroma limit。
+# 验证集合标识不超过存储限制。
 def test_collection_id_within_chroma_limit():
-    # col-{8hex}-{gen_id(13)} = 4+8+1+13 = 26 字符，远低于 Chroma 60 字符上限。
+    # 集合名前缀加短哈希和索引代标识，远低于存储限制。
     kb_id = "a" * 56  # 最长允许的 kb_id
     gen_id = "g" + "f" * 12
     collection_id = get_settings().kb_collection_id(kb_id, gen_id)
@@ -82,14 +153,14 @@ def test_collection_id_within_chroma_limit():
 # 解析生成编号。
 
 
-# 验证 resolve gen id no active。
+# 验证无活跃代时解析为空。
 def test_resolve_gen_id_no_active(tmp_path):
     state = _make_state(tmp_path)
     with patch("cogdoc.graph.subgraphs.qa.KBState", return_value=state):
         assert RetrieverFactory._resolve_gen_id("kb") is None
 
 
-# 验证 resolve gen id expected count zero。
+# 验证空索引代解析为空。
 def test_resolve_gen_id_expected_count_zero(tmp_path):
     state = _make_state(tmp_path)
     gen_id = state.begin_generation("m", "v")
@@ -99,7 +170,7 @@ def test_resolve_gen_id_expected_count_zero(tmp_path):
         assert RetrieverFactory._resolve_gen_id("kb") is None
 
 
-# 验证 resolve gen id returns active id。
+# 验证解析返回活跃代标识。
 def test_resolve_gen_id_returns_active_id(tmp_path):
     state = _make_state(tmp_path)
     gen_id = state.begin_generation("m", "v")
@@ -112,16 +183,16 @@ def test_resolve_gen_id_returns_active_id(tmp_path):
 # 构建引擎。
 
 
-# 验证 build engine null when gen id none。
+# 验证无索引代时构建空引擎。
 def test_build_engine_null_when_gen_id_none():
     engine = RetrieverFactory._build_engine("kb", None)
     assert engine.count() == 0
     assert engine.is_corrupt() is False
 
 
-# 验证 build engine uses settings collection id。
+# 验证构建引擎使用配置中的集合标识。
 def test_build_engine_uses_settings_collection_id(tmp_path):
-    # 验证传入 VectorRetriever/BM25Retriever 的 collection_id 来自 settings.kb_collection_id。
+    # 验证传入检索器的集合标识来自配置。
     kb_id = "kb1"
     state = _make_state(tmp_path, kb_id)
     gen_id = state.begin_generation("m", "v")
@@ -147,7 +218,7 @@ def test_build_engine_uses_settings_collection_id(tmp_path):
     MockBm25.assert_called_once_with(collection_id=expected_cid)
 
 
-# 验证 build engine model mismatch returns null。
+# 验证构建引擎遇到模型不匹配时返回空引擎。
 def test_build_engine_model_mismatch_returns_null(tmp_path):
     state = _make_state(tmp_path)
     gen_id = state.begin_generation("old", "v")
@@ -167,9 +238,9 @@ def test_build_engine_model_mismatch_returns_null(tmp_path):
     assert engine.is_corrupt() is False
 
 
-# 验证 build engine count mismatch raises。
+# 验证构建引擎遇到计数不一致时报错。
 def test_build_engine_count_mismatch_raises(tmp_path):
-    # 磁盘数据丢失导致 count != expected_count：必须 raise IndexCorruptError，不能静默返回空库。
+    # 磁盘数据丢失导致计数不一致时必须报错。
     state = _make_state(tmp_path)
     gen_id = state.begin_generation("m", "v")
     state.mark_ready(gen_id, expected_count=5, documents=[])
@@ -190,9 +261,9 @@ def test_build_engine_count_mismatch_raises(tmp_path):
                 RetrieverFactory._build_engine("kb", gen_id)
 
 
-# 验证 build engine gen gcod returns null。
+# 验证构建期间索引代被回收时返回空引擎。
 def test_build_engine_gen_gcod_returns_null():
-    # 该代在构造期间已被 GC 回收（get() 返回 None）：返回空引擎，不报错。 get_engine 在插入前重解析 gen_id 不符，不会把这个空引擎写回缓存。
+    # 该代在构造期间已被回收，返回空引擎且不写回缓存。
     with (
         patch("cogdoc.graph.subgraphs.qa.KBState") as MockKBState,
         patch("cogdoc.graph.subgraphs.qa.VectorRetriever"),
@@ -203,14 +274,14 @@ def test_build_engine_gen_gcod_returns_null():
         MockKBState.return_value = mock_state
         engine = RetrieverFactory._build_engine("kb", "g_gone_0000000")
 
-    # gen 已回收 → 真实空引擎（两路 NullRetriever）：count 为 0、不判损坏。
+    # 索引代已回收时返回真实空引擎，不判损坏。
     assert engine.count() == 0
     assert engine.is_corrupt() is False
 
 
-# 验证 build engine inconsistent raises。
+# 验证构建引擎遇到不一致时报错。
 def test_build_engine_inconsistent_raises(tmp_path):
-    # count 正确但两路 chunk_id 集合不等（向量索引等量错块）：必须 raise IndexCorruptError。
+    # 计数正确但两路分块集合不等时必须报错。
     state = _make_state(tmp_path)
     gen_id = state.begin_generation("m", "v")
     state.mark_ready(gen_id, expected_count=3, documents=[])
@@ -234,7 +305,7 @@ def test_build_engine_inconsistent_raises(tmp_path):
 # 缓存键和失效竞态保护。
 
 
-# 验证 cache hit returns same instance。
+# 验证缓存命中返回同一实例。
 def test_cache_hit_returns_same_instance(tmp_path):
     _fresh_factory()
     kb_id = "kb-hit"
@@ -243,19 +314,19 @@ def test_cache_hit_returns_same_instance(tmp_path):
     with RetrieverFactory._lock:
         RetrieverFactory._engines[(kb_id, gen_id)] = sentinel
 
-    # get_engine 解析到同一 gen_id 命中缓存。
+    # 解析到同一索引代时命中缓存。
     with patch.object(RetrieverFactory, "_resolve_gen_id", return_value=gen_id):
         engine = RetrieverFactory.get_engine(kb_id)
     assert engine is sentinel
 
 
-# 验证 invalidate clears all entries for kb。
+# 验证失效会清理知识库全部缓存。
 def test_invalidate_clears_all_entries_for_kb():
     _fresh_factory()
     kb_id = "kb-inv"
     sentinel_a = MagicMock(spec=HybridRetriever)
     sentinel_b = MagicMock(spec=HybridRetriever)
-    # 同一 kb_id 的两个 generation 条目都要被清掉。
+    # 同一知识库的两个索引代条目都要被清掉。
     with RetrieverFactory._lock:
         RetrieverFactory._engines[(kb_id, "g001")] = sentinel_a
         RetrieverFactory._engines[(kb_id, "g002")] = sentinel_b
@@ -269,9 +340,9 @@ def test_invalidate_clears_all_entries_for_kb():
     assert ("other-kb", "g003") in keys  # 其他 kb 不受影响
 
 
-# 验证 race stale engine not cached。
+# 验证竞态下旧引擎不写入缓存。
 def test_race_stale_engine_not_cached(tmp_path):
-    # 模拟构造期间 gen_id 已切换（switch_active + invalidate）：旧引擎不写回缓存。
+    # 模拟构造期间索引代已切换，旧引擎不写回缓存。
     _fresh_factory()
     kb_id = "kb-race"
     old_gen = "g_old_0000000"

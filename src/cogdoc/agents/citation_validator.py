@@ -1,20 +1,83 @@
+import re
 from typing import List, Dict, Any
 from cogdoc.tools.rust_core_loader import ensure_rust_core
 
 
-# Python 门面只依赖 native checker 的结构化结果。
+# 门面只依赖原生校验器的结构化结果。
 rust_core = ensure_rust_core("validate_citations_native")
+_KNOWLEDGE_REF_RE = re.compile(
+    r"[\[［]\s*knowledge\s*[:：]\s*([^\]］\s]+)\s*[\]］]", re.I
+)
 
 
-# 定义 CitationValidatorAgent 数据结构。
+# 提取派生知识引用。
+def _extract_knowledge_refs(answer: str) -> list[str]:
+    return [
+        match.group(1).strip() for match in _KNOWLEDGE_REF_RE.finditer(answer or "")
+    ]
+
+
+# 删除派生知识引用。
+def _strip_knowledge_refs(answer: str) -> str:
+    return _KNOWLEDGE_REF_RE.sub("", answer or "")
+
+
+# 本轮允许引用的派生知识标识。
+def _allowed_knowledge_ids(valid_docs: List[Dict[str, Any]]) -> set[str]:
+    allowed = set()
+    for doc in valid_docs:
+        meta = doc.get("meta") or {}
+        if meta.get("source_type") != "derived_knowledge":
+            continue
+        knowledge_id = meta.get("knowledge_id")
+        if not knowledge_id and str(meta.get("chunk_id", "")).startswith("knowledge:"):
+            knowledge_id = str(meta["chunk_id"]).split(":", 1)[1]
+        if knowledge_id:
+            allowed.add(str(knowledge_id))
+    return allowed
+
+
+# 过滤原始文档证据。
+def _document_docs(valid_docs: List[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    return [
+        doc
+        for doc in valid_docs
+        if (doc.get("meta") or {}).get("source_type") != "derived_knowledge"
+    ]
+
+
+# 定义引用校验器。
 class CitationValidatorAgent:
-    # 校验 citations。
+    # 校验引用。
     @staticmethod
     def validate_citations(
         answer: str, valid_docs: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        # Rust 负责确定性规则校验，Python 负责生成 critique。
-        native_result = rust_core.validate_citations_native(answer or "", valid_docs)
+        allowed_knowledge = _allowed_knowledge_ids(valid_docs)
+        knowledge_refs = _extract_knowledge_refs(answer)
+        invalid_knowledge = [
+            ref for ref in knowledge_refs if ref not in allowed_knowledge
+        ]
+        if invalid_knowledge:
+            return {
+                "is_valid": False,
+                "critique": (
+                    "【引用校验未通过】检测到派生知识引用不存在于本次上下文中："
+                    + "，".join(f"[knowledge:{ref}]" for ref in invalid_knowledge)
+                ),
+            }
+
+        document_answer = _strip_knowledge_refs(answer)
+        document_docs = _document_docs(valid_docs)
+        native_result = rust_core.validate_citations_native(
+            document_answer or "", document_docs
+        )
+        if (
+            native_result["missing_citations"]
+            and knowledge_refs
+            and not invalid_knowledge
+        ):
+            return {"is_valid": True, "critique": ""}
         if native_result["is_valid"]:
             return {"is_valid": True, "critique": ""}
 

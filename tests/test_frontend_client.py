@@ -9,7 +9,7 @@ from cogdoc.frontend.api_client import (
 )
 
 
-# 验证 iter sse events parses token and final frames 场景。
+# 验证流式事件解析片段和最终帧场景。
 def test_iter_sse_events_parses_token_and_final_frames():
     lines = [
         "event: start",
@@ -30,7 +30,7 @@ def test_iter_sse_events_parses_token_and_final_frames():
     assert events[2][1]["answer"] == "完整答案"
 
 
-# 验证 iter sse events skips non json data 场景。
+# 验证流式事件跳过非法数据场景。
 def test_iter_sse_events_skips_non_json_data():
     lines = [
         "event: token",
@@ -45,7 +45,7 @@ def test_iter_sse_events_skips_non_json_data():
     assert events == [("token", {"content": "ok"})]
 
 
-# 验证 format api error prefers structured error body 场景。
+# 验证接口错误格式化优先使用结构化错误体场景。
 def test_format_api_error_prefers_structured_error_body():
     message = format_api_error(
         {"error_code": "REQUEST_THROTTLED", "message": "请求过于频繁，请稍后重试"},
@@ -55,9 +55,9 @@ def test_format_api_error_prefers_structured_error_body():
     assert message == "HTTP 429: [REQUEST_THROTTLED] 请求过于频繁，请稍后重试"
 
 
-# 验证 list knowledge bases raises on structured error 场景。
+# 验证知识库列表遇到结构化错误时抛出异常场景。
 def test_list_knowledge_bases_raises_on_structured_error(monkeypatch):
-    # 测试fakeGET。
+    # 测试伪造读取。
     def fake_get(*args, **kwargs):
         return httpx.Response(
             429,
@@ -80,7 +80,7 @@ def test_list_knowledge_bases_raises_on_structured_error(monkeypatch):
     assert "REQUEST_THROTTLED" in str(excinfo.value)
 
 
-# 验证 list knowledge bases rejects non list success payload 场景。
+# 验证知识库列表拒绝非列表成功载荷场景。
 def test_list_knowledge_bases_rejects_non_list_success_payload(monkeypatch):
     monkeypatch.setattr(
         "cogdoc.frontend.api_client.httpx.get",
@@ -91,18 +91,18 @@ def test_list_knowledge_bases_rejects_non_list_success_payload(monkeypatch):
         CogDocClient("http://api").list_knowledge_bases()
 
 
-# 验证 response payload falls back to text for non json response 场景。
+# 验证响应载荷在非对象响应时退回文本场景。
 def test_response_payload_falls_back_to_text_for_non_json_response():
     response = httpx.Response(502, text="bad gateway body")
 
     assert response_payload(response) == "bad gateway body"
 
 
-# 验证 trace client methods call expected endpoints 场景。
+# 验证跟踪客户端方法调用预期端点场景。
 def test_trace_client_methods_call_expected_endpoints(monkeypatch):
     calls = []
 
-    # 测试fakeGET。
+    # 测试伪造读取。
     def fake_get(url, **kwargs):
         calls.append((url, kwargs))
         return httpx.Response(200, json={"ok": True})
@@ -125,7 +125,7 @@ def test_trace_client_methods_call_expected_endpoints(monkeypatch):
     }
 
 
-# 验证 feedback client sends evidence payload 场景。
+# 验证反馈客户端发送证据载荷场景。
 def test_feedback_client_sends_citation_and_evidence_payload(monkeypatch):
     calls = []
 
@@ -150,3 +150,86 @@ def test_feedback_client_sends_citation_and_evidence_payload(monkeypatch):
     assert calls[0][1]["headers"] == {"Authorization": "Bearer secret"}
     assert calls[0][1]["json"]["citations"][0]["source"] == "a.pdf"
     assert calls[0][1]["json"]["evidence"][0]["text_preview"] == "证据"
+
+
+# 验证反馈客户端发送保存知识字段场景。
+def test_feedback_client_sends_save_as_knowledge_payload(monkeypatch):
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs))
+        return httpx.Response(
+            201,
+            json={
+                "feedback_id": "f1",
+                "is_bad_case": True,
+                "knowledge_id": "K1",
+                "knowledge_status": "pending",
+            },
+        )
+
+    monkeypatch.setattr("cogdoc.frontend.api_client.httpx.post", fake_post)
+
+    response = CogDocClient("http://api").submit_feedback(
+        trace_id="t1",
+        feedback="correction",
+        kb_id="kb",
+        correction_text="正确说法",
+        save_as_knowledge=True,
+        related_source="a.pdf",
+        related_source_sha256="sha",
+        related_chunk_ids=["c1"],
+        certainty="high",
+    )
+
+    assert response.status_code == 201
+    payload = calls[0][1]["json"]
+    assert payload["save_as_knowledge"] is True
+    assert payload["correction_text"] == "正确说法"
+    assert payload["related_source"] == "a.pdf"
+    assert payload["related_chunk_ids"] == ["c1"]
+    assert payload["certainty"] == "high"
+
+
+# 验证派生知识客户端方法调用稳定端点场景。
+def test_knowledge_client_methods_call_expected_endpoints(monkeypatch):
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append(("POST", url, kwargs))
+        return httpx.Response(200, json={"ok": True})
+
+    def fake_get(url, **kwargs):
+        calls.append(("GET", url, kwargs))
+        return httpx.Response(200, json={"knowledge": []})
+
+    monkeypatch.setattr("cogdoc.frontend.api_client.httpx.post", fake_post)
+    monkeypatch.setattr("cogdoc.frontend.api_client.httpx.get", fake_get)
+
+    client = CogDocClient("http://api", api_key="secret")
+    client.create_knowledge(
+        kb_id="kb",
+        text="知识",
+        related_source="a.pdf",
+        related_source_sha256="sha",
+        related_chunk_ids=["c1"],
+        source_note="人工确认",
+        certainty="high",
+    )
+    client.list_knowledge("kb", status="pending", origin="manual_entry")
+    client.review_knowledge("K1", "approve", actor="admin")
+    client.batch_review_knowledge(["K1", "K2"], "batch-reject", note="重复")
+
+    assert calls[0][0:2] == ("POST", "http://api/v1/knowledge")
+    assert calls[0][2]["headers"] == {"Authorization": "Bearer secret"}
+    assert calls[0][2]["json"]["related_chunk_ids"] == ["c1"]
+    assert calls[1][0:2] == ("GET", "http://api/v1/knowledge")
+    assert calls[1][2]["params"] == {
+        "kb_id": "kb",
+        "status": "pending",
+        "origin": "manual_entry",
+    }
+    assert calls[2][0:2] == ("POST", "http://api/v1/knowledge/K1/approve")
+    assert calls[2][2]["json"] == {"actor": "admin"}
+    assert calls[3][0:2] == ("POST", "http://api/v1/knowledge/batch-reject")
+    assert calls[3][2]["json"] == {"knowledge_ids": ["K1", "K2"], "note": "重复"}

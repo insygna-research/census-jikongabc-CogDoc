@@ -64,6 +64,8 @@ class AgentStepTrace(TypedDict):
 # Evidence 面向前端和审计展示。
 class Evidence(TypedDict, total=False):
     chunk_id: str
+    source_type: str
+    knowledge_id: str
     chunk_index: int
     source: str
     page: int

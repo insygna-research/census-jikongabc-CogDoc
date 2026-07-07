@@ -7,9 +7,9 @@ import httpx
 DEFAULT_TIMEOUT = 180.0
 
 
-# 定义CogDocAPIError。
+# 定义接口错误。
 class CogDocAPIError(RuntimeError):
-    # 后端返回结构化错误体或非预期响应时抛出，供 UI 直接展示。
+    # 后端返回结构化错误体或非预期响应时抛出，供界面直接展示。
     def __init__(
         self, message: str, status_code: int | None = None, payload: Any = None
     ):
@@ -43,7 +43,7 @@ def response_payload(response: httpx.Response) -> Any:
         return response.text[:200]
 
 
-# 处理响应JSON。
+# 处理响应对象。
 def _response_json(response: httpx.Response) -> Any:
     try:
         return response.json()
@@ -54,7 +54,7 @@ def _response_json(response: httpx.Response) -> Any:
         ) from exc
 
 
-# 处理checkedJSON。
+# 处理已校验响应对象。
 def _checked_json(response: httpx.Response) -> Any:
     payload = _response_json(response)
     if response.status_code >= 400:
@@ -66,7 +66,7 @@ def _checked_json(response: httpx.Response) -> Any:
     return payload
 
 
-# 处理expectlist。
+# 处理预期列表。
 def _expect_list(payload: Any, label: str) -> list[dict]:
     if isinstance(payload, list):
         return payload
@@ -75,9 +75,9 @@ def _expect_list(payload: Any, label: str) -> list[dict]:
     raise CogDocAPIError(f"{label}响应格式不符合预期: {payload}")
 
 
-# 完成 iterSSE事件列表 处理。
+# 解析流式事件列表。
 def iter_sse_events(lines: Iterable[str]) -> Iterator[tuple[str, dict]]:
-    # 把 SSE 行流解析成 (event_name, data)；空行结束一帧，非 JSON data 跳过。
+    # 把行流解析成事件名和数据；空行结束一帧，非法数据跳过。
     event_name = "message"
     for line in lines:
         if not line:
@@ -93,9 +93,9 @@ def iter_sse_events(lines: Iterable[str]) -> Iterator[tuple[str, dict]]:
                 continue
 
 
-# 交付层瘦客户端：只打 /v1，不碰后端智能逻辑。
+# 交付层瘦客户端：只打版本接口，不碰后端智能逻辑。
 class CogDocClient:
-    # 交付层瘦客户端：只打 /v1，不碰后端智能逻辑。
+    # 交付层瘦客户端：只打版本接口，不碰后端智能逻辑。
     def __init__(
         self,
         base_url: str,
@@ -104,7 +104,7 @@ class CogDocClient:
     ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        # 后端开启鉴权时带上 key；缺省读环境变量，未配置则不带头（鉴权关闭场景）。
+        # 后端开启鉴权时带上密钥；缺省读环境变量，未配置则不带头。
         key = api_key if api_key is not None else os.getenv("COGDOC_API_KEY", "")
         self._headers = {"Authorization": f"Bearer {key}"} if key else {}
 
@@ -112,7 +112,7 @@ class CogDocClient:
     def _url(self, path: str) -> str:
         return f"{self.base_url}{path}"
 
-    # 列出 knowledge bases。
+    # 列出知识库。
     def list_knowledge_bases(self) -> list[dict]:
         response = httpx.get(
             self._url("/v1/knowledge-bases"),
@@ -121,7 +121,7 @@ class CogDocClient:
         )
         return _expect_list(_checked_json(response), "知识库列表")
 
-    # 创建 knowledge base。
+    # 创建知识库。
     def create_knowledge_base(self, kb_id: str) -> httpx.Response:
         return httpx.post(
             self._url("/v1/knowledge-bases"),
@@ -130,7 +130,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
-    # 删除 knowledge base。
+    # 删除知识库。
     def delete_knowledge_base(self, kb_id: str) -> httpx.Response:
         return httpx.delete(
             self._url(f"/v1/knowledge-bases/{kb_id}"),
@@ -138,7 +138,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
-    # 列出 documents。
+    # 列出文档。
     def list_documents(self, kb_id: str) -> httpx.Response:
         return httpx.get(
             self._url(f"/v1/knowledge-bases/{kb_id}/documents"),
@@ -146,7 +146,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
-    # 列出知识库 sources。
+    # 列出知识库来源文件。
     def list_sources(self, kb_id: str) -> httpx.Response:
         return httpx.get(
             self._url(f"/v1/knowledge-bases/{kb_id}/sources"),
@@ -154,7 +154,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
-    # 列出 source chunks。
+    # 列出来源文件分块。
     def list_source_chunks(
         self, kb_id: str, source: str, offset: int = 0, limit: int = 50
     ) -> httpx.Response:
@@ -165,7 +165,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
-    # 完成 上传document 处理。
+    # 上传文档。
     def upload_document(
         self, kb_id: str, filename: str, content: bytes
     ) -> httpx.Response:
@@ -177,7 +177,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
-    # 删除 document。
+    # 删除文档。
     def delete_document(self, kb_id: str, name: str) -> httpx.Response:
         return httpx.delete(
             self._url(f"/v1/knowledge-bases/{kb_id}/documents/{name}"),
@@ -185,7 +185,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
-    # 获取 job。
+    # 获取任务。
     def get_job(self, job_id: str) -> httpx.Response:
         return httpx.get(
             self._url(f"/v1/index-jobs/{job_id}"),
@@ -193,7 +193,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
-    # 获取 trace。
+    # 获取跟踪。
     def get_trace(self, trace_id: str) -> httpx.Response:
         return httpx.get(
             self._url(f"/v1/traces/{trace_id}"),
@@ -201,7 +201,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
-    # 列出 traces。
+    # 列出跟踪。
     def list_traces(
         self, limit: int = 20, kb_id: str = "", session_id: str = ""
     ) -> httpx.Response:
@@ -212,7 +212,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
-    # 获取 session history。
+    # 获取会话历史。
     def get_session_history(self, session_id: str, kb_id: str) -> httpx.Response:
         return httpx.get(
             self._url(f"/v1/sessions/{session_id}/history"),
@@ -221,7 +221,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
-    # 列出 sessions。
+    # 列出会话。
     def list_sessions(self, kb_id: str) -> httpx.Response:
         return httpx.get(
             self._url("/v1/sessions"),
@@ -230,7 +230,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
-    # 删除 session。
+    # 删除会话。
     def delete_session(self, session_id: str, kb_id: str) -> httpx.Response:
         return httpx.delete(
             self._url(f"/v1/sessions/{session_id}"),
@@ -239,7 +239,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
-    # 提交 feedback。
+    # 提交反馈。
     def submit_feedback(
         self,
         trace_id: str,
@@ -251,6 +251,15 @@ class CogDocClient:
         evidence: list[dict] | None = None,
         comment: str | None = None,
         correction: str | None = None,
+        feedback_type: str | None = None,
+        feedback_text: str | None = None,
+        correction_text: str | None = None,
+        save_as_knowledge: bool = False,
+        related_source: str | None = None,
+        related_source_sha256: str | None = None,
+        related_chunk_ids: list[str] | None = None,
+        certainty: str | None = None,
+        created_by: str | None = None,
     ) -> httpx.Response:
         payload = {
             "trace_id": trace_id,
@@ -262,6 +271,15 @@ class CogDocClient:
             "evidence": evidence or [],
             "comment": comment,
             "correction": correction,
+            "feedback_type": feedback_type,
+            "feedback_text": feedback_text,
+            "correction_text": correction_text,
+            "save_as_knowledge": save_as_knowledge,
+            "related_source": related_source,
+            "related_source_sha256": related_source_sha256,
+            "related_chunk_ids": related_chunk_ids or [],
+            "certainty": certainty,
+            "created_by": created_by,
         }
         return httpx.post(
             self._url("/v1/feedback"),
@@ -270,7 +288,98 @@ class CogDocClient:
             headers=self._headers,
         )
 
-    # 完成 chat请求体 处理。
+    # 新增派生知识。
+    def create_knowledge(
+        self,
+        *,
+        kb_id: str,
+        text: str,
+        related_source: str | None = None,
+        related_source_sha256: str | None = None,
+        related_chunk_ids: list[str] | None = None,
+        source_note: str | None = None,
+        certainty: str = "medium",
+        origin: str = "manual_entry",
+        created_from_trace_id: str | None = None,
+        created_by: str | None = None,
+        enable_immediately: bool = False,
+    ) -> httpx.Response:
+        payload = {
+            "kb_id": kb_id,
+            "text": text,
+            "related_source": related_source,
+            "related_source_sha256": related_source_sha256,
+            "related_chunk_ids": related_chunk_ids or [],
+            "source_note": source_note,
+            "certainty": certainty,
+            "origin": origin,
+            "created_from_trace_id": created_from_trace_id,
+            "created_by": created_by,
+            "enable_immediately": enable_immediately,
+        }
+        return httpx.post(
+            self._url("/v1/knowledge"),
+            json={k: v for k, v in payload.items() if v is not None},
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    # 查询派生知识。
+    def list_knowledge(
+        self,
+        kb_id: str,
+        status: str | None = None,
+        document_id: str | None = None,
+        origin: str | None = None,
+        created_by: str | None = None,
+    ) -> httpx.Response:
+        params = {
+            "kb_id": kb_id,
+            "status": status,
+            "document_id": document_id,
+            "origin": origin,
+            "created_by": created_by,
+        }
+        return httpx.get(
+            self._url("/v1/knowledge"),
+            params={k: v for k, v in params.items() if v is not None},
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    # 审核派生知识。
+    def review_knowledge(
+        self,
+        knowledge_id: str,
+        action: str,
+        actor: str | None = None,
+        note: str | None = None,
+    ) -> httpx.Response:
+        payload = {"actor": actor, "note": note}
+        return httpx.post(
+            self._url(f"/v1/knowledge/{knowledge_id}/{action}"),
+            json={k: v for k, v in payload.items() if v is not None},
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    # 批量审核派生知识。
+    def batch_review_knowledge(
+        self,
+        knowledge_ids: list[str],
+        action: str,
+        actor: str | None = None,
+        note: str | None = None,
+    ) -> httpx.Response:
+        payload = {"knowledge_ids": knowledge_ids, "actor": actor, "note": note}
+        return httpx.post(
+            self._url(f"/v1/knowledge/{action}"),
+            json={k: v for k, v in payload.items() if v is not None},
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    # 构造对话请求体。
     def _chat_payload(
         self, kb_id: str, query: str, mode: str, session_id: str | None, is_local: bool
     ) -> dict:
@@ -279,7 +388,7 @@ class CogDocClient:
             payload["session_id"] = session_id
         return payload
 
-    # 调用独立 summary 接口。
+    # 调用独立摘要接口。
     def summary(
         self,
         kb_id: str,
@@ -300,7 +409,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
-    # 调用独立 compare 接口。
+    # 调用独立对比接口。
     def compare(
         self,
         kb_id: str,
@@ -321,7 +430,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
-    # 调用独立 retrieve 接口。
+    # 调用独立检索接口。
     def retrieve(
         self,
         kb_id: str,
@@ -344,7 +453,7 @@ class CogDocClient:
             headers=self._headers,
         )
 
-    # 流式返回chat。
+    # 流式返回对话。
     def stream_chat(
         self,
         kb_id: str,
@@ -365,7 +474,7 @@ class CogDocClient:
             if on_response is not None:
                 on_response(response)
             if response.status_code != 200:
-                # 流式响应非 200 不会抛异常，需读出 body 转成 error 事件，避免静默成空答案。
+                # 流式响应失败不会抛异常，需读出正文转成错误事件，避免静默成空答案。
                 response.read()
                 try:
                     yield "error", response.json()

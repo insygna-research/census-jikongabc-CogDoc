@@ -14,18 +14,18 @@ from cogdoc.agents.conversation_memory import (
 class Generator:
     _clients = {}
 
-    # 清理 clients。
+    # 清理客户端。
     @classmethod
     def clear_clients(cls) -> None:
-        # 改了 LLM 配置后清缓存：客户端键不含 api_key，只改 key 时不清会一直用旧客户端。
+        # 改了模型配置后清缓存，避免继续使用旧客户端。
         cls._clients.clear()
 
-    # 获取 client。
+    # 获取客户端。
     @classmethod
     def _get_client(
         cls, is_local: bool = False, custom_model_name: str = None
     ) -> ChatOpenAI:
-        # client_key 必须包含后端、地址和模型名。
+        # 客户端键必须包含后端、地址和模型名。
         settings = get_settings()
         if is_local:
             base_url = settings.ollama_base_url
@@ -44,7 +44,7 @@ class Generator:
                 custom_model_name if custom_model_name else settings.llm_model_name
             )
             client_key = f"cloud_{base_url}_{model_name}"
-            # 云端超时与重试按后端 SLA 可配。
+            # 云端超时与重试按后端服务级别可配。
             timeout = settings.llm_timeout_seconds
             max_retries = settings.llm_max_retries
             if not api_key:
@@ -64,16 +64,35 @@ class Generator:
             )
         return cls._clients[client_key]
 
-    # 构建 context string。
+    # 构建上下文文本。
     @classmethod
     def _build_context_string(cls, docs: List[RetrievedDoc]) -> str:
-        # chunk_id 只进入 Document 属性，引用格式仍按 source/page。
+        # 分别渲染原始文档和派生知识，防止补充知识伪装成原文。
         if not docs:
             return "（未检索到任何相关的参考本地知识库内容。）"
 
         context_blocks = []
         for doc in docs:
             meta = doc["meta"]
+            if meta.get("source_type") == "derived_knowledge":
+                knowledge_id = meta.get("knowledge_id") or str(
+                    meta.get("chunk_id", "")
+                ).replace("knowledge:", "")
+                certainty = meta.get("certainty", "")
+                related_source = meta.get("related_source", "")
+                chunk_context = str(meta.get("context", "") or "").strip()
+                body = doc["text"].strip()
+                if chunk_context:
+                    body = f"来源说明：\n{chunk_context}\n\n内容：\n{body}"
+                block = (
+                    f'<Knowledge knowledge_id="{knowledge_id}" certainty="{certainty}" '
+                    f'related_source="{related_source}">\n'
+                    f"{body}\n"
+                    f"</Knowledge>"
+                )
+                context_blocks.append(block)
+                continue
+
             source = meta.get("source", "未知文件")
             page = meta.get("page", 1)
             chunk_id = meta.get("chunk_id", meta.get("chunk_index", 0))
@@ -91,12 +110,12 @@ class Generator:
 
         return "\n\n".join(context_blocks)
 
-    # 格式化 prompt。
+    # 格式化提示。
     @classmethod
     def format_prompt(
         cls, query: str, docs: List[RetrievedDoc], chat_history: list | None = None
     ) -> List:
-        # Prompt 明确约束模型只使用 Document 标签内的信息。
+        # 提示明确约束模型只使用参考标签内的信息。
         context_str = cls._build_context_string(docs)
         history_text = format_recent_chat_history(
             chat_history, limit=CHAT_HISTORY_MESSAGE_LIMIT
@@ -113,12 +132,14 @@ class Generator:
             "4. 同一句话涉及多处来源时，可连续附加多个引用标签，例如：[a.pdf:P3][b.pdf:P7]。\n"
             "5. 回答语言须与用户提问保持一致。\n\n"
             "【引用格式】\n"
-            "格式：[source属性值:P+page属性值]\n"
-            "说明：source 和 page 的值直接取自对应 <Document> 标签的属性，不得使用任何占位词。\n"
+            "原始文档格式：[source属性值:P+page属性值]\n"
+            "派生知识格式：[knowledge:knowledge_id属性值]\n"
+            "说明：原始文档引用值直接取自对应 <Document> 标签属性；派生知识引用值直接取自 <Knowledge> 标签属性。\n"
             '示例：若标签为 <Document source="大模型开发应用赛.pdf" page="5">，\n'
             "      则该文档的引用写作：[大模型开发应用赛.pdf:P5]\n"
+            '示例：若标签为 <Knowledge knowledge_id="K123">，则该知识的引用写作：[knowledge:K123]\n'
             "禁止：不能使用中文括号（ ）；不能写 [文件名:页码] 等占位形式；"
-            "不能引用未出现在 <Document> 标签中的文件名或页码。\n\n"
+            "不能引用未出现在参考资料标签中的文件名、页码或知识标识。\n\n"
             "【兜底规则】\n"
             "若参考文档中找不到与提问相关的内容，请直接回复：\n"
             f"「{NO_RELEVANT_CONTENT_ANSWER}」\n"

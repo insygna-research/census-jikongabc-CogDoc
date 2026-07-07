@@ -81,6 +81,8 @@ def test_chat_result_to_response_maps_stable_fields_without_raw_text():
     assert payload["citations"] == [
         {
             "chunk_id": "chunk:a:1",
+            "source_type": "document",
+            "knowledge_id": "",
             "source": "a.pdf",
             "page": 1,
             "page_start": 1,
@@ -88,6 +90,7 @@ def test_chat_result_to_response_maps_stable_fields_without_raw_text():
         }
     ]
     assert payload["evidence"][0]["rerank_score"] == 0.98
+    assert payload["evidence"][0]["source_type"] == "document"
     assert payload["evidence"][0]["text_preview"] == "报名要求摘要"
     assert "raw_output" not in payload
     assert "steps" not in payload

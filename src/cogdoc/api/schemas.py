@@ -86,6 +86,8 @@ class ChatRequest(QueryDocRequest):
 # 引用来源取自文档元数据，不含正文。
 class Citation(ApiModel):
     chunk_id: str = ""
+    source_type: str = "document"
+    knowledge_id: str = ""
     source: str = ""
     page: int | None = None
     page_start: int | None = None
@@ -95,6 +97,8 @@ class Citation(ApiModel):
 # 证据片段带截断预览，供前端证据面板展示。
 class Evidence(ApiModel):
     chunk_id: str = ""
+    source_type: str = "document"
+    knowledge_id: str = ""
     chunk_index: int | None = None
     source: str = ""
     page: int | None = None
@@ -523,6 +527,8 @@ def _citation_from_mapping(item: Any) -> Citation:
     page = _int_or_none(data.get("page"))
     return Citation(
         chunk_id=str(data.get("chunk_id", "") or ""),
+        source_type=str(data.get("source_type", "document") or "document"),
+        knowledge_id=str(data.get("knowledge_id", "") or ""),
         source=str(data.get("source", "") or ""),
         page=page,
         page_start=_int_or_none(data.get("page_start", page)),
@@ -536,6 +542,8 @@ def _evidence_from_mapping(item: Any) -> Evidence:
     page = _int_or_none(data.get("page"))
     return Evidence(
         chunk_id=str(data.get("chunk_id", "") or ""),
+        source_type=str(data.get("source_type", "document") or "document"),
+        knowledge_id=str(data.get("knowledge_id", "") or ""),
         chunk_index=_int_or_none(data.get("chunk_index")),
         source=str(data.get("source", "") or ""),
         page=page,
