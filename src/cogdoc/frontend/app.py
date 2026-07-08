@@ -15,13 +15,14 @@ from cogdoc.frontend.api_client import (
 )
 
 DEFAULT_API_URL = os.getenv("COGDOC_API_URL", "http://localhost:8000")
-MAIN_VIEWS = ["对话", "知识", "调试"]
+MAIN_VIEWS = ["对话", "派生知识", "调试"]
 STREAM_RERUN_INTERVAL_SECONDS = 0.8
 STREAM_PREVIEW_HEAD_CHARS = 1200
 STREAM_PREVIEW_TAIL_CHARS = 3600
 SIDEBAR_CACHE_TTL_SECONDS = 2.0
 SIDEBAR_STREAM_CACHE_TTL_SECONDS = 30.0
 SIDEBAR_STALE_CACHE_GRACE_SECONDS = 120.0
+NO_REFERENCE_ANSWER = "在所提供的参考资料中未找到与该问题相关的内容，建议查阅更多资料。"
 TRACE_NODE_LABELS = {
     "runtime.setup": "运行准备",
     "intent_router": "意图路由",
@@ -77,6 +78,7 @@ def _init_state() -> None:
     st.session_state.setdefault("trace_session_loaded", set())
     st.session_state.setdefault("trace_session_error", {})
     st.session_state.setdefault("retrieve_debug_by_context", {})
+    st.session_state.setdefault("feedback_action_by_message", {})
     # 兼容旧状态：升级前只有一份全局消息，迁移到当前上下文桶里。
     if "messages" in st.session_state:
         if st.session_state.kb_id and st.session_state.messages:
@@ -282,9 +284,9 @@ def _conversations(client: CogDocClient, kb_id: str) -> None:
 
 
 # 发送反馈。
-def _send_feedback(final: dict, query: str, feedback: str) -> None:
+def _send_feedback(final: dict, query: str, feedback: str) -> str:
     # 凭该回答的跟踪标识提交赞踩，并关联问题和答案。
-    _submit_feedback(final, query, feedback)
+    return _submit_feedback(final, query, feedback)
 
 
 # 提交反馈。
@@ -295,13 +297,14 @@ def _submit_feedback(
     comment: str | None = None,
     correction: str | None = None,
     save_as_knowledge: bool = False,
+    skip_retrieval_feedback: bool = False,
     certainty: str | None = None,
     feedback_type: str | None = None,
-) -> None:
+) -> str:
     trace_id = final.get("trace_id")
     if not trace_id:
         st.toast("缺少 trace_id，无法提交反馈")
-        return
+        return "error"
     client = _client()
     resp = client.submit_feedback(
         trace_id=trace_id,
@@ -319,6 +322,7 @@ def _submit_feedback(
         feedback_text=comment,
         correction_text=correction,
         save_as_knowledge=save_as_knowledge,
+        skip_retrieval_feedback=skip_retrieval_feedback,
         related_source=_first_citation_source(final),
         related_source_sha256=_first_evidence_source_sha(final),
         related_chunk_ids=_citation_chunk_ids(final),
@@ -342,9 +346,14 @@ def _submit_feedback(
         _clear_api_cache(
             ("feedback-loop-metrics", client.base_url, st.session_state.kb_id)
         )
-    st.toast(
-        "反馈已记录" if resp.status_code == 201 else f"反馈失败: {resp.status_code}"
-    )
+    if resp.status_code == 201:
+        payload = response_payload(resp)
+        status = payload.get("status") if isinstance(payload, Mapping) else ""
+        st.toast("这条回答已有反馈" if status == "duplicate_ignored" else "反馈已记录")
+        return str(status or "recorded")
+    else:
+        st.toast(f"反馈失败: {resp.status_code}")
+        return "error"
 
 
 # 保存回答为派生知识。
@@ -354,7 +363,6 @@ def _save_answer_as_knowledge(
     *,
     source_note: str | None = None,
     certainty: str = "medium",
-    enable_immediately: bool = False,
 ) -> None:
     kb_id = st.session_state.kb_id
     answer = str(final.get("answer") or "").strip()
@@ -381,11 +389,10 @@ def _save_answer_as_knowledge(
         origin="saved_answer",
         created_from_trace_id=str(final.get("trace_id") or "") or None,
         created_by="frontend",
-        enable_immediately=enable_immediately,
     )
     if resp.status_code in (200, 201):
         _clear_knowledge_cache(client, kb_id)
-        st.toast("答案已保存为知识")
+        st.toast("答案已保存到补充知识库")
     else:
         st.toast(f"保存失败: {resp.status_code}")
 
@@ -582,11 +589,142 @@ def _page_range_label(page_start, page_end=None) -> str:
 # 判断回答是否缺少可用证据。
 def _is_no_evidence_final(final: Mapping) -> bool:
     answer = str(final.get("answer") or "")
+    if NO_REFERENCE_ANSWER in answer:
+        return True
     if not final.get("is_valid"):
         return True
     if not final.get("citations") and not final.get("evidence"):
         return True
     return "未明确" in answer or "无答案" in answer
+
+
+def _render_no_evidence_knowledge_form(final: dict, key: str, query: str) -> None:
+    with st.expander("补充知识", expanded=True):
+        with st.form(f"no-evidence-knowledge-{key}", clear_on_submit=True):
+            supplement = st.text_area(
+                "正确说法",
+                key=f"no-evidence-correction-{key}",
+                height=120,
+            )
+            note = st.text_area(
+                "来源说明",
+                value=f"补充自无答案问题：{query}" if query else "补充自无答案问题",
+                key=f"no-evidence-note-{key}",
+                height=68,
+            )
+            certainty = st.selectbox(
+                "可信度",
+                ["medium", "high", "low"],
+                format_func=lambda value: {
+                    "high": "高",
+                    "medium": "中",
+                    "low": "低",
+                }[value],
+                key=f"no-evidence-certainty-{key}",
+            )
+            submitted = st.form_submit_button("保存为待审核派生知识")
+        if submitted:
+            if supplement.strip():
+                _submit_feedback(
+                    final,
+                    query,
+                    "correction",
+                    comment=note.strip() or None,
+                    correction=supplement.strip(),
+                    save_as_knowledge=True,
+                    skip_retrieval_feedback=True,
+                    certainty=certainty,
+                    feedback_type="no_evidence",
+                )
+            else:
+                st.warning("请输入正确说法。")
+
+
+def _render_save_answer_form(final: dict, key: str, query: str) -> None:
+    with st.expander("保存到补充知识库", expanded=True):
+        with st.form(f"save-answer-{key}", clear_on_submit=True):
+            save_note = st.text_area("来源说明", key=f"save-note-{key}", height=80)
+            save_certainty = st.selectbox(
+                "可信度",
+                ["medium", "high", "low"],
+                format_func=lambda value: {
+                    "high": "高",
+                    "medium": "中",
+                    "low": "低",
+                }[value],
+                key=f"save-answer-certainty-{key}",
+            )
+            save_submitted = st.form_submit_button("保存到补充知识库")
+        if save_submitted:
+            _save_answer_as_knowledge(
+                final,
+                query,
+                source_note=save_note.strip() or None,
+                certainty=save_certainty,
+            )
+            st.session_state.feedback_action_by_message.pop(
+                _feedback_action_key(final, key), None
+            )
+            st.rerun()
+
+
+def _render_correction_form(final: dict, key: str, query: str) -> None:
+    with st.expander("纠错", expanded=True):
+        with st.form(f"correction-{key}", clear_on_submit=True):
+            comment = st.text_area("备注", key=f"comment-{key}", height=80)
+            correction = st.text_area(
+                "纠正答案", key=f"correction-text-{key}", height=120
+            )
+            certainty = st.selectbox(
+                "可信度",
+                ["medium", "high", "low"],
+                format_func=lambda value: {
+                    "high": "高",
+                    "medium": "中",
+                    "low": "低",
+                }[value],
+                key=f"correction-certainty-{key}",
+            )
+            submitted = st.form_submit_button("提交纠错")
+        if submitted:
+            if not correction.strip():
+                st.warning("请输入纠正答案。")
+                return
+            _submit_feedback(
+                final,
+                query,
+                "correction",
+                comment=comment.strip() or None,
+                correction=correction.strip(),
+                save_as_knowledge=True,
+                certainty=certainty,
+            )
+            st.session_state.feedback_action_by_message.pop(
+                _feedback_action_key(final, key), None
+            )
+            st.rerun()
+
+
+# 构造反馈动作状态键。
+def _feedback_action_key(final: Mapping, key: str) -> str:
+    return str(final.get("trace_id") or key)
+
+
+# 处理赞踩点击，先锁住同一条回答的两个按钮，再提交反馈。
+def _handle_quick_feedback_click(
+    final: dict, key: str, query: str, feedback: str, recorded_action: str
+) -> None:
+    action_key = _feedback_action_key(final, key)
+    if st.session_state.feedback_action_by_message.get(action_key):
+        return
+    st.session_state.feedback_action_by_message[action_key] = "locked"
+    result = _send_feedback(final, query, feedback)
+    if result == "recorded":
+        st.session_state.feedback_action_by_message[action_key] = recorded_action
+    elif result == "duplicate_ignored":
+        st.session_state.feedback_action_by_message[action_key] = "locked"
+    else:
+        st.session_state.feedback_action_by_message.pop(action_key, None)
 
 
 # 格式化引用来源标签。
@@ -850,106 +988,32 @@ def _render_evidence(final: dict, key: str, query: str = "") -> None:
                         details.append(f"密度: {density:.2f}")
                     st.caption(" · ".join(details))
 
-    fb = st.columns([1, 1, 6])
-    if fb[0].button("👍", key=f"up-{key}"):
-        _send_feedback(final, query, "thumbs_up")
-    if fb[1].button("👎", key=f"down-{key}"):
-        _send_feedback(final, query, "thumbs_down")
     if _is_no_evidence_final(final):
-        with st.expander("补充知识", expanded=True):
-            with st.form(f"no-evidence-knowledge-{key}", clear_on_submit=True):
-                supplement = st.text_area(
-                    "正确说法",
-                    key=f"no-evidence-correction-{key}",
-                    height=120,
-                )
-                note = st.text_area(
-                    "来源说明",
-                    value=f"补充自无答案问题：{query}" if query else "补充自无答案问题",
-                    key=f"no-evidence-note-{key}",
-                    height=68,
-                )
-                certainty = st.selectbox(
-                    "可信度",
-                    ["medium", "high", "low"],
-                    format_func=lambda value: {
-                        "high": "高",
-                        "medium": "中",
-                        "low": "低",
-                    }[value],
-                    key=f"no-evidence-certainty-{key}",
-                )
-                submitted = st.form_submit_button("保存为待审核知识")
-            if submitted:
-                if supplement.strip():
-                    _submit_feedback(
-                        final,
-                        query,
-                        "correction",
-                        comment=note.strip() or None,
-                        correction=supplement.strip(),
-                        save_as_knowledge=True,
-                        certainty=certainty,
-                        feedback_type="no_evidence",
-                    )
-                else:
-                    st.warning("请输入正确说法。")
-    with st.expander("保存答案"):
-        with st.form(f"save-answer-{key}", clear_on_submit=True):
-            save_note = st.text_area("来源说明", key=f"save-note-{key}", height=80)
-            save_cols = st.columns([1, 1])
-            save_certainty = save_cols[0].selectbox(
-                "可信度",
-                ["medium", "high", "low"],
-                format_func=lambda value: {
-                    "high": "高",
-                    "medium": "中",
-                    "low": "低",
-                }[value],
-                key=f"save-answer-certainty-{key}",
-            )
-            enable_saved = save_cols[1].checkbox(
-                "立即启用", key=f"enable-saved-answer-{key}", value=False
-            )
-            save_submitted = st.form_submit_button("保存为知识")
-        if save_submitted:
-            _save_answer_as_knowledge(
-                final,
-                query,
-                source_note=save_note.strip() or None,
-                certainty=save_certainty,
-                enable_immediately=enable_saved,
-            )
-    with st.expander("纠错"):
-        with st.form(f"correction-{key}", clear_on_submit=True):
-            comment = st.text_area("备注", key=f"comment-{key}", height=80)
-            correction = st.text_area(
-                "纠正答案", key=f"correction-text-{key}", height=120
-            )
-            save_as_knowledge = st.checkbox(
-                "保存为待审核知识", key=f"save-knowledge-{key}", value=False
-            )
-            certainty = st.selectbox(
-                "可信度",
-                ["medium", "high", "low"],
-                format_func=lambda value: {
-                    "high": "高",
-                    "medium": "中",
-                    "low": "低",
-                }[value],
-                key=f"correction-certainty-{key}",
-            )
-            submitted = st.form_submit_button("提交纠错")
-        if submitted:
-            _submit_feedback(
-                final,
-                query,
-                "correction",
-                comment=comment.strip() or None,
-                correction=correction.strip() or None,
-                save_as_knowledge=save_as_knowledge,
-                certainty=certainty,
-            )
+        _render_no_evidence_knowledge_form(final, key, query)
+    else:
+        fb = st.columns([1, 1, 6])
+        action_key = _feedback_action_key(final, key)
+        action = st.session_state.feedback_action_by_message.get(action_key)
+        feedback_locked = bool(action)
+        fb[0].button(
+            "👍",
+            key=f"up-{key}",
+            disabled=feedback_locked,
+            on_click=_handle_quick_feedback_click,
+            args=(final, key, query, "thumbs_up", "save"),
+        )
+        fb[1].button(
+            "👎",
+            key=f"down-{key}",
+            disabled=feedback_locked,
+            on_click=_handle_quick_feedback_click,
+            args=(final, key, query, "thumbs_down", "correct"),
+        )
+
+        if action == "save":
+            _render_save_answer_form(final, key, query)
+        elif action == "correct":
+            _render_correction_form(final, key, query)
 
     trace_id = final.get("trace_id")
     if trace_id:
@@ -1145,7 +1209,7 @@ def _clear_knowledge_cache(client: CogDocClient, kb_id: str) -> None:
 def _knowledge_rows(
     client: CogDocClient,
     kb_id: str,
-    status: str,
+    status: str | None,
     document_id: str | None = None,
     origin: str | None = None,
     created_by: str | None = None,
@@ -1180,7 +1244,7 @@ def _knowledge_rows(
         ),
     )
     if status_code != 200:
-        raise CogDocAPIError(format_api_error(payload, status_code, "读取知识失败"))
+        raise CogDocAPIError(format_api_error(payload, status_code, "读取派生知识失败"))
     rows = payload.get("knowledge", []) if isinstance(payload, Mapping) else []
     return [row for row in rows if isinstance(row, Mapping)]
 
@@ -1200,6 +1264,7 @@ def _review_queue_summary(
             filters.get("document_id"),
             filters.get("origin"),
             filters.get("created_by"),
+            filters.get("has_conflict"),
             filters.get("created_after"),
             filters.get("created_before"),
         ),
@@ -1209,6 +1274,7 @@ def _review_queue_summary(
                 document_id=filters.get("document_id"),
                 origin=filters.get("origin"),
                 created_by=filters.get("created_by"),
+                has_conflict=True if filters.get("has_conflict") else None,
                 created_after=filters.get("created_after"),
                 created_before=filters.get("created_before"),
             )
@@ -1250,6 +1316,7 @@ def _review_queue_export_payload(
             filters.get("document_id"),
             filters.get("origin"),
             filters.get("created_by"),
+            filters.get("has_conflict"),
             filters.get("created_after"),
             filters.get("created_before"),
         ),
@@ -1260,6 +1327,7 @@ def _review_queue_export_payload(
                 knowledge_document_id=filters.get("document_id"),
                 knowledge_origin=filters.get("origin"),
                 knowledge_created_by=filters.get("created_by"),
+                knowledge_has_conflict=True if filters.get("has_conflict") else None,
                 knowledge_created_after=filters.get("created_after"),
                 knowledge_created_before=filters.get("created_before"),
             )
@@ -1340,6 +1408,7 @@ KNOWLEDGE_ORIGIN_LABELS = {
     "": "全部来源",
     "manual_entry": "手工新增",
     "correction": "纠错",
+    "no_evidence": "无答案补充",
     "saved_answer": "保存答案",
     "agent_suggested": "分析建议",
 }
@@ -1357,6 +1426,16 @@ def _review_document_options(docs: list[Mapping]) -> dict[str, str]:
             label = f"{name} · {document_id}" if name else document_id
             options.setdefault(document_id, label)
     return options
+
+
+# 清空审核范围控件。
+def _reset_review_filters(kb_id: str) -> None:
+    st.session_state[f"review-filter-document-{kb_id}"] = ""
+    st.session_state[f"review-filter-origin-{kb_id}"] = ""
+    st.session_state[f"review-filter-created-by-{kb_id}"] = ""
+    st.session_state[f"review-filter-created-after-{kb_id}"] = ""
+    st.session_state[f"review-filter-created-before-{kb_id}"] = ""
+    st.session_state[f"review-filter-conflict-{kb_id}"] = False
 
 
 # 渲染审核范围过滤。
@@ -1396,6 +1475,21 @@ def _render_review_filters(client: CogDocClient, kb_id: str) -> dict[str, str | 
         conflict_only = second[2].checkbox(
             "只看冲突",
             key=f"review-filter-conflict-{kb_id}",
+        )
+        filter_actions = st.columns([1, 1, 4])
+        if filter_actions[0].button(
+            "刷新范围",
+            key=f"review-filter-refresh-{kb_id}",
+            use_container_width=True,
+        ):
+            _clear_knowledge_cache(client, kb_id)
+            st.rerun()
+        filter_actions[1].button(
+            "清空范围",
+            key=f"review-filter-reset-{kb_id}",
+            on_click=_reset_review_filters,
+            args=(kb_id,),
+            use_container_width=True,
         )
     return {
         "document_id": document_id or "",
@@ -1454,41 +1548,21 @@ def _feedback_rows(
     return [row for row in rows if isinstance(row, Mapping)]
 
 
-# 读取反馈理解结果列表。
-def _feedback_analysis_rows(
-    client: CogDocClient,
-    kb_id: str,
-    recommended_action: str | None,
-) -> list[Mapping]:
-    status_code, payload = _cached_api_value(
-        ("feedback-analysis", client.base_url, kb_id, recommended_action),
-        lambda: _response_status_payload(
-            client.list_feedback_analysis(
-                kb_id, recommended_action=recommended_action, limit=200
-            )
-        ),
-    )
-    if status_code != 200:
-        raise CogDocAPIError(format_api_error(payload, status_code, "读取反馈分析失败"))
-    rows = payload.get("feedback_analysis", []) if isinstance(payload, Mapping) else []
-    return [row for row in rows if isinstance(row, Mapping)]
-
-
 # 处理审核响应。
 def _handle_knowledge_response(resp, client: CogDocClient, kb_id: str) -> None:
     if resp.status_code >= 400:
-        st.error(_response_error(resp, "知识操作失败"))
+        st.error(_response_error(resp, "派生知识操作失败"))
         return
     _clear_knowledge_cache(client, kb_id)
     st.rerun()
 
 
-# 渲染主动新增知识。
+# 渲染主动新增派生知识。
 def _render_create_knowledge(client: CogDocClient, kb_id: str) -> None:
     notice_key = f"create-knowledge-notice-{kb_id}"
     notice = st.session_state.pop(notice_key, None)
     if isinstance(notice, Mapping):
-        st.success(str(notice.get("message") or "知识已保存。"))
+        st.success(str(notice.get("message") or "派生知识已保存。"))
         if notice.get("warning"):
             st.warning(str(notice["warning"]))
         for item in notice.get("conflicts") or []:
@@ -1510,20 +1584,18 @@ def _render_create_knowledge(client: CogDocClient, kb_id: str) -> None:
         related_chunk_text_hash = page_fields[2].text_input("分块文本哈希")
         related_anchor_text = st.text_input("锚点文本")
         source_note = st.text_area("来源说明", height=80)
-        controls = st.columns([1, 1])
-        certainty = controls[0].selectbox(
+        certainty = st.selectbox(
             "可信度",
             ["medium", "high", "low"],
             format_func=lambda value: {"high": "高", "medium": "中", "low": "低"}[
                 value
             ],
         )
-        enable_immediately = controls[1].checkbox("立即启用", value=False)
-        submitted = st.form_submit_button("新增知识", use_container_width=True)
+        submitted = st.form_submit_button("新增派生知识", use_container_width=True)
     if not submitted:
         return
     if not text.strip():
-        st.warning("请输入知识内容。")
+        st.warning("请输入派生知识内容。")
         return
     doc = doc_by_name.get(selected_source) if selected_source else None
     chunk_ids = [item.strip() for item in related_chunk_ids.split(",") if item.strip()]
@@ -1541,26 +1613,23 @@ def _render_create_knowledge(client: CogDocClient, kb_id: str) -> None:
         related_anchor_text=related_anchor_text.strip() or None,
         source_note=source_note.strip() or None,
         certainty=certainty,
-        enable_immediately=enable_immediately,
     )
     if resp.status_code == 201:
         payload = response_payload(resp)
         _clear_knowledge_cache(client, kb_id)
         conflicts = payload.get("conflicts", []) if isinstance(payload, Mapping) else []
-        st.success("知识已保存。")
+        st.success("派生知识已保存。")
         if conflicts:
             warning = "发现相似知识，已转为待审核并加入冲突组。"
-            if enable_immediately:
-                warning += " 立即启用请求未执行，需审核后启用。"
             st.session_state[notice_key] = {
-                "message": "知识已保存。",
+                "message": "派生知识已保存。",
                 "warning": warning,
                 "conflicts": conflicts[:3],
             }
             st.rerun()
         st.rerun()
     else:
-        st.error(_response_error(resp, "新增知识失败"))
+        st.error(_response_error(resp, "新增派生知识失败"))
 
 
 # 渲染知识修订表单。
@@ -1634,12 +1703,11 @@ def _render_knowledge_revision_form(
             height=68,
             key=f"revise-note-{suffix}-{knowledge_id}",
         )
-        controls = st.columns([1, 1, 2])
         certainty_options = ["medium", "high", "low"]
         certainty_value = str(item.get("certainty") or "medium")
         if certainty_value not in certainty_options:
             certainty_value = "medium"
-        certainty = controls[0].selectbox(
+        certainty = st.selectbox(
             "可信度",
             certainty_options,
             index=certainty_options.index(certainty_value),
@@ -1648,14 +1716,7 @@ def _render_knowledge_revision_form(
             ],
             key=f"revise-certainty-{suffix}-{knowledge_id}",
         )
-        enable_immediately = controls[1].checkbox(
-            "立即启用",
-            value=False,
-            key=f"revise-enable-{suffix}-{knowledge_id}",
-        )
-        submitted = controls[2].form_submit_button(
-            "创建修订版本", use_container_width=True
-        )
+        submitted = st.form_submit_button("创建修订版本", use_container_width=True)
     if not submitted:
         return
     if not text.strip():
@@ -1679,7 +1740,6 @@ def _render_knowledge_revision_form(
             source_note=source_note.strip() or None,
             certainty=certainty,
             created_by="frontend",
-            enable_immediately=enable_immediately,
         ),
         client,
         kb_id,
@@ -1850,27 +1910,62 @@ def _render_knowledge_item(
                         client,
                         kb_id,
                     )
-        actions = st.columns([1, 1, 1, 4])
-        if item.get("status") != "stale" and actions[0].button(
-            "通过", key=f"approve-{suffix}-{knowledge_id}"
-        ):
-            _handle_knowledge_response(
-                client.review_knowledge(knowledge_id, "approve"),
-                client,
-                kb_id,
-            )
-        if actions[1].button("驳回", key=f"reject-{suffix}-{knowledge_id}"):
-            _handle_knowledge_response(
-                client.review_knowledge(knowledge_id, "reject"),
-                client,
-                kb_id,
-            )
-        if actions[2].button("归档", key=f"archive-{suffix}-{knowledge_id}"):
-            _handle_knowledge_response(
-                client.review_knowledge(knowledge_id, "archive"),
-                client,
-                kb_id,
-            )
+        status = str(item.get("status") or "")
+        if status == "pending":
+            actions = st.columns([1, 1, 4])
+            if actions[0].button("通过", key=f"approve-{suffix}-{knowledge_id}"):
+                _handle_knowledge_response(
+                    client.review_knowledge(knowledge_id, "approve"),
+                    client,
+                    kb_id,
+                )
+            if actions[1].button("驳回", key=f"reject-{suffix}-{knowledge_id}"):
+                _handle_knowledge_response(
+                    client.review_knowledge(knowledge_id, "reject"),
+                    client,
+                    kb_id,
+                )
+        elif status == "stale":
+            actions = st.columns([1, 5])
+            if actions[0].button("驳回", key=f"reject-{suffix}-{knowledge_id}"):
+                _handle_knowledge_response(
+                    client.review_knowledge(knowledge_id, "reject"),
+                    client,
+                    kb_id,
+                )
+        elif status in {"approved", "rejected", "archived"}:
+            actions = st.columns([1, 1, 4])
+            if status == "approved" and actions[0].button(
+                "归档", key=f"archive-{suffix}-{knowledge_id}"
+            ):
+                _handle_knowledge_response(
+                    client.review_knowledge(knowledge_id, "archive"),
+                    client,
+                    kb_id,
+                )
+            delete_key = f"delete-active-{suffix}-{knowledge_id}"
+            if actions[1].button("删除", key=f"delete-{suffix}-{knowledge_id}"):
+                st.session_state[delete_key] = True
+                st.rerun()
+            if st.session_state.get(delete_key):
+                st.warning("确认删除这条派生知识？删除后不可恢复。")
+                confirm_cols = st.columns([1, 1, 4])
+                if confirm_cols[0].button(
+                    "确认删除此派生知识",
+                    key=f"confirm-delete-{suffix}-{knowledge_id}",
+                ):
+                    st.session_state.pop(delete_key, None)
+                    _handle_knowledge_response(
+                        client.delete_knowledge(knowledge_id),
+                        client,
+                        kb_id,
+                    )
+                if confirm_cols[1].button(
+                    "取消",
+                    key=f"cancel-delete-{suffix}-{knowledge_id}",
+                ):
+                    st.session_state.pop(delete_key, None)
+                    st.rerun()
 
 
 # 渲染知识审核列表。
@@ -1898,27 +1993,76 @@ def _render_knowledge_review_list(
         st.warning(str(exc))
         return
     if not rows:
-        st.info(f"暂无{label}知识。")
+        st.info(f"暂无{label}派生知识。")
         return
-    options = [str(row.get("knowledge_id")) for row in rows if row.get("knowledge_id")]
-    selected = st.multiselect(f"批量选择{label}知识", options, key=f"batch-{status}")
-    batch = st.columns([1, 1, 3])
-    if batch[0].button(
-        "批量通过", key=f"batch-approve-{status}", disabled=not selected
-    ):
-        _handle_knowledge_response(
-            client.batch_review_knowledge(selected, "batch-approve"),
-            client,
-            kb_id,
+    if status == "pending":
+        options = [
+            str(row.get("knowledge_id")) for row in rows if row.get("knowledge_id")
+        ]
+        selected = st.multiselect(
+            f"批量选择{label}派生知识", options, key=f"batch-{status}"
         )
-    if batch[1].button("批量驳回", key=f"batch-reject-{status}", disabled=not selected):
-        _handle_knowledge_response(
-            client.batch_review_knowledge(selected, "batch-reject"),
-            client,
-            kb_id,
-        )
+        batch = st.columns([1, 1, 3])
+        if batch[0].button(
+            "批量通过", key=f"batch-approve-{status}", disabled=not selected
+        ):
+            _handle_knowledge_response(
+                client.batch_review_knowledge(selected, "batch-approve"),
+                client,
+                kb_id,
+            )
+        if batch[1].button(
+            "批量驳回", key=f"batch-reject-{status}", disabled=not selected
+        ):
+            _handle_knowledge_response(
+                client.batch_review_knowledge(selected, "batch-reject"),
+                client,
+                kb_id,
+            )
     for item in rows:
         _render_knowledge_item(client, kb_id, item, status)
+
+
+# 渲染派生知识列表。
+def _render_knowledge_catalog(
+    client: CogDocClient, kb_id: str, filters: Mapping | None = None
+) -> None:
+    filters = filters or {}
+    status_options = {
+        "全部": None,
+        "待审核": "pending",
+        "已通过": "approved",
+        "过期": "stale",
+        "已驳回": "rejected",
+        "已归档": "archived",
+    }
+    selected = st.radio(
+        "状态",
+        list(status_options),
+        horizontal=True,
+        key=f"knowledge-catalog-status-{kb_id}",
+    )
+    try:
+        rows = _knowledge_rows(
+            client,
+            kb_id,
+            status_options[selected],
+            document_id=filters.get("document_id") or None,
+            origin=filters.get("origin") or None,
+            created_by=filters.get("created_by") or None,
+            has_conflict=True if filters.get("has_conflict") else None,
+            created_after=filters.get("created_after") or None,
+            created_before=filters.get("created_before") or None,
+        )
+    except Exception as exc:
+        st.warning(str(exc))
+        return
+    if not rows:
+        st.info("暂无派生知识。")
+        return
+    st.caption(f"共 {len(rows)} 条")
+    for item in rows:
+        _render_knowledge_item(client, kb_id, item, f"catalog-{selected}")
 
 
 # 处理检索调权反馈响应。
@@ -1935,10 +2079,18 @@ def _render_retrieval_feedback_item(
     client: CogDocClient, kb_id: str, item: Mapping
 ) -> None:
     feedback_id = str(item.get("retrieval_feedback_id") or "")
-    chunk_id = str(item.get("chunk_id") or "-")
+    target_chunks = item.get("target_chunks")
+    if not isinstance(target_chunks, list):
+        target_chunks = []
+    chunk_ids = [
+        str(target.get("chunk_id"))
+        for target in target_chunks
+        if isinstance(target, Mapping) and target.get("chunk_id")
+    ]
+    chunk_count = int(item.get("chunk_count") or len(chunk_ids) or 1)
     status = "启用" if item.get("enabled") is True else "禁用"
     delta = item.get("weight_delta")
-    title = f"{chunk_id} · {status} · {delta}"
+    title = f"{chunk_count} 个分块 · {status} · {delta}"
     with st.expander(title):
         st.write(item.get("query_text") or "")
         meta = st.columns(4)
@@ -1946,24 +2098,22 @@ def _render_retrieval_feedback_item(
         meta[1].caption(f"置信度: {item.get('confidence') or '-'}")
         meta[2].caption(f"反馈: {item.get('feedback_id') or '-'}")
         meta[3].caption(f"创建时间: {item.get('created_at') or '-'}")
+        if chunk_ids:
+            st.caption(f"分块: {', '.join(chunk_ids)}")
+        elif item.get("chunk_id"):
+            st.caption(f"分块: {item.get('chunk_id')}")
         if item.get("trace_id"):
             st.caption(f"trace: {item.get('trace_id')}")
         if item.get("disable_reason"):
             st.caption(f"停用原因: {item.get('disable_reason')}")
-        action_cols = st.columns([1, 2, 5])
+        action_cols = st.columns([1, 5])
         if item.get("enabled") is True:
-            reason = action_cols[1].text_input(
-                "停用原因",
-                key=f"disable-reason-{feedback_id}",
-                label_visibility="collapsed",
-            )
             if action_cols[0].button("禁用", key=f"disable-rf-{feedback_id}"):
                 _handle_retrieval_feedback_response(
                     client.set_retrieval_feedback_enabled(
                         feedback_id,
                         False,
                         actor="frontend",
-                        reason=reason.strip() or None,
                     ),
                     client,
                     kb_id,
@@ -2055,30 +2205,18 @@ def _render_feedback_area(client: CogDocClient, kb_id: str) -> None:
         "点踩": "thumbs_down",
         "纠错": "correction",
     }
-    bad_case_options = {
-        "全部": None,
-        "坏样本": True,
-        "普通反馈": False,
-    }
-    filters = st.columns([1, 1])
-    selected_feedback = filters[0].radio(
+    selected_feedback = st.radio(
         "反馈",
         list(feedback_options),
         horizontal=True,
         key=f"feedback-kind-{kb_id}",
-    )
-    selected_bad_case = filters[1].radio(
-        "样本",
-        list(bad_case_options),
-        horizontal=True,
-        key=f"feedback-bad-case-{kb_id}",
     )
     try:
         rows = _feedback_rows(
             client,
             kb_id,
             feedback_options[selected_feedback],
-            bad_case_options[selected_bad_case],
+            None,
         )
     except Exception as exc:
         st.warning(str(exc))
@@ -2090,56 +2228,6 @@ def _render_feedback_area(client: CogDocClient, kb_id: str) -> None:
         _render_feedback_item(item)
 
 
-# 渲染单条反馈理解结果。
-def _render_feedback_analysis_item(item: Mapping) -> None:
-    target = item.get("target") if isinstance(item.get("target"), Mapping) else {}
-    feedback_type = item.get("feedback_type") or "-"
-    action = item.get("recommended_action") or "-"
-    raw_confidence = item.get("confidence")
-    confidence = (
-        f"{raw_confidence:.2f}" if isinstance(raw_confidence, (int, float)) else "-"
-    )
-    title = f"{feedback_type} · {action} · {confidence}"
-    with st.expander(title):
-        if item.get("extracted_claim"):
-            st.write(item["extracted_claim"])
-        st.caption(f"query: {item.get('query') or '-'}")
-        meta = st.columns(4)
-        meta[0].caption(f"情绪: {item.get('sentiment') or '-'}")
-        meta[1].caption(f"权重: {item.get('weight_delta') or 0}")
-        meta[2].caption(f"需复核: {'是' if item.get('needs_review') else '否'}")
-        meta[3].caption(f"创建时间: {item.get('created_at') or '-'}")
-        if target:
-            st.caption(f"chunks: {', '.join(target.get('chunk_ids') or []) or '-'}")
-            st.caption(f"sources: {', '.join(target.get('sources') or []) or '-'}")
-
-
-# 渲染反馈理解结果列表。
-def _render_feedback_analysis_area(client: CogDocClient, kb_id: str) -> None:
-    action_options = {
-        "全部": None,
-        "生成知识": "create_pending_knowledge",
-        "调权": "adjust_retrieval",
-        "仅记录": "record_only",
-    }
-    selected = st.radio(
-        "建议",
-        list(action_options),
-        horizontal=True,
-        key=f"feedback-analysis-action-{kb_id}",
-    )
-    try:
-        rows = _feedback_analysis_rows(client, kb_id, action_options[selected])
-    except Exception as exc:
-        st.warning(str(exc))
-        return
-    if not rows:
-        st.info("暂无反馈分析。")
-        return
-    for item in rows:
-        _render_feedback_analysis_item(item)
-
-
 # 渲染派生知识页。
 def _knowledge_area(kb_id: str | None) -> None:
     st.subheader("派生知识")
@@ -2147,12 +2235,19 @@ def _knowledge_area(kb_id: str | None) -> None:
         st.info("先选择知识库。")
         return
     client = _client()
+    notice_key = f"knowledge-area-notice-{kb_id}"
+    notice = st.session_state.pop(notice_key, None)
+    if isinstance(notice, Mapping):
+        kind = str(notice.get("kind") or "info")
+        message = str(notice.get("message") or "")
+        if kind == "success":
+            st.success(message)
+        elif kind == "warning":
+            st.warning(message)
+        else:
+            st.info(message)
     review_filters = _render_review_filters(client, kb_id)
-    api_filters = {
-        key: value or None
-        for key, value in review_filters.items()
-        if key != "has_conflict"
-    }
+    api_filters = {key: value or None for key, value in review_filters.items()}
     try:
         summary = _review_queue_summary(client, kb_id, api_filters)
     except Exception:
@@ -2174,28 +2269,23 @@ def _knowledge_area(kb_id: str | None) -> None:
     conflict_count = _summary_count(summary, "knowledge_conflicts", "total")
     conflict_group_count = _summary_count(summary, "knowledge_conflicts", "groups")
     feedback_count = _summary_count(summary, "feedback_counts", "total")
-    bad_case_count = _summary_count(summary, "feedback_counts", "bad_cases")
     retrieval_count = _summary_count(summary, "retrieval_feedback", "enabled")
     retrieval_disabled_count = _summary_count(summary, "retrieval_feedback", "disabled")
-    analysis_count = _summary_count(summary, "feedback_analysis", "total")
-    needs_review_count = _summary_count(summary, "feedback_analysis", "needs_review")
-    metrics = st.columns(5)
-    metrics[0].metric("待审核知识", pending_count)
+    metrics = st.columns(4)
+    metrics[0].metric("待审核派生知识", pending_count)
     metrics[0].caption(f"冲突 {conflict_count} · 组 {conflict_group_count}")
-    metrics[1].metric("过期知识", stale_count)
+    metrics[1].metric("过期派生知识", stale_count)
     metrics[1].caption(f"自动重绑 {auto_rebound_count}")
-    metrics[2].metric("原始反馈", feedback_count)
-    metrics[2].caption(f"坏样本 {bad_case_count}")
-    metrics[3].metric("反馈分析", analysis_count, delta=needs_review_count)
-    metrics[4].metric("检索调权", retrieval_count + retrieval_disabled_count)
-    metrics[4].caption(f"启用 {retrieval_count} · 禁用 {retrieval_disabled_count}")
+    metrics[2].metric("反馈", feedback_count)
+    metrics[3].metric("检索调权", retrieval_count + retrieval_disabled_count)
+    metrics[3].caption(f"启用 {retrieval_count} · 禁用 {retrieval_disabled_count}")
     if isinstance(index_status, Mapping) and index_status:
         state_label = _index_state_label(index_status.get("state"))
         approved_index_count = index_status.get("approved_count", 0)
         indexed_count = index_status.get("indexed_count", 0)
         auto_refresh = "开" if index_status.get("auto_refresh_enabled") else "关"
         st.caption(
-            f"知识索引 {state_label} · 已审 {approved_index_count} · "
+            f"派生知识索引 {state_label} · 已审 {approved_index_count} · "
             f"已索引 {indexed_count} · 后台刷新 {auto_refresh}"
         )
         if index_status.get("last_error") or index_status.get("collection_error"):
@@ -2212,7 +2302,7 @@ def _knowledge_area(kb_id: str | None) -> None:
             f"{_rate_label(rates.get('pending_rejection_rate'))} · "
             "无答案反馈 "
             f"{_rate_label(rates.get('no_evidence_rate'))} · "
-            "反馈转知识 "
+            "反馈转派生知识 "
             f"{_rate_label(rates.get('feedback_to_pending_rate'))} · "
             "调权回滚 "
             f"{_rate_label(rates.get('retrieval_feedback_rollback_rate'))}"
@@ -2221,7 +2311,7 @@ def _knowledge_area(kb_id: str | None) -> None:
         export_payload = _review_queue_export_payload(client, kb_id, api_filters)
     except Exception:
         export_payload = {}
-    export_cols = st.columns([1, 1, 4])
+    export_cols = st.columns([1, 1, 1, 3])
     export_cols[0].download_button(
         "导出审核队列",
         data=json.dumps(export_payload, ensure_ascii=False, indent=2),
@@ -2236,25 +2326,44 @@ def _knowledge_area(kb_id: str | None) -> None:
         _clear_api_cache(("feedback-analysis", client.base_url, kb_id))
         _clear_api_cache(("retrieval-feedback", client.base_url, kb_id))
         st.rerun()
+    if export_cols[2].button("检查过期派生知识", use_container_width=True):
+        resp = client.scan_stale_knowledge(kb_id)
+        if resp.status_code >= 400:
+            st.error(_response_error(resp, "过期派生知识扫描失败"))
+        else:
+            payload = response_payload(resp)
+            marked = (
+                int(payload.get("stale_marked") or 0)
+                if isinstance(payload, Mapping)
+                else 0
+            )
+            st.session_state[notice_key] = {
+                "kind": "success" if marked else "info",
+                "message": f"过期派生知识扫描完成，新增标记 {marked} 条。",
+            }
+            _clear_knowledge_cache(client, kb_id)
+            st.rerun()
     (
         create_tab,
+        catalog_tab,
         pending_tab,
         stale_tab,
         feedback_tab,
         retrieval_tab,
-        analysis_tab,
     ) = st.tabs(
         [
             "新增",
+            "派生知识列表",
             _tab_label("待审核", pending_count),
             _tab_label("过期", stale_count),
-            _tab_label("原始反馈", feedback_count),
+            _tab_label("反馈", feedback_count),
             _tab_label("调权", retrieval_count),
-            _tab_label("反馈分析", analysis_count),
         ]
     )
     with create_tab:
         _render_create_knowledge(client, kb_id)
+    with catalog_tab:
+        _render_knowledge_catalog(client, kb_id, review_filters)
     with pending_tab:
         _render_knowledge_review_list(
             client, kb_id, "pending", "待审核", review_filters
@@ -2265,8 +2374,6 @@ def _knowledge_area(kb_id: str | None) -> None:
         _render_feedback_area(client, kb_id)
     with retrieval_tab:
         _render_retrieval_feedback_area(client, kb_id)
-    with analysis_tab:
-        _render_feedback_analysis_area(client, kb_id)
 
 
 # 检索调试后台线程。
@@ -2800,6 +2907,9 @@ def _chat_area() -> None:
     )
     answering = bool(current_pending)
     current_view = st.session_state.main_views_by_context.get(current_key, "对话")
+    if current_view == "知识":
+        current_view = "派生知识"
+        st.session_state.main_views_by_context[current_key] = current_view
     if current_view not in MAIN_VIEWS:
         current_view = "对话"
         st.session_state.main_views_by_context[current_key] = current_view
@@ -2817,7 +2927,7 @@ def _chat_area() -> None:
         key=view_key,
         label_visibility="collapsed",
         format_func=lambda value: (
-            _tab_label(value, pending_total) if value == "知识" else value
+            _tab_label(value, pending_total) if value == "派生知识" else value
         ),
     )
     if current_key:
@@ -2857,7 +2967,7 @@ def _chat_area() -> None:
         if prompt:
             _start_stream(kb_id, prompt, mode)
             st.rerun()
-    elif view == "知识":
+    elif view == "派生知识":
         _knowledge_area(kb_id)
     else:
         _debug_area(kb_id)

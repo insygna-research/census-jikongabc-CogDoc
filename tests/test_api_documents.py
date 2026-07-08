@@ -4,7 +4,11 @@ from types import SimpleNamespace
 import pytest
 from httpx import ASGITransport, AsyncClient
 from cogdoc.api.app import create_app
+from cogdoc.api.derived_knowledge_store import DerivedKnowledgeStore
+from cogdoc.api.feedback_analysis_store import FeedbackAnalysisStore
+from cogdoc.api.feedback_store import FeedbackStore
 from cogdoc.api.ingest import IndexJobManager, KnowledgeBaseRegistry
+from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
 
 
 # 指定异步测试后端。
@@ -37,7 +41,21 @@ def _make_app(tmp_path, ingest_fn=_ok_ingest, monkeypatch=None):
         source_dir_for=source_dir_for,
         kb_exists=registry.exists,
     )
-    app = create_app(kb_registry=registry, index_jobs=jobs)
+    app = create_app(
+        kb_registry=registry,
+        index_jobs=jobs,
+        knowledge_store=DerivedKnowledgeStore(path=str(tmp_path / "knowledge.jsonl")),
+        feedback_store=FeedbackStore(
+            feedback_path=str(tmp_path / "feedback.jsonl"),
+            bad_cases_path=str(tmp_path / "bad_cases.jsonl"),
+        ),
+        feedback_analysis_store=FeedbackAnalysisStore(
+            path=str(tmp_path / "feedback_analysis.jsonl")
+        ),
+        retrieval_feedback_store=RetrievalFeedbackStore(
+            path=str(tmp_path / "retrieval_feedback.jsonl")
+        ),
+    )
     return app, source_dir_for
 
 
@@ -140,6 +158,79 @@ async def test_delete_knowledge_base(tmp_path, monkeypatch):
     assert after.json() == []
     assert not os.path.exists(os.path.dirname(source_dir_for("kb")))
     assert missing.status_code == 404 and missing.json()["error_code"] == "KB_NOT_FOUND"
+
+
+# 验证删除 KB 会清理审核队列状态，同名重建不继承旧反馈。
+@pytest.mark.anyio
+async def test_delete_recreated_kb_clears_review_state(tmp_path, monkeypatch):
+    app, _ = _make_app(tmp_path, monkeypatch=monkeypatch)
+    import cogdoc.api.routes.documents as docs_module
+
+    monkeypatch.setattr(
+        docs_module, "delete_kb_index_transactional", lambda kb_id: None
+    )
+
+    async with app.router.lifespan_context(app):
+        async with await _client(app) as client:
+            await client.post("/v1/knowledge-bases", json={"kb_id": "kb"})
+            await client.post(
+                "/v1/knowledge", json={"kb_id": "kb", "text": "待审核知识。"}
+            )
+            app.state.feedback_store.record(
+                {
+                    "kb_id": "kb",
+                    "trace_id": "t1",
+                    "feedback": "thumbs_down",
+                    "query": "问题",
+                }
+            )
+            app.state.feedback_analysis_store.record(
+                "fb1",
+                {"kb_id": "kb", "trace_id": "t1", "query": "问题"},
+                {
+                    "feedback_type": "correction",
+                    "sentiment": "negative",
+                    "target": {
+                        "chunk_ids": ["c1"],
+                        "sources": ["a.pdf"],
+                        "source_type": "document",
+                    },
+                    "extracted_claim": "正确说法",
+                    "recommended_action": "create_pending_knowledge",
+                    "weight_delta": -0.55,
+                    "confidence": 0.9,
+                    "needs_review": True,
+                },
+            )
+            app.state.retrieval_feedback_store.record_from_feedback(
+                "fb1",
+                {
+                    "kb_id": "kb",
+                    "query": "问题",
+                    "feedback": "thumbs_down",
+                    "citations": [{"chunk_id": "c1"}],
+                },
+            )
+
+            before = await client.get("/v1/review-queue", params={"kb_id": "kb"})
+            deleted = await client.delete("/v1/knowledge-bases/kb")
+            recreated = await client.post("/v1/knowledge-bases", json={"kb_id": "kb"})
+            summary = await client.get("/v1/review-queue", params={"kb_id": "kb"})
+            pending_count = await client.get(
+                "/v1/knowledge/pending-count", params={"kb_id": "kb"}
+            )
+
+    assert before.json()["feedback_counts"]["total"] == 1
+    assert before.json()["retrieval_feedback"]["enabled"] == 1
+    assert deleted.status_code == 204
+    assert recreated.status_code == 201
+    body = summary.json()
+    assert body["knowledge"] == {}
+    assert body["feedback_counts"]["total"] == 0
+    assert body["feedback_counts"]["bad_cases"] == 0
+    assert body["feedback_analysis"]["needs_review"] == 0
+    assert body["retrieval_feedback"]["enabled"] == 0
+    assert pending_count.json()["total"] == 0
 
 
 # 验证 delete kb cleanup failure keeps kb。

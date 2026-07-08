@@ -146,6 +146,116 @@ async def test_thumbs_down_lands_in_bad_cases(tmp_path, monkeypatch):
     assert feedback_analysis[0]["target"]["chunk_ids"] == ["c1"]
 
 
+# 验证一次反馈命中多个分块时调权仍按一次反馈统计。
+@pytest.mark.anyio
+async def test_retrieval_feedback_counts_one_feedback_with_multiple_chunks(
+    tmp_path, monkeypatch
+):
+    app, root = _make_app(tmp_path, monkeypatch)
+
+    resp = await _post(
+        app,
+        {
+            "trace_id": "t-multi-chunk",
+            "feedback": "thumbs_down",
+            "kb_id": "kb",
+            "query": "问题",
+            "citations": [{"chunk_id": "c1", "source": "a.pdf"}],
+            "evidence": [{"chunk_id": "c2", "source": "a.pdf"}],
+        },
+    )
+
+    assert resp.status_code == 201
+    raw_rows = _read_jsonl(root / "retrieval_feedback.jsonl")
+    assert len(raw_rows) == 1
+    assert raw_rows[0]["chunk_count"] == 2
+    assert [row["chunk_id"] for row in raw_rows[0]["target_chunks"]] == ["c1", "c2"]
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            listed = await client.get("/v1/retrieval-feedback", params={"kb_id": "kb"})
+
+    assert listed.status_code == 200
+    listed_rows = listed.json()["retrieval_feedback"]
+    assert len(listed_rows) == 1
+    assert listed_rows[0]["chunk_count"] == 2
+
+
+# 验证同一回答只接受第一条反馈。
+@pytest.mark.anyio
+async def test_quick_feedback_duplicate_trace_ignored(tmp_path, monkeypatch):
+    app, root = _make_app(tmp_path, monkeypatch)
+    first = await _post(
+        app,
+        {
+            "trace_id": "t-dup",
+            "feedback": "thumbs_down",
+            "kb_id": "kb",
+            "query": "问题",
+            "citations": [{"chunk_id": "c1", "source": "a.pdf"}],
+        },
+    )
+    second = await _post(
+        app,
+        {
+            "trace_id": "t-dup",
+            "feedback": "thumbs_up",
+            "kb_id": "kb",
+            "query": "问题",
+            "citations": [{"chunk_id": "c1", "source": "a.pdf"}],
+        },
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert second.json()["status"] == "duplicate_ignored"
+    assert second.json()["feedback_id"] == first.json()["feedback_id"]
+    assert len(_read_jsonl(root / "feedback.jsonl")) == 1
+    assert len(_read_jsonl(root / "retrieval_feedback.jsonl")) == 1
+    assert len(_read_jsonl(root / "feedback_analysis.jsonl")) == 1
+
+
+# 验证点踩后提交纠错仍会进入待审核知识。
+@pytest.mark.anyio
+async def test_correction_after_thumbs_down_still_creates_pending_knowledge(
+    tmp_path, monkeypatch
+):
+    app, root = _make_app(tmp_path, monkeypatch)
+    down = await _post(
+        app,
+        {
+            "trace_id": "t-correct-after-down",
+            "feedback": "thumbs_down",
+            "kb_id": "kb",
+            "query": "问题",
+            "citations": [{"chunk_id": "c1", "source": "a.pdf"}],
+        },
+    )
+    correction = await _post(
+        app,
+        {
+            "trace_id": "t-correct-after-down",
+            "feedback": "correction",
+            "kb_id": "kb",
+            "query": "问题",
+            "correction_text": "正确说法",
+            "citations": [{"chunk_id": "c1", "source": "a.pdf"}],
+        },
+    )
+
+    assert down.status_code == 201
+    assert correction.status_code == 201
+    assert correction.json()["status"] == "recorded"
+    assert correction.json()["knowledge_status"] == "pending"
+    assert len(_read_jsonl(root / "feedback.jsonl")) == 2
+    knowledge = _read_jsonl(root / "knowledge.jsonl")
+    assert knowledge[0]["text"] == "正确说法"
+    assert knowledge[0]["origin"] == "correction"
+
+
 # 验证纠错样本草稿优先使用纠正答案场景。
 @pytest.mark.anyio
 async def test_correction_uses_correction_text_in_eval_draft(tmp_path, monkeypatch):
@@ -170,7 +280,7 @@ async def test_correction_uses_correction_text_in_eval_draft(tmp_path, monkeypat
     assert draft["correction"] == "纠正后的答案"
     assert draft["comment"] == "引用不支撑结论"
     knowledge = _read_jsonl(root / "knowledge.jsonl")[0]
-    assert knowledge["origin"] == "agent_suggested"
+    assert knowledge["origin"] == "correction"
     assert knowledge["text"] == "纠正后的答案"
 
 
@@ -217,10 +327,49 @@ async def test_correction_can_create_pending_knowledge(
     assert knowledge["related_page_end"] == 2
     assert knowledge["related_chunk_text_hash"] == "hash-c1"
     assert knowledge["related_anchor_text"] == "差旅报销"
+    retrieval_feedback = _read_jsonl(root / "retrieval_feedback.jsonl")
+    assert len(retrieval_feedback) == 1
+    assert retrieval_feedback[0]["weight_delta"] == -0.55
     assert [event for event, _ in webhook_dispatcher.events] == [
         "knowledge.pending_created"
     ]
     assert webhook_dispatcher.events[0][1]["source"] == "feedback"
+
+
+# 验证无答案补知识不生成检索调权场景。
+@pytest.mark.anyio
+async def test_no_evidence_save_as_knowledge_skips_retrieval_feedback(
+    tmp_path, monkeypatch, webhook_dispatcher
+):
+    app, root = _make_app(tmp_path, monkeypatch, webhook_dispatcher)
+
+    resp = await _post(
+        app,
+        {
+            "trace_id": "t6",
+            "feedback": "correction",
+            "kb_id": "kb",
+            "query": "没有答案的问题",
+            "answer": "文档中未明确说明。",
+            "correction_text": "补充后的正确说法",
+            "feedback_text": "人工补充无答案问题",
+            "feedback_type": "no_evidence",
+            "save_as_knowledge": True,
+            "skip_retrieval_feedback": True,
+            "citations": [{"chunk_id": "c1", "source": "policy.pdf", "page": 2}],
+            "related_page_start": 2,
+            "related_page_end": 2,
+        },
+    )
+
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["knowledge_id"].startswith("K")
+    assert body["knowledge_status"] == "pending"
+    knowledge = _read_jsonl(root / "knowledge.jsonl")[0]
+    assert knowledge["origin"] == "no_evidence"
+    assert knowledge["text"] == "补充后的正确说法"
+    assert _read_jsonl(root / "retrieval_feedback.jsonl") == []
 
 
 # 验证反馈理解结果可以查询场景。

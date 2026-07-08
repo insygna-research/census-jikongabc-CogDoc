@@ -40,13 +40,42 @@ def _create_kb(kb_id, registry):
 
 
 # 删除 kb。
-def _delete_kb(kb_id, registry, index_jobs, session_store=None):
+def _clear_kb_review_state(kb_id, stores) -> None:
+    for store in stores:
+        clear_kb = getattr(store, "clear_kb", None)
+        if clear_kb is not None:
+            clear_kb(kb_id)
+
+
+# 删除 kb。
+def _delete_kb(
+    kb_id,
+    registry,
+    index_jobs,
+    session_store=None,
+    knowledge_store=None,
+    feedback_store=None,
+    feedback_analysis_store=None,
+    retrieval_feedback_store=None,
+):
     # registry 删除与落 tombstone 必须与 create 在同一把锁内原子完成。
     try:
         with kb_write_lock(kb_id):
             delete_kb_index_transactional(kb_id)  # 内部同一把锁，可重入
             # 先持久化 deleted，再删 registry。后者失败时 KB 记录仍在、读写被 tombstone 拦住， DELETE 可重试；反过来会出现 registry 已消失但 tombstone 未落、无法重试的半删除态。
             mark_kb_deleted(kb_id)
+            try:
+                _clear_kb_review_state(
+                    kb_id,
+                    (
+                        knowledge_store,
+                        feedback_store,
+                        feedback_analysis_store,
+                        retrieval_feedback_store,
+                    ),
+                )
+            except Exception as exc:
+                raise KBCleanupError(f"KB 派生/反馈状态删除失败: {kb_id}") from exc
             registry.delete(kb_id)
             # 连带清掉该库的会话历史，否则同名新库复用 kb_id 会捡到旧对话。
             if session_store is not None:
@@ -202,6 +231,10 @@ async def delete_knowledge_base(kb_id: str, request: Request):
             registry,
             index_jobs,
             request.app.state.session_store,
+            request.app.state.knowledge_store,
+            request.app.state.feedback_store,
+            request.app.state.feedback_analysis_store,
+            request.app.state.retrieval_feedback_store,
         )
     except KBCleanupError:
         # 清理不完整：registry 与 manifest 均保留，返回可重试错误而非误报删除成功。

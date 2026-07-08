@@ -176,7 +176,6 @@ def test_feedback_client_sends_save_as_knowledge_payload(monkeypatch):
         kb_id="kb",
         feedback_type="no_evidence",
         correction_text="正确说法",
-        save_as_knowledge=True,
         related_source="a.pdf",
         related_source_sha256="sha",
         related_chunk_ids=["c1"],
@@ -185,11 +184,11 @@ def test_feedback_client_sends_save_as_knowledge_payload(monkeypatch):
         related_chunk_text_hash="hash",
         related_anchor_text="证据锚点",
         certainty="high",
+        skip_retrieval_feedback=True,
     )
 
     assert response.status_code == 201
     payload = calls[0][1]["json"]
-    assert payload["save_as_knowledge"] is True
     assert payload["feedback_type"] == "no_evidence"
     assert payload["correction_text"] == "正确说法"
     assert payload["related_source"] == "a.pdf"
@@ -199,6 +198,7 @@ def test_feedback_client_sends_save_as_knowledge_payload(monkeypatch):
     assert payload["related_chunk_text_hash"] == "hash"
     assert payload["related_anchor_text"] == "证据锚点"
     assert payload["certainty"] == "high"
+    assert payload["skip_retrieval_feedback"] is True
 
 
 # 验证反馈查询客户端方法调用稳定端点场景。
@@ -271,8 +271,13 @@ def test_knowledge_client_methods_call_expected_endpoints(monkeypatch):
         calls.append(("GET", url, kwargs))
         return httpx.Response(200, json={"knowledge": []})
 
+    def fake_delete(url, **kwargs):
+        calls.append(("DELETE", url, kwargs))
+        return httpx.Response(204)
+
     monkeypatch.setattr("cogdoc.frontend.api_client.httpx.post", fake_post)
     monkeypatch.setattr("cogdoc.frontend.api_client.httpx.get", fake_get)
+    monkeypatch.setattr("cogdoc.frontend.api_client.httpx.delete", fake_delete)
 
     client = CogDocClient("http://api", api_key="secret")
     client.create_knowledge(
@@ -326,6 +331,8 @@ def test_knowledge_client_methods_call_expected_endpoints(monkeypatch):
         created_by="admin",
     )
     client.batch_review_knowledge(["K1", "K2"], "batch-reject", note="重复")
+    client.scan_stale_knowledge("kb")
+    client.delete_knowledge("K1")
 
     assert calls[0][0:2] == ("POST", "http://api/v1/knowledge")
     assert calls[0][2]["headers"] == {"Authorization": "Bearer secret"}
@@ -371,10 +378,13 @@ def test_knowledge_client_methods_call_expected_endpoints(monkeypatch):
         "source_note": "修订",
         "certainty": "medium",
         "created_by": "admin",
-        "enable_immediately": False,
     }
     assert calls[4][0:2] == ("POST", "http://api/v1/knowledge/batch-reject")
     assert calls[4][2]["json"] == {"knowledge_ids": ["K1", "K2"], "note": "重复"}
+    assert calls[5][0:2] == ("POST", "http://api/v1/knowledge/stale-scan")
+    assert calls[5][2]["params"] == {"kb_id": "kb"}
+    assert calls[6][0:2] == ("DELETE", "http://api/v1/knowledge/K1")
+    assert calls[6][2]["headers"] == {"Authorization": "Bearer secret"}
 
 
 # 验证检索调权客户端方法调用稳定端点场景。
@@ -459,6 +469,7 @@ def test_review_queue_summary_client_method_calls_expected_endpoint(monkeypatch)
         document_id="policy.pdf",
         origin="saved_answer",
         created_by="frontend",
+        has_conflict=True,
         created_after="2026-01-01",
         created_before="2026-12-31",
     )
@@ -468,6 +479,7 @@ def test_review_queue_summary_client_method_calls_expected_endpoint(monkeypatch)
         knowledge_document_id="policy.pdf",
         knowledge_origin="saved_answer",
         knowledge_created_by="frontend",
+        knowledge_has_conflict=True,
         knowledge_created_after="2026-01-01",
         knowledge_created_before="2026-12-31",
     )
@@ -480,6 +492,7 @@ def test_review_queue_summary_client_method_calls_expected_endpoint(monkeypatch)
         "document_id": "policy.pdf",
         "origin": "saved_answer",
         "created_by": "frontend",
+        "has_conflict": True,
         "created_after": "2026-01-01",
         "created_before": "2026-12-31",
     }
@@ -492,6 +505,7 @@ def test_review_queue_summary_client_method_calls_expected_endpoint(monkeypatch)
         "knowledge_document_id": "policy.pdf",
         "knowledge_origin": "saved_answer",
         "knowledge_created_by": "frontend",
+        "knowledge_has_conflict": True,
         "knowledge_created_after": "2026-01-01",
         "knowledge_created_before": "2026-12-31",
     }

@@ -26,13 +26,50 @@ def test_record_from_feedback_and_disable(tmp_path):
         },
     )
 
-    assert [row["chunk_id"] for row in records] == ["c1", "c2"]
+    assert len(records) == 1
+    assert records[0]["chunk_id"] == "c1"
+    assert [row["chunk_id"] for row in records[0]["target_chunks"]] == ["c1", "c2"]
     boosts = store.boosts_for_query("kb", "报名要求")
     assert boosts == {"c1": -0.35, "c2": -0.35}
+    assert store.counts(kb_id="kb") == {"total": 1, "enabled": 1, "disabled": 0}
+    assert store.list(kb_id="kb")[0]["chunk_count"] == 2
 
     store.set_enabled(records[0]["retrieval_feedback_id"], False, actor="admin")
 
-    assert store.boosts_for_query("kb", "报名要求") == {"c2": -0.35}
+    assert store.boosts_for_query("kb", "报名要求") == {}
+
+
+# 验证旧版按分块展开的调权会按同一次反馈折叠。
+def test_legacy_expanded_feedback_groups_by_feedback_id(tmp_path):
+    path = tmp_path / "retrieval_feedback.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                '{"retrieval_feedback_id":"rf1","feedback_id":"fb1","kb_id":"kb",'
+                '"query_hash":"h","query_text":"报名要求","chunk_id":"c1",'
+                '"source_type":"document","weight_delta":-0.35,"confidence":1.0,'
+                '"enabled":true,"created_at":"2026-01-01T00:00:00Z"}',
+                '{"retrieval_feedback_id":"rf2","feedback_id":"fb1","kb_id":"kb",'
+                '"query_hash":"h","query_text":"报名要求","chunk_id":"c2",'
+                '"source_type":"document","weight_delta":-0.35,"confidence":1.0,'
+                '"enabled":true,"created_at":"2026-01-01T00:00:01Z"}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    store = RetrievalFeedbackStore(path=str(path))
+
+    rows = store.list(kb_id="kb")
+
+    assert len(rows) == 1
+    assert rows[0]["chunk_count"] == 2
+    assert [row["chunk_id"] for row in rows[0]["target_chunks"]] == ["c1", "c2"]
+    assert store.counts(kb_id="kb") == {"total": 1, "enabled": 1, "disabled": 0}
+
+    store.set_enabled("rf1", False, actor="admin")
+
+    assert store.counts(kb_id="kb") == {"total": 1, "enabled": 0, "disabled": 1}
 
 
 # 验证缺少必填文本不会生成调权。

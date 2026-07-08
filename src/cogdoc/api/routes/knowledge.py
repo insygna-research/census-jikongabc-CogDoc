@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import JSONResponse
 
 from cogdoc.api.schemas import (
@@ -19,6 +19,7 @@ from cogdoc.api.schemas import (
     KnowledgeReviewRequest,
     KnowledgeReviseRequest,
     KnowledgeStatus,
+    KnowledgeStaleScanResponse,
     ReviewQueueExportResponse,
     ReviewQueueSummaryResponse,
     build_error_response,
@@ -26,6 +27,8 @@ from cogdoc.api.schemas import (
 from cogdoc.api.time_utils import now_iso
 from cogdoc.api.webhooks import notify_pending_created
 from cogdoc.observability.logger import log_event
+from cogdoc.service.kb_state import KBState
+from cogdoc.tools.manifest import load_index_manifest
 
 router = APIRouter(prefix="/v1", tags=["knowledge"])
 
@@ -177,6 +180,21 @@ def _conflict_public(row: dict) -> KnowledgeConflictCandidate:
     )
 
 
+# 读取当前知识库文档清单。
+def _current_documents(kb_id: str) -> list[dict]:
+    active = KBState(kb_id).active()
+    documents = (
+        active.get("documents", [])
+        if active is not None
+        else load_index_manifest(kb_id).get("documents", [])
+    )
+    return [
+        {"name": str(doc.get("name") or ""), "sha256": str(doc.get("sha256") or "")}
+        for doc in documents
+        if doc.get("name")
+    ]
+
+
 # 构建审核队列摘要。
 def _build_review_queue_summary(
     request: Request,
@@ -185,6 +203,7 @@ def _build_review_queue_summary(
     document_id: str | None = None,
     origin: KnowledgeOrigin | None = None,
     created_by: str | None = None,
+    has_conflict: bool | None = None,
     created_after: str | None = None,
     created_before: str | None = None,
 ) -> ReviewQueueSummaryResponse:
@@ -194,6 +213,7 @@ def _build_review_queue_summary(
         document_id=document_id,
         origin=origin_value,
         created_by=created_by,
+        has_conflict=has_conflict,
         created_after=created_after,
         created_before=created_before,
     )
@@ -202,6 +222,7 @@ def _build_review_queue_summary(
         document_id=document_id,
         origin=origin_value,
         created_by=created_by,
+        has_conflict=has_conflict,
         created_after=created_after,
         created_before=created_before,
     )
@@ -210,6 +231,7 @@ def _build_review_queue_summary(
         document_id=document_id,
         origin=origin_value,
         created_by=created_by,
+        has_conflict=has_conflict,
         created_after=created_after,
         created_before=created_before,
     )
@@ -240,11 +262,7 @@ def _build_review_queue_summary(
 @router.post("/knowledge", status_code=201, responses=_ERROR_RESPONSES)
 async def create_knowledge(body: KnowledgeCreateRequest, request: Request):
     payload = body.model_dump(exclude_none=True)
-    payload["status"] = (
-        KnowledgeStatus.APPROVED.value
-        if body.enable_immediately
-        else KnowledgeStatus.PENDING.value
-    )
+    payload["status"] = KnowledgeStatus.PENDING.value
     try:
         row, deduplicated = request.app.state.knowledge_store.create(payload)
     except ValueError as exc:
@@ -254,8 +272,6 @@ async def create_knowledge(body: KnowledgeCreateRequest, request: Request):
     )
     if not deduplicated:
         notify_pending_created(request.app, row, "knowledge_create")
-    if not deduplicated and row.get("status") == KnowledgeStatus.APPROVED.value:
-        _queue_derived_knowledge_index_refresh(request, row.get("kb_id"))
     return KnowledgeCreateResponse(
         knowledge=_public(row),
         deduplicated=deduplicated,
@@ -309,7 +325,7 @@ async def pending_knowledge_count(
         pending=pending,
         stale=stale,
         feedback_analysis_needs_review=needs_review,
-        total=pending + stale + needs_review,
+        total=pending + stale,
     )
 
 
@@ -383,6 +399,7 @@ async def review_queue_summary(
     document_id: str | None = None,
     origin: KnowledgeOrigin | None = None,
     created_by: str | None = None,
+    has_conflict: bool | None = None,
     created_after: str | None = None,
     created_before: str | None = None,
 ):
@@ -392,6 +409,7 @@ async def review_queue_summary(
         document_id=document_id,
         origin=origin,
         created_by=created_by,
+        has_conflict=has_conflict,
         created_after=created_after,
         created_before=created_before,
     )
@@ -405,6 +423,7 @@ async def review_queue_export(
     knowledge_document_id: str | None = None,
     knowledge_origin: KnowledgeOrigin | None = None,
     knowledge_created_by: str | None = None,
+    knowledge_has_conflict: bool | None = None,
     knowledge_created_after: str | None = None,
     knowledge_created_before: str | None = None,
     limit: int = Query(default=200, ge=1, le=1000),
@@ -416,6 +435,7 @@ async def review_queue_export(
         document_id=knowledge_document_id,
         origin=knowledge_origin,
         created_by=knowledge_created_by,
+        has_conflict=knowledge_has_conflict,
         created_after=knowledge_created_after,
         created_before=knowledge_created_before,
     )
@@ -425,6 +445,7 @@ async def review_queue_export(
         document_id=knowledge_document_id,
         origin=origin_value,
         created_by=knowledge_created_by,
+        has_conflict=knowledge_has_conflict,
         created_after=knowledge_created_after,
         created_before=knowledge_created_before,
         limit=limit,
@@ -435,6 +456,7 @@ async def review_queue_export(
         document_id=knowledge_document_id,
         origin=origin_value,
         created_by=knowledge_created_by,
+        has_conflict=knowledge_has_conflict,
         created_after=knowledge_created_after,
         created_before=knowledge_created_before,
         limit=limit,
@@ -459,6 +481,7 @@ async def review_queue_export(
         document_id=knowledge_document_id,
         origin=origin_value,
         created_by=knowledge_created_by,
+        has_conflict=knowledge_has_conflict,
         created_after=knowledge_created_after,
         created_before=knowledge_created_before,
         limit=limit,
@@ -473,6 +496,41 @@ async def review_queue_export(
         feedback_analysis_needs_review=analysis,
         retrieval_feedback_enabled=retrieval,
         feedback_bad_cases=feedback,
+    )
+
+
+# 删除派生知识。
+@router.delete(
+    "/knowledge/{knowledge_id}",
+    status_code=204,
+    responses=_ERROR_RESPONSES,
+)
+async def delete_knowledge(knowledge_id: str, request: Request):
+    row = request.app.state.knowledge_store.delete(knowledge_id)
+    if row is None:
+        return _error(ErrorCode.KNOWLEDGE_NOT_FOUND, f"知识不存在: {knowledge_id}", 404)
+    _queue_derived_knowledge_index_refresh(request, row.get("kb_id"))
+    return Response(status_code=204)
+
+
+# 扫描并标记过期知识。
+@router.post(
+    "/knowledge/stale-scan",
+    response_model=KnowledgeStaleScanResponse,
+    responses=_ERROR_RESPONSES,
+)
+async def scan_stale_knowledge(request: Request, kb_id: str = Query(min_length=1)):
+    if not request.app.state.kb_registry.exists(kb_id):
+        return _error(ErrorCode.KB_NOT_FOUND, f"知识库不存在: {kb_id}", 404)
+    stale = request.app.state.knowledge_store.mark_stale_by_documents(
+        kb_id, _current_documents(kb_id)
+    )
+    if stale:
+        _queue_derived_knowledge_index_refresh(request, kb_id)
+    return KnowledgeStaleScanResponse(
+        kb_id=kb_id,
+        stale_marked=len(stale),
+        stale_knowledge=[_public(row) for row in stale],
     )
 
 
@@ -555,11 +613,7 @@ async def revise_knowledge(
     knowledge_id: str, body: KnowledgeReviseRequest, request: Request
 ):
     payload = body.model_dump(exclude_none=True)
-    payload["status"] = (
-        KnowledgeStatus.APPROVED.value
-        if body.enable_immediately
-        else KnowledgeStatus.PENDING.value
-    )
+    payload["status"] = KnowledgeStatus.PENDING.value
     try:
         row = request.app.state.knowledge_store.revise(knowledge_id, payload)
     except ValueError as exc:
@@ -567,8 +621,6 @@ async def revise_knowledge(
     if row is None:
         return _error(ErrorCode.KNOWLEDGE_NOT_FOUND, f"知识不存在: {knowledge_id}", 404)
     notify_pending_created(request.app, row, "knowledge_revision")
-    if row.get("status") == KnowledgeStatus.APPROVED.value:
-        _queue_derived_knowledge_index_refresh(request, row.get("kb_id"))
     return KnowledgeCreateResponse(knowledge=_public(row), deduplicated=False)
 
 

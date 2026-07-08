@@ -257,6 +257,12 @@ class DerivedKnowledgeStore:
             stat = os.stat(self._path)
         return f"{stat.st_mtime_ns}:{stat.st_size}"
 
+    # 删除某 KB 的全部派生知识历史，避免同名重建后继承旧审核状态。
+    def clear_kb(self, kb_id: str) -> None:
+        with self._lock:
+            rows = [row for row in self._read_history() if row.get("kb_id") != kb_id]
+            self._rewrite_history(rows)
+
     # 统计知识审核队列。
     def counts(
         self,
@@ -265,6 +271,7 @@ class DerivedKnowledgeStore:
         document_id: str | None = None,
         origin: str | None = None,
         created_by: str | None = None,
+        has_conflict: bool | None = None,
         created_after: str | None = None,
         created_before: str | None = None,
     ) -> dict[str, dict[str, int] | int]:
@@ -273,6 +280,7 @@ class DerivedKnowledgeStore:
             document_id=document_id,
             origin=origin,
             created_by=created_by,
+            has_conflict=has_conflict,
             created_after=created_after,
             created_before=created_before,
         )
@@ -297,9 +305,12 @@ class DerivedKnowledgeStore:
         document_id: str | None = None,
         origin: str | None = None,
         created_by: str | None = None,
+        has_conflict: bool | None = None,
         created_after: str | None = None,
         created_before: str | None = None,
     ) -> dict[str, int]:
+        if has_conflict is False:
+            return {"total": 0, "groups": 0, "pending": 0, "stale": 0}
         rows = self.list(
             kb_id=kb_id,
             document_id=document_id,
@@ -367,6 +378,7 @@ class DerivedKnowledgeStore:
         document_id: str | None = None,
         origin: str | None = None,
         created_by: str | None = None,
+        has_conflict: bool | None = None,
         created_after: str | None = None,
         created_before: str | None = None,
     ) -> dict[str, int]:
@@ -388,6 +400,12 @@ class DerivedKnowledgeStore:
             created_after=created_after,
             created_before=created_before,
         )
+        if has_conflict is not None:
+            rows = [
+                row
+                for row in rows
+                if bool(row.get("conflict_group_id")) == has_conflict
+            ]
         return {"auto_rebound": len(rows)}
 
     # 列出自动复核重绑事件。
@@ -398,6 +416,7 @@ class DerivedKnowledgeStore:
         document_id: str | None = None,
         origin: str | None = None,
         created_by: str | None = None,
+        has_conflict: bool | None = None,
         created_after: str | None = None,
         created_before: str | None = None,
         limit: int = 100,
@@ -420,6 +439,12 @@ class DerivedKnowledgeStore:
             created_after=created_after,
             created_before=created_before,
         )
+        if has_conflict is not None:
+            rows = [
+                row
+                for row in rows
+                if bool(row.get("conflict_group_id")) == has_conflict
+            ]
         rows.sort(key=lambda row: str(row.get("reviewed_at") or ""), reverse=True)
         return rows[:limit]
 
@@ -505,6 +530,53 @@ class DerivedKnowledgeStore:
             bound = _created_before_bound(created_before)
             rows = [row for row in rows if str(row.get("created_at", "")) <= bound]
         return rows
+
+    # 彻底删除单条知识及其历史快照。
+    def delete(self, knowledge_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            latest = self._latest().get(knowledge_id)
+            if latest is None:
+                return None
+            rows = [
+                row
+                for row in self._read_history()
+                if row.get("knowledge_id") != knowledge_id
+            ]
+            self._rewrite_history(rows)
+            return latest
+
+    # 按当前文档清单扫描已通过知识，标记绑定旧文档或缺失文档的记录为过期。
+    def mark_stale_by_documents(
+        self, kb_id: str, documents: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        current_hashes = {
+            str(doc.get("name")): str(doc.get("sha256"))
+            for doc in documents
+            if doc.get("name")
+        }
+        stale = []
+        with self._lock:
+            rows = list(self._latest().values())
+        for row in rows:
+            source = str(row.get("related_source") or "")
+            old_hash = str(row.get("related_source_sha256") or "")
+            current_hash = current_hashes.get(source)
+            if (
+                row.get("kb_id") == kb_id
+                and row.get("status") == "approved"
+                and source
+                and old_hash
+                and current_hash != old_hash
+            ):
+                updated = self.set_status(
+                    row["knowledge_id"],
+                    "stale",
+                    actor="system",
+                    note="手动扫描发现绑定文档已变化或缺失",
+                )
+                if updated is not None:
+                    stale.append(updated)
+        return stale
 
     # 文档哈希变化后，将绑定旧哈希的派生知识标记为过期。
     def mark_stale_for_source(
@@ -624,3 +696,11 @@ class DerivedKnowledgeStore:
     def _append(self, entry: dict[str, Any]) -> None:
         with open(self._path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    # 重写历史。
+    def _rewrite_history(self, rows: list[dict[str, Any]]) -> None:
+        tmp_path = f"{self._path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        os.replace(tmp_path, self._path)

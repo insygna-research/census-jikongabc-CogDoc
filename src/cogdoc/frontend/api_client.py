@@ -261,6 +261,7 @@ class CogDocClient:
         feedback_text: str | None = None,
         correction_text: str | None = None,
         save_as_knowledge: bool = False,
+        skip_retrieval_feedback: bool = False,
         related_source: str | None = None,
         related_source_sha256: str | None = None,
         related_chunk_ids: list[str] | None = None,
@@ -285,6 +286,7 @@ class CogDocClient:
             "feedback_text": feedback_text,
             "correction_text": correction_text,
             "save_as_knowledge": save_as_knowledge,
+            "skip_retrieval_feedback": skip_retrieval_feedback,
             "related_source": related_source,
             "related_source_sha256": related_source_sha256,
             "related_chunk_ids": related_chunk_ids or [],
@@ -368,7 +370,6 @@ class CogDocClient:
         origin: str = "manual_entry",
         created_from_trace_id: str | None = None,
         created_by: str | None = None,
-        enable_immediately: bool = False,
     ) -> httpx.Response:
         payload = {
             "kb_id": kb_id,
@@ -385,7 +386,6 @@ class CogDocClient:
             "origin": origin,
             "created_from_trace_id": created_from_trace_id,
             "created_by": created_by,
-            "enable_immediately": enable_immediately,
         }
         return httpx.post(
             self._url("/v1/knowledge"),
@@ -432,6 +432,7 @@ class CogDocClient:
         document_id: str | None = None,
         origin: str | None = None,
         created_by: str | None = None,
+        has_conflict: bool | None = None,
         created_after: str | None = None,
         created_before: str | None = None,
     ) -> httpx.Response:
@@ -440,6 +441,7 @@ class CogDocClient:
             "document_id": document_id,
             "origin": origin,
             "created_by": created_by,
+            "has_conflict": has_conflict,
             "created_after": created_after,
             "created_before": created_before,
         }
@@ -458,6 +460,7 @@ class CogDocClient:
         knowledge_document_id: str | None = None,
         knowledge_origin: str | None = None,
         knowledge_created_by: str | None = None,
+        knowledge_has_conflict: bool | None = None,
         knowledge_created_after: str | None = None,
         knowledge_created_before: str | None = None,
     ) -> httpx.Response:
@@ -467,6 +470,7 @@ class CogDocClient:
             "knowledge_document_id": knowledge_document_id,
             "knowledge_origin": knowledge_origin,
             "knowledge_created_by": knowledge_created_by,
+            "knowledge_has_conflict": knowledge_has_conflict,
             "knowledge_created_after": knowledge_created_after,
             "knowledge_created_before": knowledge_created_before,
         }
@@ -490,6 +494,15 @@ class CogDocClient:
     def knowledge_index_status(self, kb_id: str) -> httpx.Response:
         return httpx.get(
             self._url("/v1/knowledge/index-status"),
+            params={"kb_id": kb_id},
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    # 扫描过期派生知识。
+    def scan_stale_knowledge(self, kb_id: str) -> httpx.Response:
+        return httpx.post(
+            self._url("/v1/knowledge/stale-scan"),
             params={"kb_id": kb_id},
             timeout=self.timeout,
             headers=self._headers,
@@ -562,7 +575,6 @@ class CogDocClient:
         certainty: str = "medium",
         created_from_trace_id: str | None = None,
         created_by: str | None = None,
-        enable_immediately: bool = False,
     ) -> httpx.Response:
         payload = {
             "text": text,
@@ -578,7 +590,6 @@ class CogDocClient:
             "certainty": certainty,
             "created_from_trace_id": created_from_trace_id,
             "created_by": created_by,
-            "enable_immediately": enable_immediately,
         }
         return httpx.post(
             self._url(f"/v1/knowledge/{knowledge_id}/revise"),
@@ -599,6 +610,14 @@ class CogDocClient:
         return httpx.post(
             self._url(f"/v1/knowledge/{action}"),
             json={k: v for k, v in payload.items() if v is not None},
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    # 删除派生知识。
+    def delete_knowledge(self, knowledge_id: str) -> httpx.Response:
+        return httpx.delete(
+            self._url(f"/v1/knowledge/{knowledge_id}"),
             timeout=self.timeout,
             headers=self._headers,
         )

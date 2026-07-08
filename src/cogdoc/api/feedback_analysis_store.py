@@ -105,6 +105,12 @@ class FeedbackAnalysisStore:
             "by_type": by_type,
         }
 
+    # 删除某 KB 的反馈分析记录，避免同名重建后继承旧审核队列。
+    def clear_kb(self, kb_id: str) -> None:
+        with self._lock:
+            rows = [row for row in self._read_all() if row.get("kb_id") != kb_id]
+            self._rewrite(rows)
+
     # 读取全部分析结果。
     def _read_all(self) -> list[dict[str, Any]]:
         mtime = (
@@ -131,5 +137,15 @@ class FeedbackAnalysisStore:
     def _append(self, entry: dict[str, Any]) -> None:
         with open(self._path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        self._cache_mtime = None
+        self._cache_rows = None
+
+    # 重写记录。
+    def _rewrite(self, rows: list[dict[str, Any]]) -> None:
+        tmp_path = f"{self._path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        os.replace(tmp_path, self._path)
         self._cache_mtime = None
         self._cache_rows = None

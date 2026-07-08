@@ -56,6 +56,60 @@ def test_sqlite_feedback_store_records_lists_counts_and_exports(tmp_path):
     assert _read_jsonl(tmp_path / "bad_cases.jsonl")[0]["trace_id"] == "t2"
 
 
+# 验证数据库反馈存储同一回答只保留第一条赞踩反馈。
+def test_sqlite_feedback_store_deduplicates_quick_trace_feedback(tmp_path):
+    store = SqliteFeedbackStore(
+        db_path=str(tmp_path / "feedback.db"),
+        feedback_path=str(tmp_path / "feedback.jsonl"),
+        bad_cases_path=str(tmp_path / "bad_cases.jsonl"),
+    )
+
+    first = store.record({"kb_id": "kb", "trace_id": "t1", "feedback": "thumbs_up"})
+    second = store.record({"kb_id": "kb", "trace_id": "t1", "feedback": "thumbs_down"})
+
+    assert first["deduplicated"] is False
+    assert second["deduplicated"] is True
+    assert second["feedback_id"] == first["feedback_id"]
+    assert store.counts(kb_id="kb")["total"] == 1
+    assert len(_read_jsonl(tmp_path / "feedback.jsonl")) == 1
+
+
+# 验证赞踩去重只看同一回答 trace。
+def test_sqlite_feedback_store_deduplicates_quick_feedback_across_kb(tmp_path):
+    store = SqliteFeedbackStore(
+        db_path=str(tmp_path / "feedback.db"),
+        feedback_path=str(tmp_path / "feedback.jsonl"),
+        bad_cases_path=str(tmp_path / "bad_cases.jsonl"),
+    )
+
+    first = store.record({"kb_id": "", "trace_id": "t1", "feedback": "thumbs_up"})
+    second = store.record({"kb_id": "kb", "trace_id": "t1", "feedback": "thumbs_down"})
+
+    assert first["deduplicated"] is False
+    assert second["deduplicated"] is True
+    assert store.counts(kb_id="kb")["total"] == 0
+    assert len(_read_jsonl(tmp_path / "feedback.jsonl")) == 1
+
+
+# 验证数据库反馈存储允许同一回答后续纠错。
+def test_sqlite_feedback_store_allows_correction_after_quick_feedback(tmp_path):
+    store = SqliteFeedbackStore(
+        db_path=str(tmp_path / "feedback.db"),
+        feedback_path=str(tmp_path / "feedback.jsonl"),
+        bad_cases_path=str(tmp_path / "bad_cases.jsonl"),
+    )
+
+    first = store.record({"kb_id": "kb", "trace_id": "t1", "feedback": "thumbs_down"})
+    correction = store.record(
+        {"kb_id": "kb", "trace_id": "t1", "feedback": "correction"}
+    )
+
+    assert first["deduplicated"] is False
+    assert correction["deduplicated"] is False
+    assert store.counts(kb_id="kb")["total"] == 2
+    assert len(_read_jsonl(tmp_path / "feedback.jsonl")) == 2
+
+
 # 验证数据库反馈存储可导入旧逐行对象文件。
 def test_sqlite_feedback_store_bootstraps_from_jsonl(tmp_path):
     feedback_path = tmp_path / "feedback.jsonl"
@@ -83,3 +137,25 @@ def test_sqlite_feedback_store_bootstraps_from_jsonl(tmp_path):
 
     assert store.list(kb_id="kb")[0]["feedback_id"] == "f1"
     assert store.counts(kb_id="kb")["bad_cases"] == 1
+
+
+# 验证数据库反馈存储按 KB 清理数据库和导出副本。
+def test_sqlite_feedback_store_clear_kb(tmp_path):
+    store = SqliteFeedbackStore(
+        db_path=str(tmp_path / "feedback.db"),
+        feedback_path=str(tmp_path / "feedback.jsonl"),
+        bad_cases_path=str(tmp_path / "bad_cases.jsonl"),
+    )
+    store.record({"kb_id": "kb", "trace_id": "t1", "feedback": "thumbs_down"})
+    store.record({"kb_id": "other", "trace_id": "t2", "feedback": "thumbs_down"})
+
+    store.clear_kb("kb")
+
+    assert store.counts(kb_id="kb")["total"] == 0
+    assert store.counts(kb_id="other")["total"] == 1
+    assert [row["kb_id"] for row in _read_jsonl(tmp_path / "feedback.jsonl")] == [
+        "other"
+    ]
+    assert [row["kb_id"] for row in _read_jsonl(tmp_path / "bad_cases.jsonl")] == [
+        "other"
+    ]

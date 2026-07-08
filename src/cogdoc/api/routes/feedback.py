@@ -19,7 +19,7 @@ router = APIRouter(prefix="/v1", tags=["feedback"])
 # 构建纠错派生知识草稿。
 def _knowledge_payload(body: FeedbackRequest) -> dict | None:
     correction = body.correction_text or body.correction
-    if not body.save_as_knowledge or not correction or not body.kb_id:
+    if not correction or not body.kb_id:
         return None
     related_chunk_ids = body.related_chunk_ids or [
         item.chunk_id for item in body.citations if item.chunk_id
@@ -41,7 +41,11 @@ def _knowledge_payload(body: FeedbackRequest) -> dict | None:
         "source_note": body.source_note or body.feedback_text or body.comment,
         "certainty": body.certainty,
         "status": "pending",
-        "origin": "correction",
+        "origin": (
+            "no_evidence"
+            if body.feedback_type == FeedbackIssueType.NO_EVIDENCE
+            else "correction"
+        ),
         "created_from_trace_id": body.trace_id,
         "created_by": body.created_by,
     }
@@ -160,9 +164,16 @@ async def submit_feedback(body: FeedbackRequest, request: Request):
     if body.correction_text and not payload.get("correction"):
         payload["correction"] = body.correction_text
     result = request.app.state.feedback_store.record(payload)
-    request.app.state.retrieval_feedback_store.record_from_feedback(
-        result["feedback_id"], payload
-    )
+    if result.get("deduplicated"):
+        return FeedbackResponse(
+            feedback_id=result["feedback_id"],
+            status="duplicate_ignored",
+            is_bad_case=result["is_bad_case"],
+        )
+    if not body.skip_retrieval_feedback:
+        request.app.state.retrieval_feedback_store.record_from_feedback(
+            result["feedback_id"], payload
+        )
     analysis = _analyze_feedback_quiet(result["feedback_id"], payload)
     analysis_row = None
     if analysis is not None:

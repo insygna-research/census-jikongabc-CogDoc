@@ -11,6 +11,7 @@ from cogdoc.api.derived_knowledge_store import (
 )
 from cogdoc.api.feedback_analysis_store import FeedbackAnalysisStore
 from cogdoc.api.feedback_store import FeedbackStore
+from cogdoc.api.ingest import KnowledgeBaseRegistry
 from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
 
 
@@ -36,7 +37,12 @@ def _make_app(tmp_path, monkeypatch):
     retrieval_feedback_store = RetrievalFeedbackStore(
         path=str(tmp_path / "retrieval_feedback.jsonl")
     )
+    registry = KnowledgeBaseRegistry(
+        registry_path=str(tmp_path / "registry.json"),
+        source_dir_for=lambda kb_id: str(tmp_path / "sources" / kb_id),
+    )
     return create_app(
+        kb_registry=registry,
         knowledge_store=store,
         feedback_store=feedback_store,
         feedback_analysis_store=feedback_analysis_store,
@@ -112,6 +118,62 @@ async def test_manual_knowledge_lifecycle(tmp_path, monkeypatch):
         assert archived.json()["archived_at"]
 
 
+# 验证派生知识可以被硬删除。
+@pytest.mark.anyio
+async def test_delete_knowledge_removes_history(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+
+    async with _client(app) as client:
+        created = await client.post(
+            "/v1/knowledge",
+            json={"kb_id": "kb", "text": "需要删除的知识。"},
+        )
+        knowledge_id = created.json()["knowledge"]["knowledge_id"]
+        deleted = await client.delete(f"/v1/knowledge/{knowledge_id}")
+        listed = await client.get("/v1/knowledge", params={"kb_id": "kb"})
+        missing = await client.delete(f"/v1/knowledge/{knowledge_id}")
+
+    assert deleted.status_code == 204
+    assert listed.json()["knowledge"] == []
+    assert missing.status_code == 404
+
+
+# 验证手动过期扫描会标记旧文档绑定。
+@pytest.mark.anyio
+async def test_stale_scan_marks_changed_document_bindings(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    app.state.kb_registry.create("kb")
+    monkeypatch.setattr(
+        "cogdoc.api.routes.knowledge._current_documents",
+        lambda kb_id: [{"name": "policy.pdf", "sha256": "sha-new"}],
+    )
+
+    async with _client(app) as client:
+        created = await client.post(
+            "/v1/knowledge",
+            json={
+                "kb_id": "kb",
+                "text": "旧文档绑定的知识。",
+                "related_source": "policy.pdf",
+                "related_source_sha256": "sha-old",
+            },
+        )
+        knowledge_id = created.json()["knowledge"]["knowledge_id"]
+        await client.post(f"/v1/knowledge/{knowledge_id}/approve", json={})
+        scanned = await client.post("/v1/knowledge/stale-scan", params={"kb_id": "kb"})
+        stale = await client.get(
+            "/v1/knowledge", params={"kb_id": "kb", "status": "stale"}
+        )
+
+    assert scanned.status_code == 200
+    assert scanned.json()["stale_marked"] == 1
+    assert stale.json()["knowledge"][0]["knowledge_id"] == knowledge_id
+    assert (
+        stale.json()["knowledge"][0]["review_note"]
+        == "手动扫描发现绑定文档已变化或缺失"
+    )
+
+
 # 验证精确重复返回现有记录场景。
 @pytest.mark.anyio
 async def test_exact_duplicate_returns_existing_knowledge(tmp_path, monkeypatch):
@@ -143,7 +205,6 @@ async def test_similar_knowledge_creates_conflict_group(tmp_path, monkeypatch):
             json={
                 "kb_id": "kb",
                 "text": "差旅报销需要七天内提交。",
-                "enable_immediately": True,
             },
         )
         second = await client.post(
@@ -151,7 +212,6 @@ async def test_similar_knowledge_creates_conflict_group(tmp_path, monkeypatch):
             json={
                 "kb_id": "kb",
                 "text": "差旅报销需要7天内提交。",
-                "enable_immediately": True,
             },
         )
         listed = await client.get("/v1/knowledge", params={"kb_id": "kb"})
@@ -189,7 +249,7 @@ async def test_similar_knowledge_creates_conflict_group(tmp_path, monkeypatch):
     assert summary.json()["knowledge_conflicts"] == {
         "total": 2,
         "groups": 1,
-        "pending": 1,
+        "pending": 2,
         "stale": 0,
     }
 
@@ -247,17 +307,8 @@ async def test_pending_knowledge_creation_emits_webhook(
         pending = await client.post(
             "/v1/knowledge", json={"kb_id": "kb", "text": "待审核知识。"}
         )
-        approved = await client.post(
-            "/v1/knowledge",
-            json={
-                "kb_id": "kb",
-                "text": "直接通过知识。",
-                "enable_immediately": True,
-            },
-        )
 
     assert pending.status_code == 201
-    assert approved.status_code == 201
     assert [event for event, _ in webhook_dispatcher.events] == [
         "knowledge.pending_created"
     ]
@@ -286,10 +337,10 @@ async def test_stale_knowledge_approve_refreshes_binding(tmp_path, monkeypatch):
                 "related_page_end": 1,
                 "related_chunk_text_hash": "hash-old",
                 "related_anchor_text": "旧锚点",
-                "enable_immediately": True,
             },
         )
         knowledge_id = created.json()["knowledge"]["knowledge_id"]
+        await client.post(f"/v1/knowledge/{knowledge_id}/approve", json={})
         app.state.knowledge_store.set_status(knowledge_id, "stale")
 
         approved = await client.post(
@@ -377,10 +428,10 @@ async def test_knowledge_revision_supersedes_previous_version(tmp_path, monkeypa
                 "related_page_start": 1,
                 "related_page_end": 2,
                 "related_anchor_text": "旧规则锚点",
-                "enable_immediately": True,
             },
         )
         previous = created.json()["knowledge"]
+        await client.post(f"/v1/knowledge/{previous['knowledge_id']}/approve", json={})
         revised = await client.post(
             f"/v1/knowledge/{previous['knowledge_id']}/revise",
             json={
@@ -422,33 +473,34 @@ async def test_knowledge_revision_supersedes_previous_version(tmp_path, monkeypa
     assert archived_rows[0]["review_note"].startswith("由新版本 ")
 
 
-# 验证立即启用修订版本会归档旧版本。
+# 验证审核通过修订版本会归档旧版本。
 @pytest.mark.anyio
-async def test_knowledge_revision_enable_immediately_archives_previous(
-    tmp_path, monkeypatch
-):
+async def test_knowledge_revision_approval_archives_previous(tmp_path, monkeypatch):
     app = _make_app(tmp_path, monkeypatch)
 
     async with _client(app) as client:
         created = await client.post(
             "/v1/knowledge",
-            json={"kb_id": "kb", "text": "旧规则。", "enable_immediately": True},
+            json={"kb_id": "kb", "text": "旧规则。"},
         )
         previous = created.json()["knowledge"]
+        await client.post(f"/v1/knowledge/{previous['knowledge_id']}/approve", json={})
         revised = await client.post(
             f"/v1/knowledge/{previous['knowledge_id']}/revise",
             json={
                 "text": "新规则。",
-                "enable_immediately": True,
                 "created_by": "admin",
             },
         )
+        revision_id = revised.json()["knowledge"]["knowledge_id"]
+        approved = await client.post(f"/v1/knowledge/{revision_id}/approve", json={})
         archived = await client.get(
             "/v1/knowledge", params={"kb_id": "kb", "status": "archived"}
         )
 
     assert revised.status_code == 201
-    assert revised.json()["knowledge"]["status"] == "approved"
+    assert revised.json()["knowledge"]["status"] == "pending"
+    assert approved.json()["status"] == "approved"
     archived_rows = archived.json()["knowledge"]
     assert [row["knowledge_id"] for row in archived_rows] == [previous["knowledge_id"]]
 
@@ -483,13 +535,18 @@ async def test_knowledge_revision_rejects_duplicate_active_text(tmp_path, monkey
     async with _client(app) as client:
         first = await client.post(
             "/v1/knowledge",
-            json={"kb_id": "kb", "text": "第一条。", "enable_immediately": True},
+            json={"kb_id": "kb", "text": "第一条。"},
         )
-        await client.post(
+        second = await client.post(
             "/v1/knowledge",
-            json={"kb_id": "kb", "text": "第二条。", "enable_immediately": True},
+            json={"kb_id": "kb", "text": "第二条。"},
         )
         knowledge_id = first.json()["knowledge"]["knowledge_id"]
+        await client.post(f"/v1/knowledge/{knowledge_id}/approve", json={})
+        await client.post(
+            f"/v1/knowledge/{second.json()['knowledge']['knowledge_id']}/approve",
+            json={},
+        )
         duplicate = await client.post(
             f"/v1/knowledge/{knowledge_id}/revise", json={"text": "第二条。"}
         )
@@ -539,21 +596,23 @@ async def test_review_queue_summary_counts_pending_work(tmp_path, monkeypatch):
             "/v1/knowledge",
             json={"kb_id": "kb", "text": "待审核知识。"},
         )
-        await client.post(
+        saved = await client.post(
             "/v1/knowledge",
             json={
                 "kb_id": "kb",
                 "text": "保存答案知识。",
                 "origin": "saved_answer",
-                "enable_immediately": True,
             },
+        )
+        await client.post(
+            f"/v1/knowledge/{saved.json()['knowledge']['knowledge_id']}/approve",
+            json={},
         )
         auto = await client.post(
             "/v1/knowledge",
             json={
                 "kb_id": "kb",
                 "text": "自动重绑知识。",
-                "enable_immediately": True,
             },
         )
         app.state.knowledge_store.set_status(
@@ -646,7 +705,11 @@ async def test_review_metrics_endpoints_report_feedback_loop(tmp_path, monkeypat
     async with _client(app) as client:
         approved = await client.post(
             "/v1/knowledge",
-            json={"kb_id": "kb", "text": "已通过知识。", "enable_immediately": True},
+            json={"kb_id": "kb", "text": "已通过知识。"},
+        )
+        await client.post(
+            f"/v1/knowledge/{approved.json()['knowledge']['knowledge_id']}/approve",
+            json={},
         )
         rejected = await client.post(
             "/v1/knowledge", json={"kb_id": "kb", "text": "驳回知识。"}
@@ -672,7 +735,7 @@ async def test_review_metrics_endpoints_report_feedback_loop(tmp_path, monkeypat
     assert pending_count.status_code == 200
     assert pending_count.json()["stale"] == 1
     assert pending_count.json()["feedback_analysis_needs_review"] == 1
-    assert pending_count.json()["total"] == 2
+    assert pending_count.json()["total"] == 1
     assert metrics.status_code == 200
     body = metrics.json()
     assert body["counts"]["feedback_total"] == 2
@@ -686,6 +749,43 @@ async def test_review_metrics_endpoints_report_feedback_loop(tmp_path, monkeypat
     assert body["rates"]["retrieval_feedback_rollback_rate"] == 1.0
     assert body["rates"]["stale_review_completion_rate"] == 0.0
     assert reviewed_metrics.json()["rates"]["stale_review_completion_rate"] == 1.0
+
+
+# 验证删除待审核派生知识后徽标计数下降且不受反馈分析影响。
+@pytest.mark.anyio
+async def test_pending_count_decrements_after_knowledge_delete(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    app.state.feedback_analysis_store.record(
+        "fb1",
+        {"kb_id": "kb", "trace_id": "t1", "query": "问题"},
+        {
+            "feedback_type": "correction",
+            "sentiment": "negative",
+            "target": {"chunk_ids": [], "sources": [], "source_type": "none"},
+            "extracted_claim": "正确说法",
+            "recommended_action": "create_pending_knowledge",
+            "weight_delta": 0,
+            "confidence": 0.9,
+            "needs_review": True,
+        },
+    )
+
+    async with _client(app) as client:
+        created = await client.post(
+            "/v1/knowledge", json={"kb_id": "kb", "text": "待删除派生知识。"}
+        )
+        knowledge_id = created.json()["knowledge"]["knowledge_id"]
+        before = await client.get("/v1/knowledge/pending-count", params={"kb_id": "kb"})
+        deleted = await client.delete(f"/v1/knowledge/{knowledge_id}")
+        after = await client.get("/v1/knowledge/pending-count", params={"kb_id": "kb"})
+
+    assert before.json()["pending"] == 1
+    assert before.json()["feedback_analysis_needs_review"] == 1
+    assert before.json()["total"] == 1
+    assert deleted.status_code == 204
+    assert after.json()["pending"] == 0
+    assert after.json()["feedback_analysis_needs_review"] == 1
+    assert after.json()["total"] == 0
 
 
 # 验证反馈闭环指标使用服务端回答数兜底场景。

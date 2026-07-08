@@ -295,6 +295,7 @@ class FeedbackRequest(ApiModel):
     comment: str | None = None
     correction: str | None = None
     save_as_knowledge: bool = False
+    skip_retrieval_feedback: bool = False
     related_document_id: str | None = None
     related_source: str | None = None
     related_source_sha256: str | None = None
@@ -341,6 +342,7 @@ class KnowledgeStatus(str, Enum):
 class KnowledgeOrigin(str, Enum):
     MANUAL_ENTRY = "manual_entry"
     CORRECTION = "correction"
+    NO_EVIDENCE = "no_evidence"
     SAVED_ANSWER = "saved_answer"
     AGENT_SUGGESTED = "agent_suggested"
 
@@ -370,7 +372,6 @@ class KnowledgeCreateRequest(ApiModel):
     origin: KnowledgeOrigin = KnowledgeOrigin.MANUAL_ENTRY
     created_from_trace_id: str | None = None
     created_by: str | None = None
-    enable_immediately: bool = False
 
     # 清理必填文本。
     @field_validator("kb_id", "text")
@@ -413,7 +414,6 @@ class KnowledgeReviseRequest(ApiModel):
     certainty: KnowledgeCertainty = KnowledgeCertainty.MEDIUM
     created_from_trace_id: str | None = None
     created_by: str | None = None
-    enable_immediately: bool = False
 
     # 清理修订正文。
     @field_validator("text")
@@ -495,6 +495,14 @@ class KnowledgeBatchReviewResponse(ApiModel):
     schema_version: Literal["v1"] = API_SCHEMA_VERSION
     updated: list[DerivedKnowledge] = Field(default_factory=list)
     missing_ids: list[str] = Field(default_factory=list)
+
+
+# 过期知识扫描响应。
+class KnowledgeStaleScanResponse(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    kb_id: str
+    stale_marked: int = 0
+    stale_knowledge: list[DerivedKnowledge] = Field(default_factory=list)
 
 
 # 审核队列摘要响应。

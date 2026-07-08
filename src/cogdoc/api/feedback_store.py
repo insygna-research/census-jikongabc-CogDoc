@@ -11,6 +11,7 @@ from cogdoc.api.time_utils import now_iso
 from cogdoc.config.settings import get_settings
 
 _BAD_CASE_TYPES = {"thumbs_down", "correction"}
+_QUICK_FEEDBACK_TYPES = {"thumbs_up", "thumbs_down"}
 _EVIDENCE_PREVIEW_LIMIT = 6
 _MISSING_MTIME = -1.0
 
@@ -74,6 +75,13 @@ class FeedbackStore:
 
     # 记录结果。
     def record(self, payload: dict[str, Any]) -> dict[str, Any]:
+        existing = self._find_existing(payload)
+        if existing is not None:
+            return {
+                "feedback_id": existing["feedback_id"],
+                "is_bad_case": existing.get("feedback") in _BAD_CASE_TYPES,
+                "deduplicated": True,
+            }
         feedback_id = uuid4().hex
         entry = {"feedback_id": feedback_id, "created_at": now_iso(), **payload}
         is_bad_case = payload.get("feedback") in _BAD_CASE_TYPES
@@ -83,7 +91,28 @@ class FeedbackStore:
             self._append(self._feedback_path, entry)
             if is_bad_case:
                 self._append(self._bad_cases_path, entry)
-        return {"feedback_id": feedback_id, "is_bad_case": is_bad_case}
+        return {
+            "feedback_id": feedback_id,
+            "is_bad_case": is_bad_case,
+            "deduplicated": False,
+        }
+
+    # 同一 KB 的同一回答只接受第一条赞踩反馈；纠错仍需继续入审核。
+    def _find_existing(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        if payload.get("feedback") not in _QUICK_FEEDBACK_TYPES:
+            return None
+        trace_id = str(payload.get("trace_id") or "")
+        if not trace_id:
+            return None
+        with self._lock:
+            rows = self._read_all()
+        for row in rows:
+            if (
+                str(row.get("trace_id") or "") == trace_id
+                and row.get("feedback") in _QUICK_FEEDBACK_TYPES
+            ):
+                return row
+        return None
 
     # 查询反馈记录。
     def list(
@@ -139,6 +168,14 @@ class FeedbackStore:
             "by_type": by_type,
         }
 
+    # 删除某 KB 的反馈记录和坏样本导出。
+    def clear_kb(self, kb_id: str) -> None:
+        with self._lock:
+            self._rewrite_without_kb(self._feedback_path, kb_id)
+            self._rewrite_without_kb(self._bad_cases_path, kb_id)
+            self._cache_mtime = None
+            self._cache_rows = None
+
     # 读取全部反馈。
     def _read_all(self) -> list[dict[str, Any]]:
         mtime = (
@@ -168,6 +205,23 @@ class FeedbackStore:
         if path == self._feedback_path:
             self._cache_mtime = None
             self._cache_rows = None
+
+    # 重写文件，移除指定 KB。
+    def _rewrite_without_kb(self, path: str, kb_id: str) -> None:
+        rows = []
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    if row.get("kb_id") != kb_id:
+                        rows.append(row)
+        tmp_path = f"{path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        os.replace(tmp_path, path)
 
 
 # 反馈落盘到数据库，逐行对象文件仅作为导出副本。
@@ -206,6 +260,13 @@ class SqliteFeedbackStore:
 
     # 记录结果。
     def record(self, payload: dict[str, Any]) -> dict[str, Any]:
+        existing = self._find_existing_locked(payload)
+        if existing is not None:
+            return {
+                "feedback_id": existing["feedback_id"],
+                "is_bad_case": bool(existing["is_bad_case"]),
+                "deduplicated": True,
+            }
         feedback_id = uuid4().hex
         entry = {"feedback_id": feedback_id, "created_at": now_iso(), **payload}
         is_bad_case = payload.get("feedback") in _BAD_CASE_TYPES
@@ -217,7 +278,29 @@ class SqliteFeedbackStore:
                 self._append_export(self._feedback_path, entry)
                 if is_bad_case:
                     self._append_export(self._bad_cases_path, entry)
-        return {"feedback_id": feedback_id, "is_bad_case": is_bad_case}
+        return {
+            "feedback_id": feedback_id,
+            "is_bad_case": is_bad_case,
+            "deduplicated": False,
+        }
+
+    # 同一 KB 的同一回答只接受第一条赞踩反馈；纠错仍需继续入审核。
+    def _find_existing_locked(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        if payload.get("feedback") not in _QUICK_FEEDBACK_TYPES:
+            return None
+        trace_id = str(payload.get("trace_id") or "")
+        if not trace_id:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT feedback_id, is_bad_case FROM feedback_entries "
+                "WHERE trace_id=? AND feedback IN ('thumbs_up', 'thumbs_down') "
+                "ORDER BY created_at ASC LIMIT 1",
+                (trace_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"feedback_id": row[0], "is_bad_case": bool(row[1])}
 
     # 查询反馈记录。
     def list(
@@ -283,6 +366,20 @@ class SqliteFeedbackStore:
             "by_type": by_type,
         }
 
+    # 删除某 KB 的反馈记录和导出副本。
+    def clear_kb(self, kb_id: str) -> None:
+        with self._lock:
+
+            def _do():
+                self._conn.execute(
+                    "DELETE FROM feedback_entries WHERE kb_id=?", (kb_id,)
+                )
+                self._conn.commit()
+
+            _execute_write_with_retry(_do)
+            self._rewrite_export_without_kb(self._feedback_path, kb_id)
+            self._rewrite_export_without_kb(self._bad_cases_path, kb_id)
+
     # 从旧逐行对象文件导入数据库。
     def _bootstrap_from_jsonl_locked(self) -> None:
         count = self._conn.execute("SELECT COUNT(*) FROM feedback_entries").fetchone()[
@@ -327,3 +424,20 @@ class SqliteFeedbackStore:
     def _append_export(self, path: str, entry: dict[str, Any]) -> None:
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    # 重写导出副本，移除指定 KB。
+    def _rewrite_export_without_kb(self, path: str, kb_id: str) -> None:
+        rows = []
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    if row.get("kb_id") != kb_id:
+                        rows.append(row)
+        tmp_path = f"{path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        os.replace(tmp_path, path)
