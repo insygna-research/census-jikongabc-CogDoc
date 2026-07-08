@@ -65,6 +65,10 @@ async def test_manual_knowledge_lifecycle(tmp_path, monkeypatch):
                 "related_source": "hr.pdf",
                 "related_source_sha256": "sha-old",
                 "related_chunk_ids": ["c1"],
+                "related_page_start": 2,
+                "related_page_end": 3,
+                "related_chunk_text_hash": "hash-old",
+                "related_anchor_text": "审批规则",
                 "source_note": "HR 手工确认",
                 "certainty": "high",
                 "created_by": "reviewer",
@@ -74,6 +78,10 @@ async def test_manual_knowledge_lifecycle(tmp_path, monkeypatch):
         row = create.json()["knowledge"]
         assert row["status"] == "pending"
         assert row["origin"] == "manual_entry"
+        assert row["related_page_start"] == 2
+        assert row["related_page_end"] == 3
+        assert row["related_chunk_text_hash"] == "hash-old"
+        assert row["related_anchor_text"] == "审批规则"
         knowledge_id = row["knowledge_id"]
 
         pending = await client.get(
@@ -270,6 +278,10 @@ async def test_stale_knowledge_approve_refreshes_binding(tmp_path, monkeypatch):
                 "related_source": "policy.pdf",
                 "related_source_sha256": "sha-old",
                 "related_chunk_ids": ["old-c1"],
+                "related_page_start": 1,
+                "related_page_end": 1,
+                "related_chunk_text_hash": "hash-old",
+                "related_anchor_text": "旧锚点",
                 "enable_immediately": True,
             },
         )
@@ -285,6 +297,10 @@ async def test_stale_knowledge_approve_refreshes_binding(tmp_path, monkeypatch):
                 "related_source": "policy.pdf",
                 "related_source_sha256": "sha-new",
                 "related_chunk_ids": ["new-c1", "new-c2"],
+                "related_page_start": 4,
+                "related_page_end": 5,
+                "related_chunk_text_hash": "hash-new",
+                "related_anchor_text": "新版锚点",
             },
         )
 
@@ -294,6 +310,10 @@ async def test_stale_knowledge_approve_refreshes_binding(tmp_path, monkeypatch):
     assert row["related_document_id"] == "doc-new"
     assert row["related_source_sha256"] == "sha-new"
     assert row["related_chunk_ids"] == ["new-c1", "new-c2"]
+    assert row["related_page_start"] == 4
+    assert row["related_page_end"] == 5
+    assert row["related_chunk_text_hash"] == "hash-new"
+    assert row["related_anchor_text"] == "新版锚点"
     assert row["reviewed_by"] == "admin"
     assert row["review_note"] == "新版文档确认仍有效"
 
@@ -316,11 +336,15 @@ def test_knowledge_binding_updates_are_allowlisted(tmp_path):
         binding_updates={
             "status": "rejected",
             "related_source_sha256": "sha-new",
+            "related_page_start": 9,
+            "related_chunk_text_hash": "hash-new",
         },
     )
 
     assert updated["status"] == "approved"
     assert updated["related_source_sha256"] == "sha-new"
+    assert updated["related_page_start"] == 9
+    assert updated["related_chunk_text_hash"] == "hash-new"
 
 
 # 验证知识修订创建新版本且通过后归档旧版本。
@@ -335,6 +359,9 @@ async def test_knowledge_revision_supersedes_previous_version(tmp_path, monkeypa
                 "kb_id": "kb",
                 "text": "旧规则。",
                 "related_source": "policy.pdf",
+                "related_page_start": 1,
+                "related_page_end": 2,
+                "related_anchor_text": "旧规则锚点",
                 "enable_immediately": True,
             },
         )
@@ -345,6 +372,10 @@ async def test_knowledge_revision_supersedes_previous_version(tmp_path, monkeypa
                 "text": "新规则。",
                 "related_source": "policy-v2.pdf",
                 "related_chunk_ids": ["c2"],
+                "related_page_start": 5,
+                "related_page_end": 6,
+                "related_chunk_text_hash": "hash-v2",
+                "related_anchor_text": "新规则锚点",
                 "source_note": "人工修订",
                 "created_by": "admin",
             },
@@ -365,6 +396,10 @@ async def test_knowledge_revision_supersedes_previous_version(tmp_path, monkeypa
     assert revision["status"] == "pending"
     assert revision["related_source"] == "policy-v2.pdf"
     assert revision["related_chunk_ids"] == ["c2"]
+    assert revision["related_page_start"] == 5
+    assert revision["related_page_end"] == 6
+    assert revision["related_chunk_text_hash"] == "hash-v2"
+    assert revision["related_anchor_text"] == "新规则锚点"
     assert approved.status_code == 200
     assert approved.json()["status"] == "approved"
     archived_rows = archived.json()["knowledge"]

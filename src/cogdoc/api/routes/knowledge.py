@@ -341,6 +341,10 @@ def _set_status(request: Request, knowledge_id: str, status: str, body):
             "related_source": body.related_source,
             "related_source_sha256": body.related_source_sha256,
             "related_chunk_ids": body.related_chunk_ids,
+            "related_page_start": body.related_page_start,
+            "related_page_end": body.related_page_end,
+            "related_chunk_text_hash": body.related_chunk_text_hash,
+            "related_anchor_text": body.related_anchor_text,
         }.items()
         if value is not None
     }

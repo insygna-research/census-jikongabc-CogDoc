@@ -296,6 +296,10 @@ class FeedbackRequest(ApiModel):
     related_source: str | None = None
     related_source_sha256: str | None = None
     related_chunk_ids: list[str] = Field(default_factory=list)
+    related_page_start: int | None = Field(default=None, ge=0)
+    related_page_end: int | None = Field(default=None, ge=0)
+    related_chunk_text_hash: str | None = None
+    related_anchor_text: str | None = None
     source_note: str | None = None
     certainty: Literal["high", "medium", "low"] = "medium"
     created_by: str | None = None
@@ -354,6 +358,10 @@ class KnowledgeCreateRequest(ApiModel):
     related_source: str | None = None
     related_source_sha256: str | None = None
     related_chunk_ids: list[str] = Field(default_factory=list)
+    related_page_start: int | None = Field(default=None, ge=0)
+    related_page_end: int | None = Field(default=None, ge=0)
+    related_chunk_text_hash: str | None = None
+    related_anchor_text: str | None = None
     source_note: str | None = None
     certainty: KnowledgeCertainty = KnowledgeCertainty.MEDIUM
     origin: KnowledgeOrigin = KnowledgeOrigin.MANUAL_ENTRY
@@ -380,6 +388,10 @@ class KnowledgeReviewRequest(ApiModel):
     related_source: str | None = None
     related_source_sha256: str | None = None
     related_chunk_ids: list[str] | None = None
+    related_page_start: int | None = Field(default=None, ge=0)
+    related_page_end: int | None = Field(default=None, ge=0)
+    related_chunk_text_hash: str | None = None
+    related_anchor_text: str | None = None
 
 
 # 知识修订请求体。
@@ -390,6 +402,10 @@ class KnowledgeReviseRequest(ApiModel):
     related_source: str | None = None
     related_source_sha256: str | None = None
     related_chunk_ids: list[str] | None = None
+    related_page_start: int | None = Field(default=None, ge=0)
+    related_page_end: int | None = Field(default=None, ge=0)
+    related_chunk_text_hash: str | None = None
+    related_anchor_text: str | None = None
     source_note: str | None = None
     certainty: KnowledgeCertainty = KnowledgeCertainty.MEDIUM
     created_from_trace_id: str | None = None
@@ -428,6 +444,10 @@ class DerivedKnowledge(ApiModel):
     related_source: str | None = None
     related_source_sha256: str | None = None
     related_chunk_ids: list[str] = Field(default_factory=list)
+    related_page_start: int | None = None
+    related_page_end: int | None = None
+    related_chunk_text_hash: str | None = None
+    related_anchor_text: str | None = None
     source_note: str | None = None
     certainty: KnowledgeCertainty = KnowledgeCertainty.MEDIUM
     status: KnowledgeStatus = KnowledgeStatus.PENDING

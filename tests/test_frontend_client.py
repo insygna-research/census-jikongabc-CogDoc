@@ -179,6 +179,10 @@ def test_feedback_client_sends_save_as_knowledge_payload(monkeypatch):
         related_source="a.pdf",
         related_source_sha256="sha",
         related_chunk_ids=["c1"],
+        related_page_start=1,
+        related_page_end=2,
+        related_chunk_text_hash="hash",
+        related_anchor_text="证据锚点",
         certainty="high",
     )
 
@@ -188,6 +192,10 @@ def test_feedback_client_sends_save_as_knowledge_payload(monkeypatch):
     assert payload["correction_text"] == "正确说法"
     assert payload["related_source"] == "a.pdf"
     assert payload["related_chunk_ids"] == ["c1"]
+    assert payload["related_page_start"] == 1
+    assert payload["related_page_end"] == 2
+    assert payload["related_chunk_text_hash"] == "hash"
+    assert payload["related_anchor_text"] == "证据锚点"
     assert payload["certainty"] == "high"
 
 
@@ -247,6 +255,10 @@ def test_knowledge_client_methods_call_expected_endpoints(monkeypatch):
         related_source="a.pdf",
         related_source_sha256="sha",
         related_chunk_ids=["c1"],
+        related_page_start=3,
+        related_page_end=4,
+        related_chunk_text_hash="hash-old",
+        related_anchor_text="旧锚点",
         source_note="人工确认",
         certainty="high",
         origin="saved_answer",
@@ -267,12 +279,20 @@ def test_knowledge_client_methods_call_expected_endpoints(monkeypatch):
         related_source="policy.pdf",
         related_source_sha256="sha-new",
         related_chunk_ids=["c2"],
+        related_page_start=5,
+        related_page_end=6,
+        related_chunk_text_hash="hash-new",
+        related_anchor_text="新锚点",
     )
     client.revise_knowledge(
         "K1",
         text="新知识",
         related_source="policy-v2.pdf",
         related_chunk_ids=["c3"],
+        related_page_start=7,
+        related_page_end=8,
+        related_chunk_text_hash="hash-revised",
+        related_anchor_text="修订锚点",
         source_note="修订",
         created_by="admin",
     )
@@ -281,6 +301,10 @@ def test_knowledge_client_methods_call_expected_endpoints(monkeypatch):
     assert calls[0][0:2] == ("POST", "http://api/v1/knowledge")
     assert calls[0][2]["headers"] == {"Authorization": "Bearer secret"}
     assert calls[0][2]["json"]["related_chunk_ids"] == ["c1"]
+    assert calls[0][2]["json"]["related_page_start"] == 3
+    assert calls[0][2]["json"]["related_page_end"] == 4
+    assert calls[0][2]["json"]["related_chunk_text_hash"] == "hash-old"
+    assert calls[0][2]["json"]["related_anchor_text"] == "旧锚点"
     assert calls[0][2]["json"]["origin"] == "saved_answer"
     assert calls[0][2]["json"]["created_from_trace_id"] == "trace-1"
     assert calls[1][0:2] == ("GET", "http://api/v1/knowledge")
@@ -298,12 +322,20 @@ def test_knowledge_client_methods_call_expected_endpoints(monkeypatch):
         "related_source": "policy.pdf",
         "related_source_sha256": "sha-new",
         "related_chunk_ids": ["c2"],
+        "related_page_start": 5,
+        "related_page_end": 6,
+        "related_chunk_text_hash": "hash-new",
+        "related_anchor_text": "新锚点",
     }
     assert calls[3][0:2] == ("POST", "http://api/v1/knowledge/K1/revise")
     assert calls[3][2]["json"] == {
         "text": "新知识",
         "related_source": "policy-v2.pdf",
         "related_chunk_ids": ["c3"],
+        "related_page_start": 7,
+        "related_page_end": 8,
+        "related_chunk_text_hash": "hash-revised",
+        "related_anchor_text": "修订锚点",
         "source_note": "修订",
         "certainty": "medium",
         "created_by": "admin",

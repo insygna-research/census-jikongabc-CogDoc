@@ -22,6 +22,10 @@ ALLOWED_BINDING_UPDATE_FIELDS = {
     "related_source",
     "related_source_sha256",
     "related_chunk_ids",
+    "related_page_start",
+    "related_page_end",
+    "related_chunk_text_hash",
+    "related_anchor_text",
 }
 
 
@@ -96,6 +100,10 @@ class DerivedKnowledgeStore:
                 "related_source": payload.get("related_source"),
                 "related_source_sha256": payload.get("related_source_sha256"),
                 "related_chunk_ids": list(payload.get("related_chunk_ids") or []),
+                "related_page_start": payload.get("related_page_start"),
+                "related_page_end": payload.get("related_page_end"),
+                "related_chunk_text_hash": payload.get("related_chunk_text_hash"),
+                "related_anchor_text": payload.get("related_anchor_text"),
                 "source_note": payload.get("source_note"),
                 "certainty": payload.get("certainty") or "medium",
                 "status": "pending" if similar else payload.get("status") or "pending",
@@ -156,6 +164,19 @@ class DerivedKnowledgeStore:
                 "related_chunk_ids": list(
                     payload.get("related_chunk_ids", current.get("related_chunk_ids"))
                     or []
+                ),
+                "related_page_start": payload.get(
+                    "related_page_start", current.get("related_page_start")
+                ),
+                "related_page_end": payload.get(
+                    "related_page_end", current.get("related_page_end")
+                ),
+                "related_chunk_text_hash": payload.get(
+                    "related_chunk_text_hash",
+                    current.get("related_chunk_text_hash"),
+                ),
+                "related_anchor_text": payload.get(
+                    "related_anchor_text", current.get("related_anchor_text")
                 ),
                 "source_note": payload.get("source_note", current.get("source_note")),
                 "certainty": payload.get("certainty") or current.get("certainty"),

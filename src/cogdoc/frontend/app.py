@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import queue
@@ -318,6 +319,10 @@ def _submit_feedback(
         related_source=_first_citation_source(final),
         related_source_sha256=_first_evidence_source_sha(final),
         related_chunk_ids=_citation_chunk_ids(final),
+        related_page_start=_first_citation_page_start(final),
+        related_page_end=_first_citation_page_end(final),
+        related_chunk_text_hash=_first_evidence_text_hash(final),
+        related_anchor_text=_first_evidence_anchor_text(final),
         certainty=certainty,
     )
     if resp.status_code == 201 and st.session_state.kb_id:
@@ -364,6 +369,10 @@ def _save_answer_as_knowledge(
         related_source=_first_citation_source(final),
         related_source_sha256=_first_evidence_source_sha(final),
         related_chunk_ids=_citation_chunk_ids(final),
+        related_page_start=_first_citation_page_start(final),
+        related_page_end=_first_citation_page_end(final),
+        related_chunk_text_hash=_first_evidence_text_hash(final),
+        related_anchor_text=_first_evidence_anchor_text(final),
         source_note=note,
         certainty=certainty,
         origin="saved_answer",
@@ -401,6 +410,57 @@ def _citation_chunk_ids(final: Mapping) -> list[str]:
         if isinstance(item, Mapping) and item.get("chunk_id"):
             chunk_ids.append(str(item["chunk_id"]))
     return chunk_ids
+
+
+# 读取首个引用页码起点。
+def _first_citation_page_start(final: Mapping) -> int | None:
+    for item in final.get("citations") or []:
+        if not isinstance(item, Mapping):
+            continue
+        value = item.get("page_start", item.get("page"))
+        parsed = _parse_optional_int(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+# 读取首个引用页码终点。
+def _first_citation_page_end(final: Mapping) -> int | None:
+    for item in final.get("citations") or []:
+        if not isinstance(item, Mapping):
+            continue
+        value = item.get("page_end", item.get("page"))
+        parsed = _parse_optional_int(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+# 读取首个证据文本锚点。
+def _first_evidence_anchor_text(final: Mapping) -> str | None:
+    for item in final.get("evidence") or []:
+        if isinstance(item, Mapping) and item.get("text_preview"):
+            return str(item["text_preview"]).strip()[:240]
+    return None
+
+
+# 读取首个证据文本哈希。
+def _first_evidence_text_hash(final: Mapping) -> str | None:
+    anchor = _first_evidence_anchor_text(final)
+    if not anchor:
+        return None
+    return hashlib.sha256(anchor.encode("utf-8")).hexdigest()
+
+
+# 解析可空页码。
+def _parse_optional_int(value) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 # 加载跟踪。
@@ -1183,6 +1243,11 @@ def _render_create_knowledge(client: CogDocClient, kb_id: str) -> None:
         text = st.text_area("内容", height=140)
         selected_source = st.selectbox("关联文档", doc_options)
         related_chunk_ids = st.text_input("关联分块标识")
+        page_fields = st.columns([1, 1, 2])
+        related_page_start_text = page_fields[0].text_input("起始页")
+        related_page_end_text = page_fields[1].text_input("结束页")
+        related_chunk_text_hash = page_fields[2].text_input("分块文本哈希")
+        related_anchor_text = st.text_input("锚点文本")
         source_note = st.text_area("来源说明", height=80)
         controls = st.columns([1, 1])
         certainty = controls[0].selectbox(
@@ -1201,12 +1266,18 @@ def _render_create_knowledge(client: CogDocClient, kb_id: str) -> None:
         return
     doc = doc_by_name.get(selected_source) if selected_source else None
     chunk_ids = [item.strip() for item in related_chunk_ids.split(",") if item.strip()]
+    related_page_start = _parse_optional_int(related_page_start_text.strip())
+    related_page_end = _parse_optional_int(related_page_end_text.strip())
     resp = client.create_knowledge(
         kb_id=kb_id,
         text=text.strip(),
         related_source=selected_source or None,
         related_source_sha256=str(doc.get("sha256")) if doc else None,
         related_chunk_ids=chunk_ids,
+        related_page_start=related_page_start,
+        related_page_end=related_page_end,
+        related_chunk_text_hash=related_chunk_text_hash.strip() or None,
+        related_anchor_text=related_anchor_text.strip() or None,
         source_note=source_note.strip() or None,
         certainty=certainty,
         enable_immediately=enable_immediately,
@@ -1275,6 +1346,27 @@ def _render_knowledge_revision_form(
             value=", ".join(str(x) for x in item.get("related_chunk_ids") or []),
             key=f"revise-chunks-{suffix}-{knowledge_id}",
         )
+        page_fields = st.columns([1, 1, 2])
+        related_page_start_text = page_fields[0].text_input(
+            "起始页",
+            value=str(item.get("related_page_start") or ""),
+            key=f"revise-page-start-{suffix}-{knowledge_id}",
+        )
+        related_page_end_text = page_fields[1].text_input(
+            "结束页",
+            value=str(item.get("related_page_end") or ""),
+            key=f"revise-page-end-{suffix}-{knowledge_id}",
+        )
+        related_chunk_text_hash = page_fields[2].text_input(
+            "分块文本哈希",
+            value=str(item.get("related_chunk_text_hash") or ""),
+            key=f"revise-chunk-hash-{suffix}-{knowledge_id}",
+        )
+        related_anchor_text = st.text_input(
+            "锚点文本",
+            value=str(item.get("related_anchor_text") or ""),
+            key=f"revise-anchor-{suffix}-{knowledge_id}",
+        )
         source_note = st.text_area(
             "修订说明",
             value=str(item.get("source_note") or ""),
@@ -1309,6 +1401,8 @@ def _render_knowledge_revision_form(
         st.warning("请输入修订内容。")
         return
     chunk_ids = [part.strip() for part in chunk_ids_text.split(",") if part.strip()]
+    related_page_start = _parse_optional_int(related_page_start_text.strip())
+    related_page_end = _parse_optional_int(related_page_end_text.strip())
     _handle_knowledge_response(
         client.revise_knowledge(
             knowledge_id,
@@ -1317,6 +1411,10 @@ def _render_knowledge_revision_form(
             related_source=related_source.strip() or None,
             related_source_sha256=related_source_sha256.strip() or None,
             related_chunk_ids=chunk_ids,
+            related_page_start=related_page_start,
+            related_page_end=related_page_end,
+            related_chunk_text_hash=related_chunk_text_hash.strip() or None,
+            related_anchor_text=related_anchor_text.strip() or None,
             source_note=source_note.strip() or None,
             certainty=certainty,
             created_by="frontend",
@@ -1376,6 +1474,27 @@ def _render_knowledge_item(
                     ),
                     key=f"stale-chunks-{knowledge_id}",
                 )
+                page_cols = st.columns([1, 1, 1, 1])
+                related_page_start_text = page_cols[0].text_input(
+                    "新版起始页",
+                    value=str(item.get("related_page_start") or ""),
+                    key=f"stale-page-start-{knowledge_id}",
+                )
+                related_page_end_text = page_cols[1].text_input(
+                    "新版结束页",
+                    value=str(item.get("related_page_end") or ""),
+                    key=f"stale-page-end-{knowledge_id}",
+                )
+                chunk_text_hash = page_cols[2].text_input(
+                    "新版文本哈希",
+                    value=str(item.get("related_chunk_text_hash") or ""),
+                    key=f"stale-chunk-hash-{knowledge_id}",
+                )
+                anchor_text = page_cols[3].text_input(
+                    "新版锚点",
+                    value=str(item.get("related_anchor_text") or ""),
+                    key=f"stale-anchor-{knowledge_id}",
+                )
                 note = st.text_input("复核说明", key=f"stale-note-{knowledge_id}")
                 if st.form_submit_button("确认仍有效并通过"):
                     chunk_ids = [
@@ -1383,6 +1502,12 @@ def _render_knowledge_item(
                         for part in chunk_ids_text.split(",")
                         if part.strip()
                     ]
+                    related_page_start = _parse_optional_int(
+                        related_page_start_text.strip()
+                    )
+                    related_page_end = _parse_optional_int(
+                        related_page_end_text.strip()
+                    )
                     _handle_knowledge_response(
                         client.review_knowledge(
                             knowledge_id,
@@ -1393,6 +1518,10 @@ def _render_knowledge_item(
                             related_source=related_source.strip() or None,
                             related_source_sha256=source_sha.strip() or None,
                             related_chunk_ids=chunk_ids,
+                            related_page_start=related_page_start,
+                            related_page_end=related_page_end,
+                            related_chunk_text_hash=chunk_text_hash.strip() or None,
+                            related_anchor_text=anchor_text.strip() or None,
                         ),
                         client,
                         kb_id,

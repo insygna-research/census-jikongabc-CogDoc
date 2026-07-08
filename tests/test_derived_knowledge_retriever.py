@@ -14,6 +14,10 @@ def test_derived_knowledge_retriever_returns_approved_only(tmp_path):
             "related_source": "policy.pdf",
             "related_source_sha256": "sha",
             "related_chunk_ids": ["chunk-1"],
+            "related_page_start": 2,
+            "related_page_end": 3,
+            "related_chunk_text_hash": "hash",
+            "related_anchor_text": "报销需要七天内提交",
         }
     )
     store.create(
@@ -31,6 +35,11 @@ def test_derived_knowledge_retriever_returns_approved_only(tmp_path):
     assert docs[0]["meta"]["source_type"] == "derived_knowledge"
     assert docs[0]["meta"]["source"] == f"knowledge:{approved['knowledge_id']}"
     assert docs[0]["meta"]["related_chunk_ids"] == ["chunk-1"]
+    assert docs[0]["meta"]["page"] == 2
+    assert docs[0]["meta"]["page_start"] == 2
+    assert docs[0]["meta"]["page_end"] == 3
+    assert docs[0]["meta"]["related_chunk_text_hash"] == "hash"
+    assert docs[0]["meta"]["related_anchor_text"] == "报销需要七天内提交"
     assert docs[0]["retrieval"]["search_channel"] == "derived_knowledge"
     assert docs[0]["retrieval"]["status_filter"] == "approved"
     assert docs[0]["retrieval"]["match_coverage"] > 0

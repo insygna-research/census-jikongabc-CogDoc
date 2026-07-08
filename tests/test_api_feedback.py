@@ -193,6 +193,10 @@ async def test_correction_can_create_pending_knowledge(
             "feedback_text": "回答引用了旧规则",
             "save_as_knowledge": True,
             "citations": [{"chunk_id": "c1", "source": "policy.pdf", "page": 2}],
+            "related_page_start": 2,
+            "related_page_end": 2,
+            "related_chunk_text_hash": "hash-c1",
+            "related_anchor_text": "差旅报销",
             "created_by": "u1",
         },
     )
@@ -209,6 +213,10 @@ async def test_correction_can_create_pending_knowledge(
     assert knowledge["created_from_trace_id"] == "t5"
     assert knowledge["related_source"] == "policy.pdf"
     assert knowledge["related_chunk_ids"] == ["c1"]
+    assert knowledge["related_page_start"] == 2
+    assert knowledge["related_page_end"] == 2
+    assert knowledge["related_chunk_text_hash"] == "hash-c1"
+    assert knowledge["related_anchor_text"] == "差旅报销"
     assert [event for event, _ in webhook_dispatcher.events] == [
         "knowledge.pending_created"
     ]
