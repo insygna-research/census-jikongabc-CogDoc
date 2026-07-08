@@ -91,7 +91,14 @@ def _build_review_queue_summary(
         created_after=created_after,
         created_before=created_before,
     )
-    auto_review = request.app.state.knowledge_store.auto_review_counts(kb_id=kb_id)
+    auto_review = request.app.state.knowledge_store.auto_review_counts(
+        kb_id=kb_id,
+        document_id=document_id,
+        origin=origin_value,
+        created_by=created_by,
+        created_after=created_after,
+        created_before=created_before,
+    )
     feedback_rows = request.app.state.feedback_store.counts(kb_id=kb_id)
     feedback = request.app.state.feedback_analysis_store.counts(kb_id=kb_id)
     retrieval = request.app.state.retrieval_feedback_store.counts(kb_id=kb_id)
@@ -327,6 +334,11 @@ async def review_queue_export(
     )
     auto_review_events = request.app.state.knowledge_store.auto_review_events(
         kb_id=kb_id,
+        document_id=knowledge_document_id,
+        origin=origin_value,
+        created_by=knowledge_created_by,
+        created_after=knowledge_created_after,
+        created_before=knowledge_created_before,
         limit=limit,
     )
     return ReviewQueueExportResponse(

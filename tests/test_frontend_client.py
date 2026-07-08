@@ -291,9 +291,12 @@ def test_knowledge_client_methods_call_expected_endpoints(monkeypatch):
     client.list_knowledge(
         "kb",
         status="pending",
+        document_id="policy.pdf",
         origin="manual_entry",
         conflict_group_id="C1",
         has_conflict=True,
+        created_after="2026-01-01",
+        created_before="2026-12-31",
     )
     client.review_knowledge(
         "K1",
@@ -335,9 +338,12 @@ def test_knowledge_client_methods_call_expected_endpoints(monkeypatch):
     assert calls[1][2]["params"] == {
         "kb_id": "kb",
         "status": "pending",
+        "document_id": "policy.pdf",
         "origin": "manual_entry",
         "conflict_group_id": "C1",
         "has_conflict": True,
+        "created_after": "2026-01-01",
+        "created_before": "2026-12-31",
     }
     assert calls[2][0:2] == ("POST", "http://api/v1/knowledge/K1/approve")
     assert calls[2][2]["json"] == {
@@ -447,13 +453,21 @@ def test_review_queue_summary_client_method_calls_expected_endpoint(monkeypatch)
     monkeypatch.setattr("cogdoc.frontend.api_client.httpx.get", fake_get)
 
     response = CogDocClient("http://api", api_key="secret").review_queue_summary(
-        "kb", origin="saved_answer", created_by="frontend"
+        "kb",
+        document_id="policy.pdf",
+        origin="saved_answer",
+        created_by="frontend",
+        created_after="2026-01-01",
+        created_before="2026-12-31",
     )
     export = CogDocClient("http://api", api_key="secret").review_queue_export(
         "kb",
         limit=50,
+        knowledge_document_id="policy.pdf",
         knowledge_origin="saved_answer",
         knowledge_created_by="frontend",
+        knowledge_created_after="2026-01-01",
+        knowledge_created_before="2026-12-31",
     )
 
     assert response.status_code == 200
@@ -461,8 +475,11 @@ def test_review_queue_summary_client_method_calls_expected_endpoint(monkeypatch)
     assert calls[0][1]["headers"] == {"Authorization": "Bearer secret"}
     assert calls[0][1]["params"] == {
         "kb_id": "kb",
+        "document_id": "policy.pdf",
         "origin": "saved_answer",
         "created_by": "frontend",
+        "created_after": "2026-01-01",
+        "created_before": "2026-12-31",
     }
     assert export.status_code == 200
     assert calls[1][0] == "http://api/v1/review-queue/export"
@@ -470,8 +487,11 @@ def test_review_queue_summary_client_method_calls_expected_endpoint(monkeypatch)
     assert calls[1][1]["params"] == {
         "kb_id": "kb",
         "limit": 50,
+        "knowledge_document_id": "policy.pdf",
         "knowledge_origin": "saved_answer",
         "knowledge_created_by": "frontend",
+        "knowledge_created_after": "2026-01-01",
+        "knowledge_created_before": "2026-12-31",
     }
 
 

@@ -350,6 +350,17 @@ def test_knowledge_binding_updates_are_allowlisted(tmp_path):
     assert updated["related_chunk_text_hash"] == "hash-new"
 
 
+# 验证按日期过滤包含结束日期当天。
+def test_knowledge_created_before_includes_whole_day(tmp_path):
+    store = DerivedKnowledgeStore(path=str(tmp_path / "knowledge.jsonl"))
+    row, _ = store.create({"kb_id": "kb", "text": "知识", "status": "approved"})
+    store.set_status(row["knowledge_id"], "approved")
+
+    filtered = store.list(kb_id="kb", created_before=row["created_at"][:10])
+
+    assert [item["knowledge_id"] for item in filtered] == [row["knowledge_id"]]
+
+
 # 验证知识修订创建新版本且通过后归档旧版本。
 @pytest.mark.anyio
 async def test_knowledge_revision_supersedes_previous_version(tmp_path, monkeypatch):

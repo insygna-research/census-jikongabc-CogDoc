@@ -61,6 +61,13 @@ def _text_similarity(left: str, right: str) -> float:
     return max(jaccard, containment)
 
 
+# 规范化创建时间上限。
+def _created_before_bound(value: str) -> str:
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return f"{value}T23:59:59.999999"
+    return value
+
+
 # 逐行对象格式派生知识存储：追加快照，读取时按知识标识折叠最新状态。
 class DerivedKnowledgeStore:
     def __init__(self, path: str | None = None):
@@ -219,17 +226,14 @@ class DerivedKnowledgeStore:
         rows = [row for row in rows if row.get("kb_id") == kb_id]
         if status is not None:
             rows = [row for row in rows if row.get("status") == status]
-        if document_id is not None:
-            rows = [
-                row
-                for row in rows
-                if row.get("related_document_id") == document_id
-                or row.get("related_source") == document_id
-            ]
-        if origin is not None:
-            rows = [row for row in rows if row.get("origin") == origin]
-        if created_by is not None:
-            rows = [row for row in rows if row.get("created_by") == created_by]
+        rows = self._filter_rows(
+            rows,
+            document_id=document_id,
+            origin=origin,
+            created_by=created_by,
+            created_after=created_after,
+            created_before=created_before,
+        )
         if conflict_group_id is not None:
             rows = [
                 row for row in rows if row.get("conflict_group_id") == conflict_group_id
@@ -239,14 +243,6 @@ class DerivedKnowledgeStore:
                 row
                 for row in rows
                 if bool(row.get("conflict_group_id")) == has_conflict
-            ]
-        if created_after is not None:
-            rows = [
-                row for row in rows if str(row.get("created_at", "")) >= created_after
-            ]
-        if created_before is not None:
-            rows = [
-                row for row in rows if str(row.get("created_at", "")) <= created_before
             ]
         sorted_rows = sorted(
             rows, key=lambda row: str(row.get("created_at", "")), reverse=True
@@ -356,21 +352,16 @@ class DerivedKnowledgeStore:
         return {"total": len(stale_ids), "reviewed": reviewed}
 
     # 统计自动复核重绑情况。
-    def auto_review_counts(self, *, kb_id: str) -> dict[str, int]:
-        with self._lock:
-            history = self._read_history()
-        auto_rebound = sum(
-            1
-            for row in history
-            if row.get("kb_id") == kb_id
-            and row.get("reviewed_by") == "system"
-            and row.get("review_note") == AUTO_REBIND_REVIEW_NOTE
-            and row.get("status") == "approved"
-        )
-        return {"auto_rebound": auto_rebound}
-
-    # 列出自动复核重绑事件。
-    def auto_review_events(self, *, kb_id: str, limit: int = 100) -> list[dict]:
+    def auto_review_counts(
+        self,
+        *,
+        kb_id: str,
+        document_id: str | None = None,
+        origin: str | None = None,
+        created_by: str | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
+    ) -> dict[str, int]:
         with self._lock:
             history = self._read_history()
         rows = [
@@ -381,6 +372,46 @@ class DerivedKnowledgeStore:
             and row.get("review_note") == AUTO_REBIND_REVIEW_NOTE
             and row.get("status") == "approved"
         ]
+        rows = self._filter_rows(
+            rows,
+            document_id=document_id,
+            origin=origin,
+            created_by=created_by,
+            created_after=created_after,
+            created_before=created_before,
+        )
+        return {"auto_rebound": len(rows)}
+
+    # 列出自动复核重绑事件。
+    def auto_review_events(
+        self,
+        *,
+        kb_id: str,
+        document_id: str | None = None,
+        origin: str | None = None,
+        created_by: str | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        with self._lock:
+            history = self._read_history()
+        rows = [
+            row
+            for row in history
+            if row.get("kb_id") == kb_id
+            and row.get("reviewed_by") == "system"
+            and row.get("review_note") == AUTO_REBIND_REVIEW_NOTE
+            and row.get("status") == "approved"
+        ]
+        rows = self._filter_rows(
+            rows,
+            document_id=document_id,
+            origin=origin,
+            created_by=created_by,
+            created_after=created_after,
+            created_before=created_before,
+        )
         rows.sort(key=lambda row: str(row.get("reviewed_at") or ""), reverse=True)
         return rows[:limit]
 
@@ -435,6 +466,37 @@ class DerivedKnowledgeStore:
             else:
                 updated.append(row)
         return updated, missing
+
+    # 按知识通用条件过滤行。
+    def _filter_rows(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        document_id: str | None = None,
+        origin: str | None = None,
+        created_by: str | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if document_id is not None:
+            rows = [
+                row
+                for row in rows
+                if row.get("related_document_id") == document_id
+                or row.get("related_source") == document_id
+            ]
+        if origin is not None:
+            rows = [row for row in rows if row.get("origin") == origin]
+        if created_by is not None:
+            rows = [row for row in rows if row.get("created_by") == created_by]
+        if created_after is not None:
+            rows = [
+                row for row in rows if str(row.get("created_at", "")) >= created_after
+            ]
+        if created_before is not None:
+            bound = _created_before_bound(created_before)
+            rows = [row for row in rows if str(row.get("created_at", "")) <= bound]
+        return rows
 
     # 文档哈希变化后，将绑定旧哈希的派生知识标记为过期。
     def mark_stale_for_source(

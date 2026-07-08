@@ -404,6 +404,8 @@ class CogDocClient:
         created_by: str | None = None,
         conflict_group_id: str | None = None,
         has_conflict: bool | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
     ) -> httpx.Response:
         params = {
             "kb_id": kb_id,
@@ -413,6 +415,8 @@ class CogDocClient:
             "created_by": created_by,
             "conflict_group_id": conflict_group_id,
             "has_conflict": has_conflict,
+            "created_after": created_after,
+            "created_before": created_before,
         }
         return httpx.get(
             self._url("/v1/knowledge"),

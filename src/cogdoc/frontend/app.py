@@ -1093,9 +1093,12 @@ def _knowledge_rows(
     client: CogDocClient,
     kb_id: str,
     status: str,
+    document_id: str | None = None,
     origin: str | None = None,
     created_by: str | None = None,
     has_conflict: bool | None = None,
+    created_after: str | None = None,
+    created_before: str | None = None,
 ) -> list[Mapping]:
     status_code, payload = _cached_api_value(
         (
@@ -1103,17 +1106,23 @@ def _knowledge_rows(
             client.base_url,
             kb_id,
             status,
+            document_id,
             origin,
             created_by,
             has_conflict,
+            created_after,
+            created_before,
         ),
         lambda: _response_status_payload(
             client.list_knowledge(
                 kb_id,
                 status=status,
+                document_id=document_id,
                 origin=origin,
                 created_by=created_by,
                 has_conflict=has_conflict,
+                created_after=created_after,
+                created_before=created_before,
             )
         ),
     )
@@ -1124,10 +1133,33 @@ def _knowledge_rows(
 
 
 # 读取审核队列摘要。
-def _review_queue_summary(client: CogDocClient, kb_id: str) -> Mapping:
+def _review_queue_summary(
+    client: CogDocClient,
+    kb_id: str,
+    filters: Mapping | None = None,
+) -> Mapping:
+    filters = filters or {}
     status_code, payload = _cached_api_value(
-        ("review-queue", client.base_url, kb_id),
-        lambda: _response_status_payload(client.review_queue_summary(kb_id)),
+        (
+            "review-queue",
+            client.base_url,
+            kb_id,
+            filters.get("document_id"),
+            filters.get("origin"),
+            filters.get("created_by"),
+            filters.get("created_after"),
+            filters.get("created_before"),
+        ),
+        lambda: _response_status_payload(
+            client.review_queue_summary(
+                kb_id,
+                document_id=filters.get("document_id"),
+                origin=filters.get("origin"),
+                created_by=filters.get("created_by"),
+                created_after=filters.get("created_after"),
+                created_before=filters.get("created_before"),
+            )
+        ),
     )
     if status_code != 200 or not isinstance(payload, Mapping):
         return {}
@@ -1151,10 +1183,34 @@ def _pending_review_count(client: CogDocClient, kb_id: str | None) -> int:
 
 
 # 读取审核队列导出载荷。
-def _review_queue_export_payload(client: CogDocClient, kb_id: str) -> Mapping:
+def _review_queue_export_payload(
+    client: CogDocClient,
+    kb_id: str,
+    filters: Mapping | None = None,
+) -> Mapping:
+    filters = filters or {}
     status_code, payload = _cached_api_value(
-        ("review-queue-export", client.base_url, kb_id),
-        lambda: _response_status_payload(client.review_queue_export(kb_id, limit=500)),
+        (
+            "review-queue-export",
+            client.base_url,
+            kb_id,
+            filters.get("document_id"),
+            filters.get("origin"),
+            filters.get("created_by"),
+            filters.get("created_after"),
+            filters.get("created_before"),
+        ),
+        lambda: _response_status_payload(
+            client.review_queue_export(
+                kb_id,
+                limit=500,
+                knowledge_document_id=filters.get("document_id"),
+                knowledge_origin=filters.get("origin"),
+                knowledge_created_by=filters.get("created_by"),
+                knowledge_created_after=filters.get("created_after"),
+                knowledge_created_before=filters.get("created_before"),
+            )
+        ),
     )
     if status_code != 200 or not isinstance(payload, Mapping):
         return {}
@@ -1204,6 +1260,77 @@ def _feedback_loop_metrics(
 # 格式化页签计数。
 def _tab_label(label: str, count: int) -> str:
     return f"{label} ({count})" if count else label
+
+
+KNOWLEDGE_ORIGIN_LABELS = {
+    "": "全部来源",
+    "manual_entry": "手工新增",
+    "correction": "纠错",
+    "saved_answer": "保存答案",
+    "agent_suggested": "分析建议",
+}
+
+
+# 构建审核文档过滤选项。
+def _review_document_options(docs: list[Mapping]) -> dict[str, str]:
+    options = {"": "全部文档"}
+    for doc in docs:
+        name = str(doc.get("name") or "")
+        if name:
+            options.setdefault(name, name)
+        document_id = str(doc.get("document_id") or doc.get("id") or "")
+        if document_id:
+            label = f"{name} · {document_id}" if name else document_id
+            options.setdefault(document_id, label)
+    return options
+
+
+# 渲染审核范围过滤。
+def _render_review_filters(client: CogDocClient, kb_id: str) -> dict[str, str | bool]:
+    docs = _document_rows(client, kb_id)
+    doc_options = _review_document_options(docs)
+    with st.expander("审核范围", expanded=True):
+        first = st.columns([1, 1, 1])
+        document_id = first[0].selectbox(
+            "文档",
+            list(doc_options),
+            format_func=lambda value: doc_options[value],
+            key=f"review-filter-document-{kb_id}",
+        )
+        origin = first[1].selectbox(
+            "来源",
+            list(KNOWLEDGE_ORIGIN_LABELS),
+            format_func=lambda value: KNOWLEDGE_ORIGIN_LABELS[value],
+            key=f"review-filter-origin-{kb_id}",
+        )
+        created_by = first[2].text_input(
+            "创建者",
+            key=f"review-filter-created-by-{kb_id}",
+            placeholder="全部",
+        )
+        second = st.columns([1, 1, 1])
+        created_after = second[0].text_input(
+            "起始时间",
+            key=f"review-filter-created-after-{kb_id}",
+            placeholder="YYYY-MM-DD",
+        )
+        created_before = second[1].text_input(
+            "结束时间",
+            key=f"review-filter-created-before-{kb_id}",
+            placeholder="YYYY-MM-DD",
+        )
+        conflict_only = second[2].checkbox(
+            "只看冲突",
+            key=f"review-filter-conflict-{kb_id}",
+        )
+    return {
+        "document_id": document_id or "",
+        "origin": origin or "",
+        "created_by": created_by.strip(),
+        "created_after": created_after.strip(),
+        "created_before": created_before.strip(),
+        "has_conflict": conflict_only,
+    }
 
 
 # 清理检索调权反馈缓存。
@@ -1674,39 +1801,24 @@ def _render_knowledge_item(
 
 # 渲染知识审核列表。
 def _render_knowledge_review_list(
-    client: CogDocClient, kb_id: str, status: str, label: str
+    client: CogDocClient,
+    kb_id: str,
+    status: str,
+    label: str,
+    filters: Mapping | None = None,
 ) -> None:
-    origin_labels = {
-        "": "全部来源",
-        "manual_entry": "手工新增",
-        "correction": "纠错",
-        "saved_answer": "保存答案",
-        "agent_suggested": "分析建议",
-    }
-    filters = st.columns([1, 1, 1])
-    origin = filters[0].selectbox(
-        "来源",
-        list(origin_labels),
-        format_func=lambda value: origin_labels[value],
-        key=f"knowledge-origin-{status}-{kb_id}",
-    )
-    created_by = filters[1].text_input(
-        "创建者",
-        key=f"knowledge-created-by-{status}-{kb_id}",
-        placeholder="全部",
-    )
-    conflict_only = filters[2].checkbox(
-        "只看冲突",
-        key=f"knowledge-conflict-only-{status}-{kb_id}",
-    )
+    filters = filters or {}
     try:
         rows = _knowledge_rows(
             client,
             kb_id,
             status,
-            origin=origin or None,
-            created_by=created_by.strip() or None,
-            has_conflict=True if conflict_only else None,
+            document_id=filters.get("document_id") or None,
+            origin=filters.get("origin") or None,
+            created_by=filters.get("created_by") or None,
+            has_conflict=True if filters.get("has_conflict") else None,
+            created_after=filters.get("created_after") or None,
+            created_before=filters.get("created_before") or None,
         )
     except Exception as exc:
         st.warning(str(exc))
@@ -1961,8 +2073,14 @@ def _knowledge_area(kb_id: str | None) -> None:
         st.info("先选择知识库。")
         return
     client = _client()
+    review_filters = _render_review_filters(client, kb_id)
+    api_filters = {
+        key: value or None
+        for key, value in review_filters.items()
+        if key != "has_conflict"
+    }
     try:
-        summary = _review_queue_summary(client, kb_id)
+        summary = _review_queue_summary(client, kb_id, api_filters)
     except Exception:
         summary = {}
     answer_count = _answer_count_for(kb_id)
@@ -2006,7 +2124,7 @@ def _knowledge_area(kb_id: str | None) -> None:
             f"{_rate_label(rates.get('retrieval_feedback_rollback_rate'))}"
         )
     try:
-        export_payload = _review_queue_export_payload(client, kb_id)
+        export_payload = _review_queue_export_payload(client, kb_id, api_filters)
     except Exception:
         export_payload = {}
     export_cols = st.columns([1, 1, 4])
@@ -2044,9 +2162,11 @@ def _knowledge_area(kb_id: str | None) -> None:
     with create_tab:
         _render_create_knowledge(client, kb_id)
     with pending_tab:
-        _render_knowledge_review_list(client, kb_id, "pending", "待审核")
+        _render_knowledge_review_list(
+            client, kb_id, "pending", "待审核", review_filters
+        )
     with stale_tab:
-        _render_knowledge_review_list(client, kb_id, "stale", "过期")
+        _render_knowledge_review_list(client, kb_id, "stale", "过期", review_filters)
     with feedback_tab:
         _render_feedback_area(client, kb_id)
     with retrieval_tab:
