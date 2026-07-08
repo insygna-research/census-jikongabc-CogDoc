@@ -605,7 +605,12 @@ async def test_review_metrics_endpoints_report_feedback_loop(tmp_path, monkeypat
     app = _make_app(tmp_path, monkeypatch)
 
     app.state.feedback_store.record(
-        {"kb_id": "kb", "trace_id": "t1", "feedback": "thumbs_down"}
+        {
+            "kb_id": "kb",
+            "trace_id": "t1",
+            "feedback": "thumbs_down",
+            "feedback_type": "no_evidence",
+        }
     )
     app.state.feedback_store.record(
         {"kb_id": "kb", "trace_id": "t2", "feedback": "correction"}
@@ -671,8 +676,10 @@ async def test_review_metrics_endpoints_report_feedback_loop(tmp_path, monkeypat
     body = metrics.json()
     assert body["counts"]["feedback_total"] == 2
     assert body["counts"]["negative_feedback_total"] == 2
+    assert body["counts"]["no_evidence_feedback_total"] == 1
     assert body["rates"]["feedback_rate"] == 0.5
     assert body["rates"]["negative_feedback_rate"] == 0.5
+    assert body["rates"]["no_evidence_rate"] == 0.25
     assert body["rates"]["pending_rejection_rate"] == 0.5
     assert body["rates"]["feedback_to_pending_rate"] == 1.0
     assert body["rates"]["retrieval_feedback_rollback_rate"] == 1.0

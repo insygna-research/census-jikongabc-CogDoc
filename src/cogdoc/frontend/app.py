@@ -296,6 +296,7 @@ def _submit_feedback(
     correction: str | None = None,
     save_as_knowledge: bool = False,
     certainty: str | None = None,
+    feedback_type: str | None = None,
 ) -> None:
     trace_id = final.get("trace_id")
     if not trace_id:
@@ -312,7 +313,9 @@ def _submit_feedback(
         evidence=final.get("evidence") or [],
         comment=comment,
         correction=correction,
-        feedback_type="correction" if feedback == "correction" else None,
+        feedback_type=(
+            feedback_type or ("correction" if feedback == "correction" else None)
+        ),
         feedback_text=comment,
         correction_text=correction,
         save_as_knowledge=save_as_knowledge,
@@ -574,6 +577,16 @@ def _page_range_label(page_start, page_end=None) -> str:
     if page_start is None:
         return f"P{page_end}"
     return f"P{page_start}-{page_end}"
+
+
+# 判断回答是否缺少可用证据。
+def _is_no_evidence_final(final: Mapping) -> bool:
+    answer = str(final.get("answer") or "")
+    if not final.get("is_valid"):
+        return True
+    if not final.get("citations") and not final.get("evidence"):
+        return True
+    return "未明确" in answer or "无答案" in answer
 
 
 # 格式化引用来源标签。
@@ -842,6 +855,45 @@ def _render_evidence(final: dict, key: str, query: str = "") -> None:
         _send_feedback(final, query, "thumbs_up")
     if fb[1].button("👎", key=f"down-{key}"):
         _send_feedback(final, query, "thumbs_down")
+    if _is_no_evidence_final(final):
+        with st.expander("补充知识", expanded=True):
+            with st.form(f"no-evidence-knowledge-{key}", clear_on_submit=True):
+                supplement = st.text_area(
+                    "正确说法",
+                    key=f"no-evidence-correction-{key}",
+                    height=120,
+                )
+                note = st.text_area(
+                    "来源说明",
+                    value=f"补充自无答案问题：{query}" if query else "补充自无答案问题",
+                    key=f"no-evidence-note-{key}",
+                    height=68,
+                )
+                certainty = st.selectbox(
+                    "可信度",
+                    ["medium", "high", "low"],
+                    format_func=lambda value: {
+                        "high": "高",
+                        "medium": "中",
+                        "low": "低",
+                    }[value],
+                    key=f"no-evidence-certainty-{key}",
+                )
+                submitted = st.form_submit_button("保存为待审核知识")
+            if submitted:
+                if supplement.strip():
+                    _submit_feedback(
+                        final,
+                        query,
+                        "correction",
+                        comment=note.strip() or None,
+                        correction=supplement.strip(),
+                        save_as_knowledge=True,
+                        certainty=certainty,
+                        feedback_type="no_evidence",
+                    )
+                else:
+                    st.warning("请输入正确说法。")
     with st.expander("保存答案"):
         with st.form(f"save-answer-{key}", clear_on_submit=True):
             save_note = st.text_area("来源说明", key=f"save-note-{key}", height=80)
@@ -2118,6 +2170,8 @@ def _knowledge_area(kb_id: str | None) -> None:
             f"{_rate_label(rates.get('pending_approval_rate'))} · "
             "审核驳回率 "
             f"{_rate_label(rates.get('pending_rejection_rate'))} · "
+            "无答案反馈 "
+            f"{_rate_label(rates.get('no_evidence_rate'))} · "
             "反馈转知识 "
             f"{_rate_label(rates.get('feedback_to_pending_rate'))} · "
             "调权回滚 "

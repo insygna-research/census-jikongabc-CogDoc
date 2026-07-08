@@ -174,6 +174,7 @@ def test_feedback_client_sends_save_as_knowledge_payload(monkeypatch):
         trace_id="t1",
         feedback="correction",
         kb_id="kb",
+        feedback_type="no_evidence",
         correction_text="正确说法",
         save_as_knowledge=True,
         related_source="a.pdf",
@@ -189,6 +190,7 @@ def test_feedback_client_sends_save_as_knowledge_payload(monkeypatch):
     assert response.status_code == 201
     payload = calls[0][1]["json"]
     assert payload["save_as_knowledge"] is True
+    assert payload["feedback_type"] == "no_evidence"
     assert payload["correction_text"] == "正确说法"
     assert payload["related_source"] == "a.pdf"
     assert payload["related_chunk_ids"] == ["c1"]

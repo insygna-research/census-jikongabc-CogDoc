@@ -1,8 +1,15 @@
 from collections import Counter
+import hashlib
+import json
+import logging
+import os
 from typing import Any
 
 from cogdoc.api.derived_knowledge_store import DerivedKnowledgeStore
+from cogdoc.config.settings import get_settings
 from cogdoc.graph.state import RetrievedDoc
+from cogdoc.observability.logger import log_event
+from cogdoc.tools.retriever.retrieval_text import retrieval_text
 from cogdoc.tools.tokenizer import tokenize_mixed_text
 
 
@@ -13,13 +20,327 @@ def _int_or_zero(value: Any) -> int:
         return 0
 
 
+def _embedder():
+    from cogdoc.tools.embedder import Embedder
+
+    return Embedder
+
+
+def _collection_name(kb_id: str) -> str:
+    digest = hashlib.sha256(kb_id.encode("utf-8")).hexdigest()[:24]
+    return f"dk-{digest}"
+
+
+def _state_name(kb_id: str) -> str:
+    digest = hashlib.sha256(kb_id.encode("utf-8")).hexdigest()
+    return f"{digest}.json"
+
+
+def _json_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if isinstance(value, str) and value.strip():
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(decoded, list):
+            return [str(item) for item in decoded]
+    return []
+
+
+def _knowledge_doc(
+    row: dict[str, Any],
+    *,
+    score: float,
+    rank: int,
+    explanation: dict[str, Any],
+    search_channel: str,
+) -> RetrievedDoc:
+    knowledge_id = str(row.get("knowledge_id") or "")
+    related_source = str(row.get("related_source") or "")
+    chunk_ids = _json_list(row.get("related_chunk_ids"))
+    page_start = _int_or_zero(row.get("related_page_start"))
+    page_end = _int_or_zero(row.get("related_page_end"))
+    meta = {
+        "chunk_id": f"knowledge:{knowledge_id}",
+        "knowledge_id": knowledge_id,
+        "source_sha256": str(row.get("related_source_sha256") or ""),
+        "local_chunk_index": rank,
+        "chunk_index": rank,
+        "source": f"knowledge:{knowledge_id}",
+        "page": page_start,
+        "page_start": page_start,
+        "page_end": page_end,
+        "origin": str(row.get("origin") or "manual_entry"),
+        "source_type": "derived_knowledge",
+        "status": str(row.get("status") or ""),
+        "certainty": str(row.get("certainty") or ""),
+        "related_document_id": str(row.get("related_document_id") or ""),
+        "related_source": related_source,
+        "related_chunk_ids": chunk_ids,
+        "related_page_start": page_start,
+        "related_page_end": page_end,
+        "related_chunk_text_hash": str(row.get("related_chunk_text_hash") or ""),
+        "related_anchor_text": str(row.get("related_anchor_text") or ""),
+    }
+    if row.get("source_note"):
+        meta["context"] = str(row["source_note"])
+    return {
+        "text": str(row.get("text") or ""),
+        "meta": meta,
+        "retrieval": {
+            **explanation,
+            "knowledge_score": score,
+            "retrieval_score": score,
+            "search_channel": search_channel,
+            "status_filter": "approved",
+        },
+    }
+
+
+def _stored_meta(row: dict[str, Any], rank: int) -> dict[str, str | int]:
+    doc = _knowledge_doc(
+        row,
+        score=0.0,
+        rank=rank,
+        explanation={},
+        search_channel="derived_knowledge_embedding",
+    )
+    meta = doc["meta"]
+    stored = {
+        "knowledge_id": str(meta.get("knowledge_id") or ""),
+        "chunk_id": str(meta.get("chunk_id") or ""),
+        "source_sha256": str(meta.get("source_sha256") or ""),
+        "local_chunk_index": int(meta.get("local_chunk_index") or 0),
+        "chunk_index": int(meta.get("chunk_index") or 0),
+        "source": str(meta.get("source") or ""),
+        "page": int(meta.get("page") or 0),
+        "page_start": int(meta.get("page_start") or 0),
+        "page_end": int(meta.get("page_end") or 0),
+        "origin": str(meta.get("origin") or "manual_entry"),
+        "source_type": "derived_knowledge",
+        "status": str(meta.get("status") or ""),
+        "certainty": str(meta.get("certainty") or ""),
+        "related_document_id": str(meta.get("related_document_id") or ""),
+        "related_source": str(meta.get("related_source") or ""),
+        "related_chunk_ids": json.dumps(
+            meta.get("related_chunk_ids") or [], ensure_ascii=False
+        ),
+        "related_page_start": int(meta.get("related_page_start") or 0),
+        "related_page_end": int(meta.get("related_page_end") or 0),
+        "related_chunk_text_hash": str(meta.get("related_chunk_text_hash") or ""),
+        "related_anchor_text": str(meta.get("related_anchor_text") or ""),
+    }
+    if meta.get("context"):
+        stored["context"] = str(meta["context"])
+    return stored
+
+
+def _row_from_stored(text: str, meta: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "knowledge_id": str(meta.get("knowledge_id") or ""),
+        "text": text,
+        "related_source_sha256": str(meta.get("source_sha256") or ""),
+        "related_document_id": str(meta.get("related_document_id") or ""),
+        "related_source": str(meta.get("related_source") or ""),
+        "related_chunk_ids": _json_list(meta.get("related_chunk_ids")),
+        "related_page_start": _int_or_zero(meta.get("related_page_start")),
+        "related_page_end": _int_or_zero(meta.get("related_page_end")),
+        "related_chunk_text_hash": str(meta.get("related_chunk_text_hash") or ""),
+        "related_anchor_text": str(meta.get("related_anchor_text") or ""),
+        "source_note": str(meta.get("context") or ""),
+        "certainty": str(meta.get("certainty") or ""),
+        "status": str(meta.get("status") or ""),
+        "origin": str(meta.get("origin") or "manual_entry"),
+    }
+
+
+class DerivedKnowledgeIndex:
+    def __init__(
+        self,
+        store: DerivedKnowledgeStore | None = None,
+        *,
+        persist_directory: str | None = None,
+        state_directory: str | None = None,
+    ):
+        settings = get_settings()
+        self.store = store or DerivedKnowledgeStore()
+        self.persist_directory = persist_directory or settings.chroma_persist_dir
+        self.state_directory = state_directory or str(
+            settings.data_dir / "knowledge" / "derived_index_state"
+        )
+        os.makedirs(self.persist_directory, exist_ok=True)
+        os.makedirs(self.state_directory, exist_ok=True)
+        import chromadb
+
+        self.client = chromadb.PersistentClient(path=self.persist_directory)
+        self.embedder = _embedder()
+
+    def ensure_fresh(self, kb_id: str) -> None:
+        token = self.store.revision_token()
+        state = self._read_state(kb_id)
+        if (
+            state.get("revision_token") == token
+            and state.get("embedding_contract")
+            == self.embedder.EMBEDDING_CONTRACT_VERSION
+        ):
+            expected_count = _int_or_zero(state.get("count"))
+            if expected_count <= 0 or self._collection(kb_id).count() > 0:
+                return
+        self.rebuild(kb_id, revision_token=token)
+
+    def rebuild(self, kb_id: str, *, revision_token: str | None = None) -> None:
+        revision_token = revision_token or self.store.revision_token()
+        rows = self.store.list(kb_id=kb_id, status="approved")
+        collection = self._reset_collection(kb_id)
+        if rows:
+            docs = [
+                _knowledge_doc(
+                    row,
+                    score=0.0,
+                    rank=index,
+                    explanation={},
+                    search_channel="derived_knowledge_embedding",
+                )
+                for index, row in enumerate(rows)
+            ]
+            texts = [str(doc.get("text") or "") for doc in docs]
+            vector_texts = [retrieval_text(doc) for doc in docs]
+            embeddings = self.embedder.embed_documents(vector_texts)
+            collection.upsert(
+                ids=[str(row["knowledge_id"]) for row in rows],
+                embeddings=embeddings,
+                documents=texts,
+                metadatas=[_stored_meta(row, index) for index, row in enumerate(rows)],
+            )
+        self._write_state(
+            kb_id,
+            {
+                "revision_token": revision_token,
+                "embedding_contract": self.embedder.EMBEDDING_CONTRACT_VERSION,
+                "count": len(rows),
+            },
+        )
+
+    def search(self, kb_id: str, query: str, top_k: int) -> list[RetrievedDoc]:
+        collection = self._collection(kb_id)
+        if collection.count() <= 0:
+            return []
+        results = collection.query(
+            query_embeddings=[self.embedder.embed_query(query)],
+            n_results=top_k,
+        )
+        if not results or not results.get("documents") or not results["documents"][0]:
+            return []
+        docs = results["documents"][0]
+        metas = results["metadatas"][0]
+        distances = (results.get("distances") or [[0.0] * len(docs)])[0]
+        retrieved: list[RetrievedDoc] = []
+        for rank, text in enumerate(docs):
+            distance = float(distances[rank])
+            score = 1.0 / (1.0 + max(distance, 0.0))
+            row = _row_from_stored(str(text or ""), metas[rank])
+            retrieved.append(
+                _knowledge_doc(
+                    row,
+                    score=score,
+                    rank=rank,
+                    explanation={"distance": distance},
+                    search_channel="derived_knowledge_embedding",
+                )
+            )
+        return retrieved
+
+    def _collection(self, kb_id: str):
+        return self.client.get_or_create_collection(
+            name=_collection_name(kb_id),
+            metadata={
+                "source": "derived_knowledge",
+                "embedding_contract": self.embedder.EMBEDDING_CONTRACT_VERSION,
+            },
+        )
+
+    def _reset_collection(self, kb_id: str):
+        name = _collection_name(kb_id)
+        try:
+            self.client.delete_collection(name)
+        except Exception:
+            collection = self._collection(kb_id)
+            ids = collection.get(include=[]).get("ids") or []
+            if ids:
+                collection.delete(ids=ids)
+            return collection
+        return self._collection(kb_id)
+
+    def _state_path(self, kb_id: str) -> str:
+        return os.path.join(self.state_directory, _state_name(kb_id))
+
+    def _read_state(self, kb_id: str) -> dict[str, Any]:
+        path = self._state_path(kb_id)
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _write_state(self, kb_id: str, data: dict[str, Any]) -> None:
+        with open(self._state_path(kb_id), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, sort_keys=True)
+
+
 # 派生知识召回器，只读取已审核知识，不触碰原始文档索引。
 class DerivedKnowledgeRetriever:
-    def __init__(self, store: DerivedKnowledgeStore | None = None):
+    def __init__(
+        self,
+        store: DerivedKnowledgeStore | None = None,
+        *,
+        index: DerivedKnowledgeIndex | None = None,
+        enable_index: bool | None = None,
+    ):
         self.store = store or DerivedKnowledgeStore()
+        if index is not None:
+            self._index = index
+            self._index_enabled = True
+        elif enable_index is False or (enable_index is None and store is not None):
+            self._index = None
+            self._index_enabled = False
+        else:
+            self._index = None
+            self._index_enabled = True
 
     # 搜索已审核派生知识。
     def search(self, kb_id: str, query: str, top_k: int = 3) -> list[RetrievedDoc]:
+        index = self._index_or_none()
+        if index is not None:
+            try:
+                index.ensure_fresh(kb_id)
+                docs = index.search(kb_id, query, top_k)
+            except Exception as exc:
+                log_event(
+                    "retrieval",
+                    "derived_knowledge_index_failed",
+                    {},
+                    level=logging.WARNING,
+                    kb_id=kb_id,
+                    error_class=type(exc).__name__,
+                )
+            else:
+                if docs:
+                    return docs
+        return self._lexical_search(kb_id, query, top_k)
+
+    def _index_or_none(self) -> DerivedKnowledgeIndex | None:
+        if not self._index_enabled:
+            return None
+        if self._index is None:
+            self._index = DerivedKnowledgeIndex(self.store)
+        return self._index
+
+    def _lexical_search(self, kb_id: str, query: str, top_k: int) -> list[RetrievedDoc]:
         rows = self.store.list(kb_id=kb_id, status="approved")
         if not rows:
             return []
@@ -55,54 +376,12 @@ class DerivedKnowledgeRetriever:
 
         scored.sort(key=lambda item: item[0], reverse=True)
         return [
-            self._row_to_doc(row, score, rank, explanation)
+            _knowledge_doc(
+                row,
+                score=score,
+                rank=rank,
+                explanation=explanation,
+                search_channel="derived_knowledge",
+            )
             for rank, (score, row, explanation) in enumerate(scored[:top_k])
         ]
-
-    # 将派生知识记录转换成检索文档。
-    def _row_to_doc(
-        self,
-        row: dict[str, Any],
-        score: float,
-        rank: int,
-        explanation: dict[str, Any],
-    ) -> RetrievedDoc:
-        knowledge_id = str(row.get("knowledge_id") or "")
-        related_source = str(row.get("related_source") or "")
-        chunk_ids = [str(item) for item in row.get("related_chunk_ids") or []]
-        page_start = _int_or_zero(row.get("related_page_start"))
-        page_end = _int_or_zero(row.get("related_page_end"))
-        meta = {
-            "chunk_id": f"knowledge:{knowledge_id}",
-            "knowledge_id": knowledge_id,
-            "source_sha256": str(row.get("related_source_sha256") or ""),
-            "local_chunk_index": rank,
-            "chunk_index": rank,
-            "source": f"knowledge:{knowledge_id}",
-            "page": page_start,
-            "page_start": page_start,
-            "page_end": page_end,
-            "origin": str(row.get("origin") or "manual_entry"),
-            "source_type": "derived_knowledge",
-            "status": str(row.get("status") or ""),
-            "certainty": str(row.get("certainty") or ""),
-            "related_source": related_source,
-            "related_chunk_ids": chunk_ids,
-            "related_page_start": page_start,
-            "related_page_end": page_end,
-            "related_chunk_text_hash": str(row.get("related_chunk_text_hash") or ""),
-            "related_anchor_text": str(row.get("related_anchor_text") or ""),
-        }
-        if row.get("source_note"):
-            meta["context"] = str(row["source_note"])
-        return {
-            "text": str(row.get("text") or ""),
-            "meta": meta,
-            "retrieval": {
-                **explanation,
-                "knowledge_score": score,
-                "retrieval_score": score,
-                "search_channel": "derived_knowledge",
-                "status_filter": "approved",
-            },
-        }

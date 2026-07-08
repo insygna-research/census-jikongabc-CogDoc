@@ -46,3 +46,58 @@ def test_derived_knowledge_retriever_returns_approved_only(tmp_path):
     assert docs[0]["retrieval"]["query_term_count"] > 0
     assert docs[0]["retrieval"]["knowledge_term_count"] > 0
     assert "差旅" in docs[0]["retrieval"]["matched_terms"]
+
+
+class FakeIndex:
+    def __init__(self, docs=None, fail=False):
+        self.docs = docs or []
+        self.fail = fail
+        self.ensured = []
+
+    def ensure_fresh(self, kb_id):
+        self.ensured.append(kb_id)
+        if self.fail:
+            raise RuntimeError("index failed")
+
+    def search(self, kb_id, query, top_k):
+        return self.docs[:top_k]
+
+
+def test_derived_knowledge_retriever_prefers_index(tmp_path):
+    store = DerivedKnowledgeStore(path=str(tmp_path / "knowledge.jsonl"))
+    indexed_doc = {
+        "text": "向量索引知识",
+        "meta": {
+            "chunk_id": "knowledge:K1",
+            "knowledge_id": "K1",
+            "source_type": "derived_knowledge",
+        },
+        "retrieval": {"search_channel": "derived_knowledge_embedding"},
+    }
+    index = FakeIndex([indexed_doc])
+
+    docs = DerivedKnowledgeRetriever(store, index=index).search(
+        "kb", "任意问题", top_k=5
+    )
+
+    assert docs == [indexed_doc]
+    assert index.ensured == ["kb"]
+
+
+def test_derived_knowledge_retriever_falls_back_when_index_fails(tmp_path):
+    store = DerivedKnowledgeStore(path=str(tmp_path / "knowledge.jsonl"))
+    approved, _ = store.create(
+        {
+            "kb_id": "kb",
+            "text": "合同审批必须先完成法务复核。",
+            "status": "approved",
+        }
+    )
+
+    docs = DerivedKnowledgeRetriever(store, index=FakeIndex(fail=True)).search(
+        "kb", "合同审批法务", top_k=5
+    )
+
+    assert len(docs) == 1
+    assert docs[0]["meta"]["knowledge_id"] == approved["knowledge_id"]
+    assert docs[0]["retrieval"]["search_channel"] == "derived_knowledge"

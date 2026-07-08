@@ -210,11 +210,13 @@ async def feedback_loop_metrics(
     analysis = request.app.state.feedback_analysis_store.counts(kb_id=kb_id)
     retrieval = request.app.state.retrieval_feedback_store.counts(kb_id=kb_id)
     by_feedback = feedback["by_feedback"]
+    by_type = feedback["by_type"]
     by_status = knowledge["by_status"]
     by_action = analysis["by_action"]
     feedback_total = int(feedback["total"])
     negative_total = int(feedback["bad_cases"])
     correction_total = int(by_feedback.get("correction", 0))
+    no_evidence_total = int(by_type.get("no_evidence", 0))
     knowledge_total = int(knowledge["total"])
     approved_total = int(by_status.get(KnowledgeStatus.APPROVED.value, 0))
     rejected_total = int(by_status.get(KnowledgeStatus.REJECTED.value, 0))
@@ -229,6 +231,7 @@ async def feedback_loop_metrics(
             "answer_total": answer_count or 0,
             "feedback_total": feedback_total,
             "negative_feedback_total": negative_total,
+            "no_evidence_feedback_total": no_evidence_total,
             "correction_feedback_total": correction_total,
             "knowledge_total": knowledge_total,
             "approved_knowledge_total": approved_total,
@@ -242,6 +245,7 @@ async def feedback_loop_metrics(
         rates={
             "feedback_rate": _rate(feedback_total, answer_count),
             "negative_feedback_rate": _rate(negative_total, answer_count),
+            "no_evidence_rate": _rate(no_evidence_total, answer_count),
             "pending_approval_rate": _rate(approved_total, knowledge_total),
             "pending_rejection_rate": _rate(rejected_total, knowledge_total),
             "feedback_to_pending_rate": _rate(pending_created, correction_total),

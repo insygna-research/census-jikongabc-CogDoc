@@ -249,6 +249,14 @@ class DerivedKnowledgeStore:
         )
         return sorted_rows[:limit] if limit is not None else sorted_rows
 
+    # 返回存储文件修订标记，供外部索引判断是否需要刷新。
+    def revision_token(self) -> str:
+        with self._lock:
+            if not os.path.exists(self._path):
+                return "missing"
+            stat = os.stat(self._path)
+        return f"{stat.st_mtime_ns}:{stat.st_size}"
+
     # 统计知识审核队列。
     def counts(
         self,
