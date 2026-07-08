@@ -509,11 +509,15 @@ def test_knowledge_metrics_client_methods_call_expected_endpoints(monkeypatch):
 
     client = CogDocClient("http://api", api_key="secret")
     client.pending_knowledge_count("kb")
+    client.knowledge_index_status("kb")
     client.feedback_loop_metrics("kb", answer_count=20)
 
     assert calls[0][0] == "http://api/v1/knowledge/pending-count"
     assert calls[0][1]["headers"] == {"Authorization": "Bearer secret"}
     assert calls[0][1]["params"] == {"kb_id": "kb"}
-    assert calls[1][0] == "http://api/v1/feedback-loop-metrics"
+    assert calls[1][0] == "http://api/v1/knowledge/index-status"
     assert calls[1][1]["headers"] == {"Authorization": "Bearer secret"}
-    assert calls[1][1]["params"] == {"kb_id": "kb", "answer_count": 20}
+    assert calls[1][1]["params"] == {"kb_id": "kb"}
+    assert calls[2][0] == "http://api/v1/feedback-loop-metrics"
+    assert calls[2][1]["headers"] == {"Authorization": "Bearer secret"}
+    assert calls[2][1]["params"] == {"kb_id": "kb", "answer_count": 20}

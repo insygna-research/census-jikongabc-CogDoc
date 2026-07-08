@@ -1134,6 +1134,7 @@ def _stale_rebind_candidates(item: Mapping, chunks: list[Mapping]) -> list[Mappi
 # 清理知识缓存。
 def _clear_knowledge_cache(client: CogDocClient, kb_id: str) -> None:
     _clear_api_cache(("knowledge", client.base_url, kb_id))
+    _clear_api_cache(("knowledge-index-status", client.base_url, kb_id))
     _clear_api_cache(("review-queue", client.base_url, kb_id))
     _clear_api_cache(("review-queue-export", client.base_url, kb_id))
     _clear_api_cache(("pending-count", client.base_url, kb_id))
@@ -1307,6 +1308,27 @@ def _feedback_loop_metrics(
     if status_code != 200 or not isinstance(payload, Mapping):
         return {}
     return payload
+
+
+# 读取派生知识索引状态。
+def _knowledge_index_status(client: CogDocClient, kb_id: str) -> Mapping:
+    status_code, payload = _cached_api_value(
+        ("knowledge-index-status", client.base_url, kb_id),
+        lambda: _response_status_payload(client.knowledge_index_status(kb_id)),
+    )
+    if status_code != 200 or not isinstance(payload, Mapping):
+        return {}
+    return payload
+
+
+def _index_state_label(value) -> str:
+    labels = {
+        "fresh": "已同步",
+        "stale": "待刷新",
+        "missing": "未建立",
+        "error": "异常",
+    }
+    return labels.get(str(value or ""), str(value or "-"))
 
 
 # 格式化页签计数。
@@ -2140,6 +2162,10 @@ def _knowledge_area(kb_id: str | None) -> None:
         loop_metrics = _feedback_loop_metrics(client, kb_id, answer_count)
     except Exception:
         loop_metrics = {}
+    try:
+        index_status = _knowledge_index_status(client, kb_id)
+    except Exception:
+        index_status = {}
     pending_count = _summary_count(summary, "knowledge", "pending")
     stale_count = _summary_count(summary, "knowledge", "stale")
     auto_rebound_count = _summary_count(
@@ -2163,6 +2189,20 @@ def _knowledge_area(kb_id: str | None) -> None:
     metrics[3].metric("反馈分析", analysis_count, delta=needs_review_count)
     metrics[4].metric("检索调权", retrieval_count + retrieval_disabled_count)
     metrics[4].caption(f"启用 {retrieval_count} · 禁用 {retrieval_disabled_count}")
+    if isinstance(index_status, Mapping) and index_status:
+        state_label = _index_state_label(index_status.get("state"))
+        approved_index_count = index_status.get("approved_count", 0)
+        indexed_count = index_status.get("indexed_count", 0)
+        auto_refresh = "开" if index_status.get("auto_refresh_enabled") else "关"
+        st.caption(
+            f"知识索引 {state_label} · 已审 {approved_index_count} · "
+            f"已索引 {indexed_count} · 后台刷新 {auto_refresh}"
+        )
+        if index_status.get("last_error") or index_status.get("collection_error"):
+            st.caption(
+                "索引异常: "
+                f"{index_status.get('last_error') or index_status.get('collection_error')}"
+            )
     rates = loop_metrics.get("rates") if isinstance(loop_metrics, Mapping) else {}
     if isinstance(rates, Mapping):
         st.caption(

@@ -486,6 +486,15 @@ class CogDocClient:
             headers=self._headers,
         )
 
+    # 查询派生知识索引状态。
+    def knowledge_index_status(self, kb_id: str) -> httpx.Response:
+        return httpx.get(
+            self._url("/v1/knowledge/index-status"),
+            params={"kb_id": kb_id},
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
     # 查询反馈闭环指标。
     def feedback_loop_metrics(
         self,

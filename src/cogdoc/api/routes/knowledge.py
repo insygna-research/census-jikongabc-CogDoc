@@ -68,11 +68,24 @@ def _refresh_derived_knowledge_index(kb_id: str, store) -> None:
     DerivedKnowledgeIndex(store).rebuild(kb_id)
 
 
+# 查询派生知识索引状态。
+def _derived_knowledge_index_status(kb_id: str, store) -> dict:
+    from cogdoc.tools.retriever.derived_knowledge import DerivedKnowledgeIndex
+
+    return DerivedKnowledgeIndex(store).status(kb_id)
+
+
 # 容错刷新派生知识索引。
 def _refresh_derived_knowledge_index_quiet(refresher, kb_id: str, store) -> None:
     try:
         refresher(kb_id, store)
     except Exception as exc:
+        try:
+            from cogdoc.tools.retriever.derived_knowledge import DerivedKnowledgeIndex
+
+            DerivedKnowledgeIndex(store).record_error(kb_id, type(exc).__name__)
+        except Exception:
+            pass
         log_event(
             "knowledge",
             "derived_knowledge_index_refresh_failed",
@@ -113,6 +126,31 @@ def _queue_derived_knowledge_index_refresh(request: Request, kb_id: str | None) 
             kb_id=kb_id,
             error_class=type(exc).__name__,
         )
+
+
+# 查询派生知识索引状态。
+@router.get("/knowledge/index-status")
+async def knowledge_index_status(request: Request, kb_id: str = Query(min_length=1)):
+    statuser = (
+        getattr(request.app.state, "derived_knowledge_index_statuser", None)
+        or _derived_knowledge_index_status
+    )
+    try:
+        status = statuser(kb_id, request.app.state.knowledge_store)
+    except Exception as exc:
+        log_event(
+            "knowledge",
+            "derived_knowledge_index_status_failed",
+            {},
+            level=logging.WARNING,
+            kb_id=kb_id,
+            error_class=type(exc).__name__,
+        )
+        status = {"kb_id": kb_id, "state": "error", "error_class": type(exc).__name__}
+    status["auto_refresh_enabled"] = bool(
+        getattr(request.app.state, "derived_knowledge_index_auto_refresh", False)
+    )
+    return status
 
 
 # 完成 错误响应 处理。

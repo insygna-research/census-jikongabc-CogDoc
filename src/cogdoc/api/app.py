@@ -81,6 +81,7 @@ def create_app(
     retrieval_feedback_store: RetrievalFeedbackStore | None = None,
     webhook_dispatcher: WebhookDispatcher | None = None,
     derived_knowledge_index_refresher: Callable | None = None,
+    derived_knowledge_index_statuser: Callable | None = None,
     api_keys: set[str] | None = None,
     rate_limiter: TokenBucketRateLimiter | None = None,
     offload_workers: int | None = None,
@@ -232,6 +233,7 @@ def create_app(
         settings.cogdoc_derived_knowledge_index_auto_refresh
     )
     app.state.derived_knowledge_index_refresher = derived_knowledge_index_refresher
+    app.state.derived_knowledge_index_statuser = derived_knowledge_index_statuser
     resolved_keys = settings.api_key_set if api_keys is None else api_keys
     resolved_limiter = rate_limiter or build_rate_limiter(
         settings.rate_limit_per_minute, settings.rate_limit_burst

@@ -745,6 +745,35 @@ async def test_knowledge_review_queues_index_refresh(tmp_path, monkeypatch):
     assert refreshed == [("kb", app.state.knowledge_store)]
 
 
+# 验证派生知识索引状态接口场景。
+@pytest.mark.anyio
+async def test_knowledge_index_status_endpoint(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+
+    def fake_statuser(kb_id, store):
+        return {
+            "kb_id": kb_id,
+            "state": "fresh",
+            "approved_count": 2,
+            "indexed_count": 2,
+            "collection_name": "dk-test",
+        }
+
+    app.state.derived_knowledge_index_auto_refresh = True
+    app.state.derived_knowledge_index_statuser = fake_statuser
+
+    async with _client(app) as client:
+        status = await client.get("/v1/knowledge/index-status", params={"kb_id": "kb"})
+
+    assert status.status_code == 200
+    body = status.json()
+    assert body["kb_id"] == "kb"
+    assert body["state"] == "fresh"
+    assert body["approved_count"] == 2
+    assert body["indexed_count"] == 2
+    assert body["auto_refresh_enabled"] is True
+
+
 # 验证批量审核报告缺失标识场景。
 @pytest.mark.anyio
 async def test_batch_review_reports_missing_ids(tmp_path, monkeypatch):

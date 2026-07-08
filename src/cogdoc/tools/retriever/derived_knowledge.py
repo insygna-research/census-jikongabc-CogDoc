@@ -229,6 +229,47 @@ class DerivedKnowledgeIndex:
             },
         )
 
+    def status(self, kb_id: str) -> dict[str, Any]:
+        state = self._read_state(kb_id)
+        current_token = self.store.revision_token()
+        current_contract = self.embedder.EMBEDDING_CONTRACT_VERSION
+        approved_count = len(self.store.list(kb_id=kb_id, status="approved"))
+        indexed_count, collection_error = self._collection_count(kb_id)
+        state_count = _int_or_zero(state.get("count"))
+        is_fresh = (
+            state.get("revision_token") == current_token
+            and state.get("embedding_contract") == current_contract
+            and state_count == approved_count
+            and indexed_count == approved_count
+        )
+        if collection_error:
+            state_label = "error"
+        elif is_fresh:
+            state_label = "fresh"
+        elif state:
+            state_label = "stale"
+        else:
+            state_label = "missing"
+        return {
+            "kb_id": kb_id,
+            "state": state_label,
+            "current_revision_token": current_token,
+            "indexed_revision_token": state.get("revision_token"),
+            "embedding_contract": current_contract,
+            "indexed_embedding_contract": state.get("embedding_contract"),
+            "approved_count": approved_count,
+            "indexed_count": indexed_count,
+            "state_count": state_count,
+            "collection_name": _collection_name(kb_id),
+            "collection_error": collection_error,
+            "last_error": state.get("last_error"),
+        }
+
+    def record_error(self, kb_id: str, error_class: str) -> None:
+        state = self._read_state(kb_id)
+        state["last_error"] = error_class
+        self._write_state(kb_id, state)
+
     def search(self, kb_id: str, query: str, top_k: int) -> list[RetrievedDoc]:
         collection = self._collection(kb_id)
         if collection.count() <= 0:
@@ -278,6 +319,19 @@ class DerivedKnowledgeIndex:
                 collection.delete(ids=ids)
             return collection
         return self._collection(kb_id)
+
+    def _collection_count(self, kb_id: str) -> tuple[int, str | None]:
+        name = _collection_name(kb_id)
+        try:
+            names = {
+                str(getattr(collection, "name", collection))
+                for collection in self.client.list_collections()
+            }
+            if name not in names:
+                return 0, None
+            return int(self.client.get_collection(name).count()), None
+        except Exception as exc:
+            return 0, type(exc).__name__
 
     def _state_path(self, kb_id: str) -> str:
         return os.path.join(self.state_directory, _state_name(kb_id))
