@@ -263,6 +263,7 @@ CogDoc/
 | `COGDOC_WEBHOOK_SECRET` | unset | Optional shared secret sent with webhook requests |
 | `COGDOC_WEBHOOK_TIMEOUT_SECONDS` | `3` | Timeout for webhook delivery attempts |
 | `COGDOC_FEEDBACK_STORE` | `jsonl` | Feedback storage backend; set `sqlite` to use SQLite with JSONL export |
+| `COGDOC_DERIVED_KNOWLEDGE_INDEX_AUTO_REFRESH` | `false` | Auto-refresh vectors |
 | `COGDOC_API_KEYS` | unset | Comma-separated API keys; empty disables API auth |
 | `RATE_LIMIT_PER_MINUTE` | `120` | Token-bucket refill rate for protected API routes |
 | `RATE_LIMIT_BURST` | `120` | Token-bucket burst capacity; `<=0` disables rate limiting |

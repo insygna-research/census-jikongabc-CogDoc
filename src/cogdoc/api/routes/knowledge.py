@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
@@ -23,6 +25,7 @@ from cogdoc.api.schemas import (
 )
 from cogdoc.api.time_utils import now_iso
 from cogdoc.api.webhooks import notify_pending_created
+from cogdoc.observability.logger import log_event
 
 router = APIRouter(prefix="/v1", tags=["knowledge"])
 
@@ -37,6 +40,79 @@ def _rate(numerator: int, denominator: int | None) -> float | None:
     if denominator is None or denominator <= 0:
         return None
     return round(numerator / denominator, 4)
+
+
+# 读取服务端已记录回答数。
+def _stored_answer_count(request: Request, kb_id: str) -> int:
+    counter = getattr(request.app.state.session_store, "answer_count", None)
+    if not callable(counter):
+        return 0
+    try:
+        return int(counter(kb_id))
+    except Exception as exc:
+        log_event(
+            "knowledge",
+            "answer_count_failed",
+            {},
+            level=logging.WARNING,
+            kb_id=kb_id,
+            error_class=type(exc).__name__,
+        )
+        return 0
+
+
+# 重建派生知识索引。
+def _refresh_derived_knowledge_index(kb_id: str, store) -> None:
+    from cogdoc.tools.retriever.derived_knowledge import DerivedKnowledgeIndex
+
+    DerivedKnowledgeIndex(store).rebuild(kb_id)
+
+
+# 容错刷新派生知识索引。
+def _refresh_derived_knowledge_index_quiet(refresher, kb_id: str, store) -> None:
+    try:
+        refresher(kb_id, store)
+    except Exception as exc:
+        log_event(
+            "knowledge",
+            "derived_knowledge_index_refresh_failed",
+            {},
+            level=logging.WARNING,
+            kb_id=kb_id,
+            error_class=type(exc).__name__,
+        )
+
+
+# 后台刷新派生知识索引。
+def _queue_derived_knowledge_index_refresh(request: Request, kb_id: str | None) -> None:
+    if not kb_id:
+        return
+    if not getattr(request.app.state, "derived_knowledge_index_auto_refresh", False):
+        return
+    refresher = (
+        getattr(
+            request.app.state,
+            "derived_knowledge_index_refresher",
+            None,
+        )
+        or _refresh_derived_knowledge_index
+    )
+    try:
+        request.app.state.offload_executor.submit(
+            _refresh_derived_knowledge_index_quiet,
+            refresher,
+            kb_id,
+            request.app.state.knowledge_store,
+        )
+    except RuntimeError as exc:
+        log_event(
+            "knowledge",
+            "derived_knowledge_index_refresh_submit_failed",
+            {},
+            level=logging.WARNING,
+            kb_id=kb_id,
+            error_class=type(exc).__name__,
+        )
 
 
 # 完成 错误响应 处理。
@@ -140,6 +216,8 @@ async def create_knowledge(body: KnowledgeCreateRequest, request: Request):
     )
     if not deduplicated:
         notify_pending_created(request.app, row, "knowledge_create")
+    if not deduplicated and row.get("status") == KnowledgeStatus.APPROVED.value:
+        _queue_derived_knowledge_index_refresh(request, row.get("kb_id"))
     return KnowledgeCreateResponse(
         knowledge=_public(row),
         deduplicated=deduplicated,
@@ -204,6 +282,8 @@ async def feedback_loop_metrics(
     kb_id: str = Query(min_length=1),
     answer_count: int | None = Query(default=None, ge=0),
 ):
+    answer_total = max(answer_count or 0, _stored_answer_count(request, kb_id))
+    answer_denominator = answer_total if answer_total > 0 else None
     feedback = request.app.state.feedback_store.counts(kb_id=kb_id)
     knowledge = request.app.state.knowledge_store.counts(kb_id=kb_id)
     stale_review = request.app.state.knowledge_store.stale_review_counts(kb_id=kb_id)
@@ -228,7 +308,7 @@ async def feedback_loop_metrics(
     return FeedbackLoopMetricsResponse(
         kb_id=kb_id,
         counts={
-            "answer_total": answer_count or 0,
+            "answer_total": answer_total,
             "feedback_total": feedback_total,
             "negative_feedback_total": negative_total,
             "no_evidence_feedback_total": no_evidence_total,
@@ -243,9 +323,9 @@ async def feedback_loop_metrics(
             "stale_knowledge_reviewed": stale_reviewed,
         },
         rates={
-            "feedback_rate": _rate(feedback_total, answer_count),
-            "negative_feedback_rate": _rate(negative_total, answer_count),
-            "no_evidence_rate": _rate(no_evidence_total, answer_count),
+            "feedback_rate": _rate(feedback_total, answer_denominator),
+            "negative_feedback_rate": _rate(negative_total, answer_denominator),
+            "no_evidence_rate": _rate(no_evidence_total, answer_denominator),
             "pending_approval_rate": _rate(approved_total, knowledge_total),
             "pending_rejection_rate": _rate(rejected_total, knowledge_total),
             "feedback_to_pending_rate": _rate(pending_created, correction_total),
@@ -386,6 +466,7 @@ def _set_status(request: Request, knowledge_id: str, status: str, body):
         return _error(ErrorCode.BAD_REQUEST, str(exc), 400)
     if row is None:
         return _error(ErrorCode.KNOWLEDGE_NOT_FOUND, f"知识不存在: {knowledge_id}", 404)
+    _queue_derived_knowledge_index_refresh(request, row.get("kb_id"))
     return _public(row)
 
 
@@ -448,6 +529,8 @@ async def revise_knowledge(
     if row is None:
         return _error(ErrorCode.KNOWLEDGE_NOT_FOUND, f"知识不存在: {knowledge_id}", 404)
     notify_pending_created(request.app, row, "knowledge_revision")
+    if row.get("status") == KnowledgeStatus.APPROVED.value:
+        _queue_derived_knowledge_index_refresh(request, row.get("kb_id"))
     return KnowledgeCreateResponse(knowledge=_public(row), deduplicated=False)
 
 
@@ -459,6 +542,8 @@ def _batch_set_status(request: Request, body: KnowledgeBatchReviewRequest, statu
         )
     except ValueError as exc:
         return _error(ErrorCode.BAD_REQUEST, str(exc), 400)
+    for kb_id in {str(row.get("kb_id") or "") for row in updated if row.get("kb_id")}:
+        _queue_derived_knowledge_index_refresh(request, kb_id)
     return KnowledgeBatchReviewResponse(
         updated=[_public(row) for row in updated], missing_ids=missing
     )

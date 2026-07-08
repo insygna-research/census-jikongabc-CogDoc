@@ -10,6 +10,7 @@ def test_derived_knowledge_retriever_returns_approved_only(tmp_path):
             "kb_id": "kb",
             "text": "差旅报销需要在七天内提交。",
             "status": "approved",
+            "version": 2,
             "certainty": "high",
             "related_source": "policy.pdf",
             "related_source_sha256": "sha",
@@ -32,6 +33,8 @@ def test_derived_knowledge_retriever_returns_approved_only(tmp_path):
 
     assert len(docs) == 1
     assert docs[0]["meta"]["knowledge_id"] == approved["knowledge_id"]
+    assert docs[0]["meta"]["kb_id"] == "kb"
+    assert docs[0]["meta"]["version"] == 2
     assert docs[0]["meta"]["source_type"] == "derived_knowledge"
     assert docs[0]["meta"]["source"] == f"knowledge:{approved['knowledge_id']}"
     assert docs[0]["meta"]["related_chunk_ids"] == ["chunk-1"]

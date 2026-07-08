@@ -25,6 +25,7 @@ def test_session_survives_new_store_instance(tmp_path):
     assert sessions[0]["session_id"] == "s1"
     assert sessions[0]["title"] == "今年营收多少"
     assert sessions[0]["message_count"] == 2
+    assert reopened.answer_count("kb") == 1
 
 
 # 验证 session record appends across turns 场景。

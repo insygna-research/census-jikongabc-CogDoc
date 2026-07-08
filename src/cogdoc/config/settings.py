@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     cogdoc_feedback_store: str = Field(
         default="jsonl", validation_alias="COGDOC_FEEDBACK_STORE"
     )
+    cogdoc_derived_knowledge_index_auto_refresh: bool = Field(
+        default=False,
+        validation_alias="COGDOC_DERIVED_KNOWLEDGE_INDEX_AUTO_REFRESH",
+    )
     cogdoc_trace_enabled: bool = Field(
         default=True, validation_alias="COGDOC_TRACE_ENABLED"
     )

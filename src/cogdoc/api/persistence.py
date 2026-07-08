@@ -185,6 +185,21 @@ class SqliteSessionStore:
                 )
             return sessions
 
+    # 统计已记录回答数。
+    def answer_count(self, doc_id: str) -> int:
+        with self._lock:
+            self._purge_expired_locked()
+            rows = self._conn.execute(
+                "SELECT display FROM sessions WHERE doc_id=?",
+                (doc_id,),
+            ).fetchall()
+            return sum(
+                1
+                for (display_json,) in rows
+                for message in json.loads(display_json)
+                if message.get("role") == "assistant"
+            )
+
     # 清理 expired locked。
     def _purge_expired_locked(self) -> None:
         if self.ttl_seconds <= 0:

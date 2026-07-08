@@ -65,6 +65,8 @@ def _knowledge_doc(
     meta = {
         "chunk_id": f"knowledge:{knowledge_id}",
         "knowledge_id": knowledge_id,
+        "kb_id": str(row.get("kb_id") or ""),
+        "version": _int_or_zero(row.get("version")) or 1,
         "source_sha256": str(row.get("related_source_sha256") or ""),
         "local_chunk_index": rank,
         "chunk_index": rank,
@@ -110,6 +112,8 @@ def _stored_meta(row: dict[str, Any], rank: int) -> dict[str, str | int]:
     meta = doc["meta"]
     stored = {
         "knowledge_id": str(meta.get("knowledge_id") or ""),
+        "kb_id": str(meta.get("kb_id") or ""),
+        "version": int(meta.get("version") or 1),
         "chunk_id": str(meta.get("chunk_id") or ""),
         "source_sha256": str(meta.get("source_sha256") or ""),
         "local_chunk_index": int(meta.get("local_chunk_index") or 0),
@@ -140,6 +144,8 @@ def _stored_meta(row: dict[str, Any], rank: int) -> dict[str, str | int]:
 def _row_from_stored(text: str, meta: dict[str, Any]) -> dict[str, Any]:
     return {
         "knowledge_id": str(meta.get("knowledge_id") or ""),
+        "kb_id": str(meta.get("kb_id") or ""),
+        "version": _int_or_zero(meta.get("version")) or 1,
         "text": text,
         "related_source_sha256": str(meta.get("source_sha256") or ""),
         "related_document_id": str(meta.get("related_document_id") or ""),

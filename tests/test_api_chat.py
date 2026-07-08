@@ -334,6 +334,29 @@ def test_session_store_uses_doc_id_in_key_and_evicts_oldest():
     assert store.get_history("kb-b", "s1") == [{"role": "user", "content": "b"}]
 
 
+# 验证会话存储统计助手回答数场景。
+def test_session_store_counts_assistant_answers():
+    store = SessionStore(max_sessions=10, ttl_seconds=3600)
+    store.record(
+        "kb",
+        "s1",
+        [],
+        [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": "b"},
+        ],
+    )
+    store.record(
+        "kb",
+        "s2",
+        [],
+        [{"role": "assistant", "content": "c"}],
+    )
+    store.record("other", "s1", [], [{"role": "assistant", "content": "d"}])
+
+    assert store.answer_count("kb") == 2
+
+
 # 验证 session store purges expired history 场景。
 def test_session_store_purges_expired_history():
     store = SessionStore(max_sessions=10, ttl_seconds=1)

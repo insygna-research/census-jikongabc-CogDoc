@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from threading import Event
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -685,6 +686,63 @@ async def test_review_metrics_endpoints_report_feedback_loop(tmp_path, monkeypat
     assert body["rates"]["retrieval_feedback_rollback_rate"] == 1.0
     assert body["rates"]["stale_review_completion_rate"] == 0.0
     assert reviewed_metrics.json()["rates"]["stale_review_completion_rate"] == 1.0
+
+
+# 验证反馈闭环指标使用服务端回答数兜底场景。
+@pytest.mark.anyio
+async def test_feedback_loop_metrics_uses_session_answer_count(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    app.state.session_store.record(
+        "kb",
+        "s1",
+        [],
+        [
+            {"role": "user", "content": "问题一"},
+            {"role": "assistant", "content": "回答一"},
+            {"role": "user", "content": "问题二"},
+            {"role": "assistant", "content": "回答二"},
+        ],
+    )
+    app.state.feedback_store.record(
+        {"kb_id": "kb", "trace_id": "t1", "feedback": "thumbs_down"}
+    )
+
+    async with _client(app) as client:
+        metrics = await client.get("/v1/feedback-loop-metrics", params={"kb_id": "kb"})
+
+    assert metrics.status_code == 200
+    body = metrics.json()
+    assert body["counts"]["answer_total"] == 2
+    assert body["rates"]["feedback_rate"] == 0.5
+    assert body["rates"]["negative_feedback_rate"] == 0.5
+
+
+# 验证审核通过后投递派生知识索引刷新场景。
+@pytest.mark.anyio
+async def test_knowledge_review_queues_index_refresh(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    refreshed = []
+    done = Event()
+
+    def fake_refresher(kb_id, store):
+        refreshed.append((kb_id, store))
+        done.set()
+
+    app.state.derived_knowledge_index_auto_refresh = True
+    app.state.derived_knowledge_index_refresher = fake_refresher
+
+    async with _client(app) as client:
+        created = await client.post(
+            "/v1/knowledge",
+            json={"kb_id": "kb", "text": "需要审核的知识。"},
+        )
+        knowledge_id = created.json()["knowledge"]["knowledge_id"]
+        approved = await client.post(f"/v1/knowledge/{knowledge_id}/approve", json={})
+
+        assert approved.status_code == 200
+        assert done.wait(1.0)
+
+    assert refreshed == [("kb", app.state.knowledge_store)]
 
 
 # 验证批量审核报告缺失标识场景。
