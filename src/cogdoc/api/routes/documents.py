@@ -1,7 +1,5 @@
 import asyncio
 import os
-from collections.abc import Mapping
-from typing import Any
 from fastapi import APIRouter, File, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from cogdoc.api.ingest import KBExistsError
@@ -23,7 +21,10 @@ from cogdoc.service.ingest_service import (
     KBCleanupError,
     delete_kb_index_transactional,
     mark_kb_deleted,
-    _chunk_text_hash,
+)
+from cogdoc.service.source_chunks import (
+    chunk_preview,
+    source_chunks as read_source_chunks,
 )
 from cogdoc.service.kb_locks import kb_write_lock
 from cogdoc.service.kb_state import KBState
@@ -89,8 +90,6 @@ def _delete_kb(
 
 
 _PDF_MAGIC = b"%PDF"
-_CHUNK_PREVIEW_CHARS = 360
-_CONTEXT_PREVIEW_CHARS = 180
 _ERROR_RESPONSES = {
     400: {"model": ErrorResponse},
     404: {"model": ErrorResponse},
@@ -128,11 +127,6 @@ def _kb_documents(kb_id: str) -> list[Document]:
     ]
 
 
-# 构建短文本预览。
-def _preview(text: Any, limit: int) -> str:
-    return " ".join(("" if text is None else str(text)).split())[:limit]
-
-
 # 读取知识库来源文件列表。
 def _kb_sources(kb_id: str) -> list[str]:
     from cogdoc.graph.subgraphs.qa import RetrieverFactory
@@ -140,38 +134,6 @@ def _kb_sources(kb_id: str) -> list[str]:
 
     with kb_read_lease(kb_id):
         return RetrieverFactory.get_engine(kb_id).list_sources()
-
-
-# 读取来源文件分块。
-def _source_chunks(kb_id: str, source: str) -> list[dict]:
-    from cogdoc.graph.subgraphs.qa import RetrieverFactory
-    from cogdoc.service.kb_readers import kb_read_lease
-
-    with kb_read_lease(kb_id):
-        return RetrieverFactory.get_engine(kb_id).load_source_chunks(source)
-
-
-# 构建 chunk 预览。
-def _chunk_preview(
-    doc: Mapping[str, Any], anchor_text: str | None = None
-) -> ChunkPreview:
-    meta = doc.get("meta") if isinstance(doc.get("meta"), Mapping) else {}
-    page = meta.get("page")
-    text = str(doc.get("text") or "")
-    anchor = str(anchor_text or "").strip()
-    return ChunkPreview(
-        chunk_id=str(meta.get("chunk_id", "")),
-        chunk_index=meta.get("chunk_index"),
-        source=str(meta.get("source", "") or ""),
-        source_sha256=str(meta.get("source_sha256", "") or ""),
-        page=page,
-        page_start=meta.get("page_start", page),
-        page_end=meta.get("page_end", page),
-        text_hash=_chunk_text_hash(text),
-        anchor_hit=bool(anchor and anchor in text),
-        text_preview=_preview(text, _CHUNK_PREVIEW_CHARS),
-        context_preview=_preview(meta.get("context", ""), _CONTEXT_PREVIEW_CHARS),
-    )
 
 
 # 创建 knowledge base。
@@ -286,7 +248,9 @@ async def source_chunks(
     if not request.app.state.kb_registry.exists(kb_id):
         return _error(ErrorCode.KB_NOT_FOUND, f"知识库不存在: {kb_id}", 404)
     loop = asyncio.get_running_loop()
-    chunks_reader = getattr(request.app.state, "source_chunks_reader", _source_chunks)
+    chunks_reader = getattr(
+        request.app.state, "source_chunks_reader", read_source_chunks
+    )
     chunks = await loop.run_in_executor(
         request.app.state.offload_executor, chunks_reader, kb_id, source
     )
@@ -297,7 +261,7 @@ async def source_chunks(
         total_count=len(chunks),
         offset=offset,
         limit=limit,
-        chunks=[_chunk_preview(chunk, anchor_text) for chunk in window],
+        chunks=[chunk_preview(chunk, anchor_text) for chunk in window],
     )
 
 

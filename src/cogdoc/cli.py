@@ -1,5 +1,8 @@
+import argparse
 import atexit
+import json
 import os
+import shlex
 import shutil
 import signal
 import sys
@@ -11,8 +14,14 @@ except ImportError:
     readline = None
 
 from cogdoc.agents.conversation_memory import extract_final_answer
+from cogdoc.agents.feedback_understanding import analyze_feedback
+from cogdoc.api.derived_knowledge_store import DerivedKnowledgeStore
+from cogdoc.api.feedback_analysis_store import FeedbackAnalysisStore
+from cogdoc.api.feedback_store import FeedbackStore
 from cogdoc.api.ingest import KBExistsError, KnowledgeBaseRegistry
 from cogdoc.api.persistence import SqliteSessionStore
+from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
+from cogdoc.api.time_utils import now_iso
 from cogdoc.command_modes import parse_forced_mode
 from cogdoc.config.settings import get_settings
 from cogdoc.graph.subgraphs.qa import RetrieverFactory
@@ -39,6 +48,7 @@ from cogdoc.service.process_lock import (
 from cogdoc.tools.embedder import Embedder
 from cogdoc.tools.manifest import load_index_manifest
 from cogdoc.tools.reranker import BGEReranker
+from cogdoc.tools.retriever.derived_knowledge import DerivedKnowledgeIndex
 from cogdoc.tools.rust_core_loader import ensure_rust_core
 
 # Tab 补全的命令与 /kb 子命令候选。
@@ -53,6 +63,11 @@ COMPLETION_COMMANDS = [
     "/chats",
     "/open",
     "/rmchat",
+    "/dk",
+    "/knowledge",
+    "/feedback",
+    "/tuning",
+    "/review",
     "/local",
     "/cloud",
     "/config",
@@ -64,6 +79,27 @@ COMPLETION_COMMANDS = [
     "quit",
 ]
 KB_SUBCOMMANDS = ["new", "use", "rm", "list"]
+DK_SUBCOMMANDS = [
+    "list",
+    "show",
+    "add",
+    "save-answer",
+    "correction",
+    "no-evidence",
+    "approve",
+    "reject",
+    "archive",
+    "delete",
+    "revise",
+    "candidates",
+    "stale-scan",
+    "status",
+    "batch-approve",
+    "batch-reject",
+]
+FEEDBACK_SUBCOMMANDS = ["list", "analysis"]
+TUNING_SUBCOMMANDS = ["list", "enable", "disable"]
+REVIEW_SUBCOMMANDS = ["summary", "metrics", "export"]
 rust_core = None
 
 
@@ -137,6 +173,33 @@ HELP_TEXT = """\
     /chats                 列出当前库的历史对话
     /open <对话ID>         打开/恢复历史对话（支持 ID 前缀）
     /rmchat <对话ID>       删除一个对话（需确认）
+  派生知识（针对当前知识库）
+    /dk                    列出待审核/过期派生知识（/knowledge 同义）
+    /dk list [状态]        列出派生知识，支持 --doc/--origin/--created-by/--conflict/--from/--to
+    /dk show <ID>          查看派生知识详情
+    /dk add <文本>         新增待审核派生知识，支持 --origin/--source/--chunk-ids/--page-start/--page-end/--chunk-hash/--anchor/--note/--certainty
+    /dk save-answer [文本] 将当前对话最后一条答案保存为派生知识（origin=saved_answer）
+    /dk correction <文本>  记录纠错反馈并创建派生知识（origin=correction）
+    /dk no-evidence <文本> 记录无依据补充并创建派生知识（origin=no_evidence，不进调权）
+    /dk approve <ID>       通过派生知识并刷新派生知识索引，支持重绑字段与 --note
+    /dk reject <ID>        驳回派生知识，支持 --note
+    /dk archive <ID>       归档派生知识并刷新派生知识索引，支持 --note
+    /dk delete <ID>        删除派生知识（需确认）
+    /dk revise <ID> <文本> 基于已通过/过期知识创建修订草稿，支持重绑字段
+    /dk candidates <ID>   查看过期知识新版分块候选
+    /dk stale-scan         扫描并标记过期派生知识
+    /dk status             查看派生知识索引状态
+    /dk batch-approve <ID...> / batch-reject <ID...>
+  反馈与调权
+    /feedback list         查看用户反馈记录，支持 thumbs_up/thumbs_down/correction
+    /feedback analysis     查看反馈分析记录
+    /tuning list           查看检索调权，支持 enabled/disabled/all
+    /tuning enable <ID>    启用调权
+    /tuning disable <ID>   禁用调权
+  审核看板
+    /review summary        审核队列摘要
+    /review metrics        反馈闭环指标
+    /review export         导出审核队列 JSON
   模式与强制意图
     /local  /cloud         切换本地 Ollama / 云端 API（云端缺 key 会提示配置）
     /config                配置云端 Base URL / 模型 / API Key（写入 .env）
@@ -157,6 +220,11 @@ class Console:
         settings = get_settings()
         self.registry = KnowledgeBaseRegistry()
         self.sessions = SqliteSessionStore(settings.state_db_path)
+        self.knowledge_store = DerivedKnowledgeStore()
+        self.knowledge_index = DerivedKnowledgeIndex(self.knowledge_store)
+        self.feedback_store = FeedbackStore()
+        self.feedback_analysis_store = FeedbackAnalysisStore()
+        self.retrieval_feedback_store = RetrievalFeedbackStore()
         # 用绝对路径，提示与列表里一眼看清 PDF 该放哪。
         self.inbox_dir = os.path.abspath(settings.cogdoc_doc_dir)
         self.active_kb: str | None = None
@@ -431,6 +499,1050 @@ class Console:
             self.active_session_id = None
         print(f"🗑️ 已删除对话 {sid[:8]}。")
 
+    # 派生知识命令。
+
+    # 刷新派生知识索引。
+    def _refresh_derived_knowledge_index(self, kb_id: str) -> None:
+        try:
+            self.knowledge_index.rebuild(kb_id)
+            print("🔄 派生知识索引已刷新。")
+        except Exception as exc:
+            print(f"⚠️ 派生知识索引刷新失败，后续检索仍会尝试自动刷新: {exc}")
+
+    # 格式化派生知识摘要。
+    def _knowledge_title(self, item: dict) -> str:
+        text = str(item.get("text") or "").replace("\n", " ")
+        return text[:80] + ("..." if len(text) > 80 else "")
+
+    # 解析派生知识命令参数。
+    def _parse_dk_args(self, prog: str, tokens: list[str], configure):
+        parser = argparse.ArgumentParser(prog=prog, add_help=True)
+        configure(parser)
+        try:
+            return parser.parse_args(tokens)
+        except SystemExit:
+            return None
+
+    # 拆分逗号列表。
+    def _split_csv(self, value: str | None) -> list[str]:
+        if not value:
+            return []
+        return [part.strip() for part in value.split(",") if part.strip()]
+
+    # 解析可选整数。
+    def _optional_int(self, value: str | None) -> int | None:
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except ValueError:
+            raise ValueError(f"必须是整数: {value}") from None
+
+    # 当前库文档哈希。
+    def _document_sha(self, source: str | None) -> str | None:
+        if not source or not self.active_kb:
+            return None
+        for doc in _kb_documents(self.active_kb):
+            if doc.get("name") == source:
+                return str(doc.get("sha256") or "") or None
+        return None
+
+    # 派生知识绑定字段参数。
+    def _add_binding_args(self, parser) -> None:
+        parser.add_argument("--doc-id")
+        parser.add_argument("--source")
+        parser.add_argument("--source-sha")
+        parser.add_argument("--chunk-ids")
+        parser.add_argument("--page-start")
+        parser.add_argument("--page-end")
+        parser.add_argument("--chunk-hash")
+        parser.add_argument("--anchor")
+
+    # 从参数构造绑定字段。
+    def _binding_payload(self, opts) -> dict:
+        source = getattr(opts, "source", None)
+        return {
+            "related_document_id": getattr(opts, "doc_id", None),
+            "related_source": source,
+            "related_source_sha256": getattr(opts, "source_sha", None)
+            or self._document_sha(source),
+            "related_chunk_ids": self._split_csv(getattr(opts, "chunk_ids", None)),
+            "related_page_start": self._optional_int(getattr(opts, "page_start", None)),
+            "related_page_end": self._optional_int(getattr(opts, "page_end", None)),
+            "related_chunk_text_hash": getattr(opts, "chunk_hash", None),
+            "related_anchor_text": getattr(opts, "anchor", None),
+        }
+
+    # 基于绑定字段构造反馈引用目标。
+    def _feedback_refs(self, binding: dict) -> list[dict]:
+        source = binding.get("related_source")
+        chunk_ids = binding.get("related_chunk_ids") or []
+        return [
+            {
+                "chunk_id": chunk_id,
+                "source": source,
+                "source_type": "document",
+            }
+            for chunk_id in chunk_ids
+        ]
+
+    # 输出 JSON。
+    def _print_json(self, payload: dict) -> None:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+
+    # 当前对话最后一条助手消息。
+    def _last_assistant_message(self) -> dict | None:
+        if not self.active_kb or not self.active_session_id:
+            return None
+        messages = self.sessions.get_display(self.active_kb, self.active_session_id)
+        for message in reversed(messages):
+            if message.get("role") == "assistant":
+                return message
+        return None
+
+    # 创建派生知识并提示。
+    def _create_derived_knowledge(self, payload: dict) -> dict | None:
+        try:
+            row, deduplicated = self.knowledge_store.create(payload)
+        except ValueError as exc:
+            print(f"❌ 创建派生知识失败: {exc}")
+            return None
+        except Exception as exc:
+            print(f"❌ 创建派生知识异常: {exc}")
+            return None
+        marker = "（已存在，未重复新增）" if deduplicated else ""
+        print(f"✅ 已保存为待审核派生知识: {row['knowledge_id']} {marker}")
+        return row
+
+    # 记录反馈，并按需要创建分析、调权和派生知识。
+    def _record_feedback_flow(
+        self,
+        *,
+        feedback_type: str,
+        correction: str,
+        comment: str | None,
+        binding: dict,
+        skip_retrieval_feedback: bool,
+        certainty: str,
+        query: str | None = None,
+        answer: str | None = None,
+        trace_id: str | None = None,
+    ) -> None:
+        trace = trace_id or f"cli-{uuid4().hex}"
+        refs = self._feedback_refs(binding)
+        payload = {
+            "trace_id": trace,
+            "feedback": "correction",
+            "kb_id": self.active_kb,
+            "session_id": self.active_session_id,
+            "query": query,
+            "answer": answer,
+            "citations": refs,
+            "evidence": refs,
+            "feedback_type": feedback_type,
+            "feedback_text": comment,
+            "comment": comment,
+            "correction_text": correction,
+            "correction": correction,
+            "save_as_knowledge": True,
+            "skip_retrieval_feedback": skip_retrieval_feedback,
+            "certainty": certainty,
+            "created_by": "cli",
+            **binding,
+        }
+        payload = {
+            key: value for key, value in payload.items() if value not in (None, "")
+        }
+        try:
+            result = self.feedback_store.record(payload)
+        except Exception as exc:
+            print(f"❌ 反馈记录失败: {exc}")
+            return
+        feedback_id = result["feedback_id"]
+        if not skip_retrieval_feedback:
+            try:
+                self.retrieval_feedback_store.record_from_feedback(feedback_id, payload)
+            except Exception as exc:
+                print(f"⚠️ 调权记录失败，反馈已保留: {exc}")
+        try:
+            analysis = analyze_feedback(payload)
+            self.feedback_analysis_store.record(feedback_id, payload, analysis)
+        except Exception as exc:
+            print(f"⚠️ 反馈分析失败，原始反馈已保留: {exc}")
+        row = self._create_derived_knowledge(
+            {
+                "kb_id": self.active_kb,
+                "text": correction,
+                "status": "pending",
+                "origin": feedback_type,
+                "source_note": comment,
+                "certainty": certainty,
+                "created_from_trace_id": trace,
+                "created_by": "cli",
+                **binding,
+            }
+        )
+        if row is not None:
+            print(f"📝 反馈已记录: {feedback_id}")
+
+    # 输出派生知识详情。
+    def _print_knowledge_detail(self, item: dict) -> None:
+        print(f"ID: {item.get('knowledge_id')}")
+        print(f"状态: {item.get('status')}  版本: {item.get('version')}")
+        print(f"来源: {item.get('origin')}  可信度: {item.get('certainty')}")
+        print(f"创建: {item.get('created_by') or '-'}  {item.get('created_at') or '-'}")
+        if item.get("reviewed_by") or item.get("review_note"):
+            print(
+                f"审核: {item.get('reviewed_by') or '-'}  "
+                f"{item.get('reviewed_at') or '-'}  {item.get('review_note') or '-'}"
+            )
+        if item.get("conflict_group_id"):
+            print(f"冲突组: {item.get('conflict_group_id')}")
+        print("绑定:")
+        print(f"  文档标识: {item.get('related_document_id') or '-'}")
+        print(f"  关联文档: {item.get('related_source') or '-'}")
+        print(f"  文档哈希: {item.get('related_source_sha256') or '-'}")
+        print(f"  分块: {', '.join(item.get('related_chunk_ids') or []) or '-'}")
+        print(
+            f"  页码: {item.get('related_page_start') or '-'}"
+            f" - {item.get('related_page_end') or '-'}"
+        )
+        print(f"  分块哈希: {item.get('related_chunk_text_hash') or '-'}")
+        print(f"  锚点: {item.get('related_anchor_text') or '-'}")
+        if item.get("source_note"):
+            print(f"来源说明: {item.get('source_note')}")
+        print("内容:")
+        print(str(item.get("text") or ""))
+
+    # 按 ID 读取派生知识。
+    def _get_knowledge(self, knowledge_id: str) -> dict | None:
+        if not self.active_kb:
+            return None
+        for item in self.knowledge_store.list(kb_id=self.active_kb):
+            if item.get("knowledge_id") == knowledge_id:
+                return item
+        return None
+
+    # 查找过期知识新版分块候选。
+    def _stale_rebind_candidates(self, item: dict) -> list[dict]:
+        source = str(item.get("related_source") or "")
+        if not source:
+            return []
+        from cogdoc.service.source_chunks import chunk_preview, source_chunks
+
+        anchor = str(item.get("related_anchor_text") or "").strip() or None
+        try:
+            chunks = [
+                chunk_preview(chunk, anchor).model_dump()
+                for chunk in source_chunks(self.active_kb, source)
+            ]
+        except Exception as exc:
+            print(f"⚠️ 读取来源分块失败: {exc}")
+            return []
+        related_page = self._optional_int(str(item.get("related_page_start") or ""))
+        scored = []
+        for chunk in chunks:
+            page = self._optional_int(
+                str(chunk.get("page_start") or chunk.get("page") or "")
+            )
+            anchor_hit = bool(chunk.get("anchor_hit"))
+            page_hit = related_page is not None and page == related_page
+            if not anchor_hit and not page_hit:
+                continue
+            scored.append((0 if anchor_hit else 1, chunk))
+        return [chunk for _, chunk in sorted(scored, key=lambda pair: pair[0])[:3]]
+
+    # 输出派生知识列表。
+    def _print_knowledge_rows(self, rows: list[dict]) -> None:
+        if not rows:
+            print("（没有匹配的派生知识。）")
+            return
+        for item in rows:
+            conflict = (
+                f" 冲突:{item.get('conflict_group_id')}"
+                if item.get("conflict_group_id")
+                else ""
+            )
+            source = item.get("related_source") or "-"
+            print(
+                f"• {item.get('knowledge_id')} "
+                f"[{item.get('status')}] v{item.get('version')} "
+                f"{item.get('origin')}/{item.get('certainty')} "
+                f"来源:{source}{conflict}"
+            )
+            print(f"  {self._knowledge_title(item)}")
+
+    # 派生知识计数。
+    def _print_dk_counts(
+        self,
+        *,
+        document_id: str | None = None,
+        origin: str | None = None,
+        created_by: str | None = None,
+        has_conflict: bool | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
+    ) -> None:
+        counts = self.knowledge_store.counts(
+            kb_id=self.active_kb,
+            document_id=document_id,
+            origin=origin,
+            created_by=created_by,
+            has_conflict=has_conflict,
+            created_after=created_after,
+            created_before=created_before,
+        )
+        by_status = counts.get("by_status", {})
+        by_origin = counts.get("by_origin", {})
+        print(
+            "派生知识统计: "
+            f"总数 {counts.get('total', 0)} · "
+            f"待审核 {by_status.get('pending', 0)} · "
+            f"已通过 {by_status.get('approved', 0)} · "
+            f"过期 {by_status.get('stale', 0)} · "
+            f"已驳回 {by_status.get('rejected', 0)} · "
+            f"已归档 {by_status.get('archived', 0)}"
+        )
+        if by_origin:
+            parts = [f"{key}:{value}" for key, value in sorted(by_origin.items())]
+            print("来源: " + " · ".join(parts))
+
+    # 处理派生知识命令。
+    def cmd_dk(self, arg: str) -> None:
+        if not self._require_kb():
+            return
+        try:
+            tokens = shlex.split(arg)
+        except ValueError as exc:
+            print(f"❌ 参数解析失败: {exc}")
+            return
+        sub = tokens[0].lower() if tokens else ""
+        rest = tokens[1:]
+        if sub in ("", "list"):
+            opts = self._parse_dk_args(
+                "/dk list",
+                rest,
+                lambda parser: (
+                    parser.add_argument(
+                        "status",
+                        nargs="?",
+                        choices=[
+                            "review",
+                            "all",
+                            "pending",
+                            "approved",
+                            "stale",
+                            "rejected",
+                            "archived",
+                        ],
+                    ),
+                    parser.add_argument("--doc"),
+                    parser.add_argument("--origin"),
+                    parser.add_argument("--created-by"),
+                    parser.add_argument("--conflict", action="store_true"),
+                    parser.add_argument("--from", dest="created_after"),
+                    parser.add_argument("--to", dest="created_before"),
+                ),
+            )
+            if opts is None:
+                return
+            filters = {
+                "document_id": opts.doc,
+                "origin": opts.origin,
+                "created_by": opts.created_by,
+                "has_conflict": True if opts.conflict else None,
+                "created_after": opts.created_after,
+                "created_before": opts.created_before,
+            }
+            self._print_dk_counts(**filters)
+            status = opts.status
+            if status in (None, "review"):
+                rows = self.knowledge_store.list(
+                    kb_id=self.active_kb, status="pending", **filters
+                )
+                rows.extend(
+                    self.knowledge_store.list(
+                        kb_id=self.active_kb, status="stale", **filters
+                    )
+                )
+            else:
+                rows = self.knowledge_store.list(
+                    kb_id=self.active_kb,
+                    status=None if status == "all" else status,
+                    **filters,
+                )
+            self._print_knowledge_rows(rows)
+            return
+        if sub == "show":
+            knowledge_id = rest[0] if rest else ""
+            if not knowledge_id:
+                print("用法: /dk show <知识ID>")
+                return
+            item = self._get_knowledge(knowledge_id)
+            if item is None:
+                print(f"⚠️ 找不到派生知识: {knowledge_id}")
+                return
+            self._print_knowledge_detail(item)
+            return
+        if sub == "add":
+
+            def configure(parser):
+                self._add_binding_args(parser)
+                parser.add_argument("--note")
+                parser.add_argument(
+                    "--certainty",
+                    choices=["high", "medium", "low"],
+                    default="medium",
+                )
+                parser.add_argument(
+                    "--origin",
+                    choices=[
+                        "manual_entry",
+                        "correction",
+                        "no_evidence",
+                        "saved_answer",
+                        "agent_suggested",
+                    ],
+                    default="manual_entry",
+                )
+                parser.add_argument("text", nargs="*")
+
+            opts = self._parse_dk_args("/dk add", rest, configure)
+            if opts is None:
+                return
+            text = " ".join(opts.text).strip()
+            if not text:
+                print("用法: /dk add <派生知识文本>")
+                return
+            try:
+                binding = self._binding_payload(opts)
+            except ValueError as exc:
+                print(f"❌ 新增失败: {exc}")
+                return
+            try:
+                row, deduplicated = self.knowledge_store.create(
+                    {
+                        "kb_id": self.active_kb,
+                        "text": text,
+                        "status": "pending",
+                        "origin": opts.origin,
+                        "source_note": opts.note,
+                        "certainty": opts.certainty,
+                        "created_by": "cli",
+                        **binding,
+                    }
+                )
+            except ValueError as exc:
+                print(f"❌ 新增失败: {exc}")
+                return
+            marker = "（已存在，未重复新增）" if deduplicated else ""
+            print(f"✅ 已保存为待审核派生知识: {row['knowledge_id']} {marker}")
+            return
+        if sub == "save-answer":
+
+            def configure(parser):
+                self._add_binding_args(parser)
+                parser.add_argument("--note")
+                parser.add_argument(
+                    "--certainty",
+                    choices=["high", "medium", "low"],
+                    default="medium",
+                )
+                parser.add_argument("text", nargs="*")
+
+            opts = self._parse_dk_args("/dk save-answer", rest, configure)
+            if opts is None:
+                return
+            last = self._last_assistant_message()
+            text = " ".join(opts.text).strip()
+            if not text and last:
+                text = str(last.get("content") or "").strip()
+            if not text:
+                if self.active_session_id is None:
+                    print(
+                        "当前没有打开对话。请先提问，或用 /open <对话ID> 打开历史对话。"
+                    )
+                else:
+                    print(
+                        "当前对话还没有 AI 回答。请先完成一轮问答，或直接传入答案文本。"
+                    )
+                print("用法: /dk save-answer [答案文本]")
+                return
+            try:
+                binding = self._binding_payload(opts)
+            except ValueError as exc:
+                print(f"❌ 保存失败: {exc}")
+                return
+            self._create_derived_knowledge(
+                {
+                    "kb_id": self.active_kb,
+                    "text": text,
+                    "status": "pending",
+                    "origin": "saved_answer",
+                    "source_note": opts.note,
+                    "certainty": opts.certainty,
+                    "created_from_trace_id": str(last.get("trace_id") or "")
+                    if last
+                    else None,
+                    "created_by": "cli",
+                    **binding,
+                }
+            )
+            return
+        if sub in ("correction", "no-evidence"):
+
+            def configure(parser):
+                self._add_binding_args(parser)
+                parser.add_argument("--query")
+                parser.add_argument("--answer")
+                parser.add_argument("--trace-id")
+                parser.add_argument("--comment")
+                parser.add_argument(
+                    "--certainty",
+                    choices=["high", "medium", "low"],
+                    default="medium",
+                )
+                parser.add_argument("text", nargs="*")
+
+            opts = self._parse_dk_args(f"/dk {sub}", rest, configure)
+            if opts is None:
+                return
+            correction = " ".join(opts.text).strip()
+            if not correction:
+                print(f"用法: /dk {sub} <正确说法>")
+                return
+            try:
+                binding = self._binding_payload(opts)
+            except ValueError as exc:
+                print(f"❌ 提交失败: {exc}")
+                return
+            if not binding.get("related_chunk_ids"):
+                print(
+                    "❌ 请传 --chunk-ids 关联被纠错/补充的分块；"
+                    "没有分块上下文时请用 /dk add 或 /dk save-answer。"
+                )
+                return
+            feedback_type = "no_evidence" if sub == "no-evidence" else "correction"
+            self._record_feedback_flow(
+                feedback_type=feedback_type,
+                correction=correction,
+                comment=opts.comment,
+                binding=binding,
+                skip_retrieval_feedback=(feedback_type == "no_evidence"),
+                certainty=opts.certainty,
+                query=opts.query,
+                answer=opts.answer,
+                trace_id=opts.trace_id,
+            )
+            return
+        if sub in ("approve", "reject", "archive"):
+
+            def configure(parser):
+                parser.add_argument("knowledge_id")
+                parser.add_argument("--note")
+                self._add_binding_args(parser)
+
+            opts = self._parse_dk_args(f"/dk {sub}", rest, configure)
+            if opts is None:
+                return
+            knowledge_id = opts.knowledge_id
+            if not knowledge_id:
+                print(f"用法: /dk {sub} <知识ID>")
+                return
+            try:
+                binding = self._binding_payload(opts)
+            except ValueError as exc:
+                print(f"❌ 审核失败: {exc}")
+                return
+            binding = {
+                key: value
+                for key, value in binding.items()
+                if value not in (None, [], "")
+            }
+            row = self.knowledge_store.set_status(
+                knowledge_id,
+                {"approve": "approved", "reject": "rejected", "archive": "archived"}[
+                    sub
+                ],
+                actor="cli",
+                note=opts.note,
+                binding_updates=binding or None,
+            )
+            if row is None:
+                print(f"⚠️ 找不到派生知识: {knowledge_id}")
+                return
+            action_label = {"approve": "通过", "reject": "驳回", "archive": "归档"}[sub]
+            print(f"✅ 已{action_label}: {knowledge_id}")
+            if sub in ("approve", "archive"):
+                self._refresh_derived_knowledge_index(
+                    str(row.get("kb_id") or self.active_kb)
+                )
+            return
+        if sub == "delete":
+            knowledge_id = rest[0] if rest else ""
+            if not knowledge_id:
+                print("用法: /dk delete <知识ID>")
+                return
+            if not self._confirm(f"确认删除派生知识 {knowledge_id}？此操作不可恢复"):
+                print("已取消。")
+                return
+            row = self.knowledge_store.delete(knowledge_id)
+            if row is None:
+                print(f"⚠️ 找不到派生知识: {knowledge_id}")
+                return
+            print(f"🗑️ 已删除派生知识: {knowledge_id}")
+            self._refresh_derived_knowledge_index(
+                str(row.get("kb_id") or self.active_kb)
+            )
+            return
+        if sub == "revise":
+
+            def configure(parser):
+                parser.add_argument("knowledge_id")
+                self._add_binding_args(parser)
+                parser.add_argument("--note")
+                parser.add_argument(
+                    "--certainty",
+                    choices=["high", "medium", "low"],
+                    default="medium",
+                )
+                parser.add_argument("text", nargs="*")
+
+            opts = self._parse_dk_args("/dk revise", rest, configure)
+            if opts is None:
+                return
+            if not opts.text:
+                print("用法: /dk revise <知识ID> <新文本>")
+                return
+            knowledge_id = opts.knowledge_id
+            text = " ".join(opts.text).strip()
+            try:
+                binding = self._binding_payload(opts)
+            except ValueError as exc:
+                print(f"❌ 修订失败: {exc}")
+                return
+            try:
+                row = self.knowledge_store.revise(
+                    knowledge_id,
+                    {
+                        "text": text,
+                        "status": "pending",
+                        "source_note": opts.note,
+                        "certainty": opts.certainty,
+                        "created_by": "cli",
+                        **binding,
+                    },
+                )
+            except ValueError as exc:
+                print(f"❌ 修订失败: {exc}")
+                return
+            if row is None:
+                print(f"⚠️ 找不到派生知识: {knowledge_id}")
+                return
+            print(f"✅ 已创建修订草稿: {row['knowledge_id']}（原知识 {knowledge_id}）")
+            return
+        if sub in ("batch-approve", "batch-reject"):
+            ids = rest
+            if not ids:
+                print(f"用法: /dk {sub} <知识ID...>")
+                return
+            status = "approved" if sub == "batch-approve" else "rejected"
+            updated, missing = self.knowledge_store.batch_set_status(
+                ids,
+                status,
+                actor="cli",
+            )
+            print(f"✅ 已处理 {len(updated)} 条。")
+            if missing:
+                print("未找到: " + ", ".join(missing))
+            if status == "approved" and updated:
+                self._refresh_derived_knowledge_index(self.active_kb)
+            return
+        if sub == "candidates":
+            knowledge_id = rest[0] if rest else ""
+            if not knowledge_id:
+                print("用法: /dk candidates <知识ID>")
+                return
+            item = self._get_knowledge(knowledge_id)
+            if item is None:
+                print(f"⚠️ 找不到派生知识: {knowledge_id}")
+                return
+            candidates = self._stale_rebind_candidates(item)
+            if not candidates:
+                print("（未找到可直接确认的新版分块候选。）")
+                return
+            for idx, chunk in enumerate(candidates, start=1):
+                chunk_id = str(chunk.get("chunk_id") or "")
+                page_start = chunk.get("page_start", chunk.get("page"))
+                page_end = chunk.get("page_end", page_start)
+                print(
+                    f"候选 {idx}: chunk={chunk_id or '-'} "
+                    f"page={page_start or '-'}-{page_end or '-'} "
+                    f"sha={chunk.get('source_sha256') or '-'} "
+                    f"hash={chunk.get('text_hash') or '-'}"
+                )
+                print(f"  {chunk.get('text_preview') or ''}")
+                print(
+                    "  采用: "
+                    f"/dk approve {knowledge_id} --source {item.get('related_source')} "
+                    f"--source-sha {chunk.get('source_sha256') or ''} "
+                    f"--chunk-ids {chunk_id} --page-start {page_start or ''} "
+                    f"--page-end {page_end or ''} --chunk-hash {chunk.get('text_hash') or ''} "
+                    "--note 采用候选分块复核通过"
+                )
+            return
+        if sub == "stale-scan":
+            stale = self.knowledge_store.mark_stale_by_documents(
+                self.active_kb,
+                _kb_documents(self.active_kb),
+            )
+            print(f"✅ 过期派生知识扫描完成，新增标记 {len(stale)} 条。")
+            if stale:
+                self._print_knowledge_rows(stale)
+                self._refresh_derived_knowledge_index(self.active_kb)
+            return
+        if sub == "status":
+            try:
+                status = self.knowledge_index.status(self.active_kb)
+            except Exception as exc:
+                print(f"❌ 读取派生知识索引状态失败: {exc}")
+                return
+            print(
+                f"派生知识索引: {status.get('state')} · "
+                f"已通过 {status.get('approved_count')} · "
+                f"已索引 {status.get('indexed_count')} · "
+                f"collection {status.get('collection_name')}"
+            )
+            if status.get("last_error") or status.get("collection_error"):
+                print(
+                    f"错误: last={status.get('last_error') or '-'} "
+                    f"collection={status.get('collection_error') or '-'}"
+                )
+            return
+        print("❓ 未知 /dk 子命令。输入 /help 查看派生知识命令。")
+
+    # 打印反馈记录。
+    def _print_feedback_rows(self, rows: list[dict]) -> None:
+        if not rows:
+            print("（没有匹配的反馈。）")
+            return
+        for row in rows:
+            title = (
+                f"• {row.get('feedback_id')} [{row.get('feedback')}] "
+                f"{row.get('feedback_type') or '-'} trace:{row.get('trace_id') or '-'}"
+            )
+            print(title)
+            if row.get("query"):
+                print(f"  Q: {row.get('query')}")
+            if row.get("correction"):
+                print(f"  纠正: {row.get('correction')}")
+            elif row.get("comment"):
+                print(f"  备注: {row.get('comment')}")
+
+    # 反馈记录命令。
+    def cmd_feedback(self, arg: str) -> None:
+        if not self._require_kb():
+            return
+        try:
+            tokens = shlex.split(arg)
+        except ValueError as exc:
+            print(f"❌ 参数解析失败: {exc}")
+            return
+        sub = tokens[0].lower() if tokens else "list"
+        rest = tokens[1:]
+        if sub == "list":
+
+            def configure(parser):
+                parser.add_argument(
+                    "feedback",
+                    nargs="?",
+                    choices=["all", "thumbs_up", "thumbs_down", "correction"],
+                    default="all",
+                )
+                parser.add_argument("--type")
+                parser.add_argument("--trace-id")
+                parser.add_argument("--session-id")
+                parser.add_argument("--bad-case", action="store_true")
+                parser.add_argument("--limit", type=int, default=100)
+
+            opts = self._parse_dk_args("/feedback list", rest, configure)
+            if opts is None:
+                return
+            rows = self.feedback_store.list(
+                kb_id=self.active_kb,
+                feedback=None if opts.feedback == "all" else opts.feedback,
+                feedback_type=opts.type,
+                trace_id=opts.trace_id,
+                session_id=opts.session_id,
+                is_bad_case=True if opts.bad_case else None,
+                limit=opts.limit,
+            )
+            self._print_feedback_rows(rows)
+            return
+        if sub == "analysis":
+
+            def configure(parser):
+                parser.add_argument("--action")
+                parser.add_argument("--trace-id")
+                parser.add_argument("--needs-review", action="store_true")
+                parser.add_argument("--limit", type=int, default=100)
+
+            opts = self._parse_dk_args("/feedback analysis", rest, configure)
+            if opts is None:
+                return
+            rows = self.feedback_analysis_store.list(
+                kb_id=self.active_kb,
+                trace_id=opts.trace_id,
+                recommended_action=opts.action,
+                needs_review=True if opts.needs_review else None,
+                limit=opts.limit,
+            )
+            if not rows:
+                print("（没有匹配的反馈分析。）")
+                return
+            for row in rows:
+                print(
+                    f"• {row.get('feedback_analysis_id')} "
+                    f"{row.get('feedback_type')} · {row.get('recommended_action')} · "
+                    f"{row.get('confidence')}"
+                )
+                if row.get("extracted_claim"):
+                    print(f"  {row.get('extracted_claim')}")
+            return
+        print("❓ 未知 /feedback 子命令。可用: list / analysis")
+
+    # 打印调权记录。
+    def _print_tuning_rows(self, rows: list[dict]) -> None:
+        if not rows:
+            print("（没有匹配的调权。）")
+            return
+        for row in rows:
+            status = "启用" if row.get("enabled") is True else "禁用"
+            chunks = row.get("target_chunks") or []
+            chunk_count = row.get("chunk_count") or len(chunks) or 1
+            print(
+                f"• {row.get('retrieval_feedback_id')} {status} "
+                f"{row.get('weight_delta')} · {chunk_count} 个分块"
+            )
+            if row.get("query_text"):
+                print(f"  Q: {row.get('query_text')}")
+            if chunks:
+                print(
+                    "  分块: "
+                    + ", ".join(str(item.get("chunk_id")) for item in chunks[:8])
+                )
+
+    # 检索调权命令。
+    def cmd_tuning(self, arg: str) -> None:
+        if not self._require_kb():
+            return
+        try:
+            tokens = shlex.split(arg)
+        except ValueError as exc:
+            print(f"❌ 参数解析失败: {exc}")
+            return
+        sub = tokens[0].lower() if tokens else "list"
+        rest = tokens[1:]
+        if sub == "list":
+
+            def configure(parser):
+                parser.add_argument(
+                    "status",
+                    nargs="?",
+                    choices=["enabled", "disabled", "all"],
+                    default="enabled",
+                )
+                parser.add_argument("--limit", type=int, default=100)
+
+            opts = self._parse_dk_args("/tuning list", rest, configure)
+            if opts is None:
+                return
+            enabled = None
+            if opts.status == "enabled":
+                enabled = True
+            elif opts.status == "disabled":
+                enabled = False
+            rows = self.retrieval_feedback_store.list(
+                kb_id=self.active_kb,
+                enabled=enabled,
+                limit=opts.limit,
+            )
+            counts = self.retrieval_feedback_store.counts(kb_id=self.active_kb)
+            print(
+                f"调权统计: 总数 {counts['total']} · "
+                f"启用 {counts['enabled']} · 禁用 {counts['disabled']}"
+            )
+            self._print_tuning_rows(rows)
+            return
+        if sub in ("enable", "disable"):
+            feedback_id = rest[0] if rest else ""
+            if not feedback_id:
+                print(f"用法: /tuning {sub} <调权ID>")
+                return
+            reason = " ".join(rest[1:]).strip() or None
+            row = self.retrieval_feedback_store.set_enabled(
+                feedback_id,
+                sub == "enable",
+                actor="cli",
+                reason=reason,
+            )
+            if row is None:
+                print(f"⚠️ 找不到调权记录: {feedback_id}")
+                return
+            print(f"✅ 已{'启用' if sub == 'enable' else '禁用'}调权: {feedback_id}")
+            return
+        print("❓ 未知 /tuning 子命令。可用: list / enable / disable")
+
+    # 审核队列摘要。
+    def _review_summary_payload(self) -> dict:
+        knowledge = self.knowledge_store.counts(kb_id=self.active_kb)
+        conflicts = self.knowledge_store.conflict_counts(kb_id=self.active_kb)
+        auto_review = self.knowledge_store.auto_review_counts(kb_id=self.active_kb)
+        feedback = self.feedback_store.counts(kb_id=self.active_kb)
+        analysis = self.feedback_analysis_store.counts(kb_id=self.active_kb)
+        retrieval = self.retrieval_feedback_store.counts(kb_id=self.active_kb)
+        return {
+            "kb_id": self.active_kb,
+            "knowledge": knowledge["by_status"],
+            "knowledge_total": knowledge["total"],
+            "knowledge_origin": knowledge["by_origin"],
+            "knowledge_conflicts": conflicts,
+            "knowledge_auto_review": {
+                **auto_review,
+                "stale_pending": int(knowledge["by_status"].get("stale", 0)),
+            },
+            "feedback_counts": feedback,
+            "feedback_analysis": {
+                **analysis["by_action"],
+                "needs_review": analysis["needs_review"],
+                "total": analysis["total"],
+            },
+            "feedback_analysis_type": analysis["by_type"],
+            "retrieval_feedback": retrieval,
+        }
+
+    # 反馈闭环指标。
+    def _review_metrics_payload(self, answer_count: int | None = None) -> dict:
+        answer_total = max(
+            answer_count or 0, self.sessions.answer_count(self.active_kb)
+        )
+        denominator = answer_total if answer_total > 0 else None
+        feedback = self.feedback_store.counts(kb_id=self.active_kb)
+        knowledge = self.knowledge_store.counts(kb_id=self.active_kb)
+        analysis = self.feedback_analysis_store.counts(kb_id=self.active_kb)
+        retrieval = self.retrieval_feedback_store.counts(kb_id=self.active_kb)
+        stale_review = self.knowledge_store.stale_review_counts(kb_id=self.active_kb)
+
+        def rate(num: int, den: int | None):
+            return None if not den else round(num / den, 4)
+
+        by_feedback = feedback["by_feedback"]
+        by_type = feedback["by_type"]
+        by_status = knowledge["by_status"]
+        by_action = analysis["by_action"]
+        feedback_total = int(feedback["total"])
+        negative_total = int(feedback["bad_cases"])
+        correction_total = int(by_feedback.get("correction", 0))
+        no_evidence_total = int(by_type.get("no_evidence", 0))
+        knowledge_total = int(knowledge["total"])
+        approved_total = int(by_status.get("approved", 0))
+        rejected_total = int(by_status.get("rejected", 0))
+        pending_created = int(by_action.get("create_pending_knowledge", 0))
+        retrieval_total = int(retrieval["total"])
+        retrieval_disabled = int(retrieval["disabled"])
+        stale_total = int(stale_review["total"])
+        stale_reviewed = int(stale_review["reviewed"])
+        return {
+            "kb_id": self.active_kb,
+            "counts": {
+                "answer_total": answer_total,
+                "feedback_total": feedback_total,
+                "negative_feedback_total": negative_total,
+                "no_evidence_feedback_total": no_evidence_total,
+                "correction_feedback_total": correction_total,
+                "knowledge_total": knowledge_total,
+                "approved_knowledge_total": approved_total,
+                "rejected_knowledge_total": rejected_total,
+                "pending_created_total": pending_created,
+                "retrieval_feedback_total": retrieval_total,
+                "retrieval_feedback_disabled": retrieval_disabled,
+                "stale_knowledge_total": stale_total,
+                "stale_knowledge_reviewed": stale_reviewed,
+            },
+            "rates": {
+                "feedback_rate": rate(feedback_total, denominator),
+                "negative_feedback_rate": rate(negative_total, denominator),
+                "no_evidence_rate": rate(no_evidence_total, denominator),
+                "pending_approval_rate": rate(approved_total, knowledge_total),
+                "pending_rejection_rate": rate(rejected_total, knowledge_total),
+                "feedback_to_pending_rate": rate(pending_created, correction_total),
+                "retrieval_feedback_rollback_rate": rate(
+                    retrieval_disabled, retrieval_total
+                ),
+                "stale_review_completion_rate": rate(stale_reviewed, stale_total),
+            },
+        }
+
+    # 审核看板命令。
+    def cmd_review(self, arg: str) -> None:
+        if not self._require_kb():
+            return
+        try:
+            tokens = shlex.split(arg)
+        except ValueError as exc:
+            print(f"❌ 参数解析失败: {exc}")
+            return
+        sub = tokens[0].lower() if tokens else "summary"
+        rest = tokens[1:]
+        if sub == "summary":
+            self._print_json(self._review_summary_payload())
+            return
+        if sub == "metrics":
+
+            def configure(parser):
+                parser.add_argument("--answer-count", type=int)
+
+            opts = self._parse_dk_args("/review metrics", rest, configure)
+            if opts is None:
+                return
+            self._print_json(self._review_metrics_payload(opts.answer_count))
+            return
+        if sub == "export":
+
+            def configure(parser):
+                parser.add_argument("--limit", type=int, default=200)
+
+            opts = self._parse_dk_args("/review export", rest, configure)
+            if opts is None:
+                return
+            limit = opts.limit
+            payload = {
+                "kb_id": self.active_kb,
+                "generated_at": now_iso(),
+                "summary": self._review_summary_payload(),
+                "pending_knowledge": self.knowledge_store.list(
+                    kb_id=self.active_kb, status="pending", limit=limit
+                ),
+                "stale_knowledge": self.knowledge_store.list(
+                    kb_id=self.active_kb, status="stale", limit=limit
+                ),
+                "auto_review_events": self.knowledge_store.auto_review_events(
+                    kb_id=self.active_kb, limit=limit
+                ),
+                "feedback_analysis_needs_review": self.feedback_analysis_store.list(
+                    kb_id=self.active_kb, needs_review=True, limit=limit
+                ),
+                "retrieval_feedback_enabled": self.retrieval_feedback_store.list(
+                    kb_id=self.active_kb, enabled=True, limit=limit
+                ),
+                "feedback_bad_cases": self.feedback_store.list(
+                    kb_id=self.active_kb, is_bad_case=True, limit=limit
+                ),
+            }
+            self._print_json(payload)
+            return
+        print("❓ 未知 /review 子命令。可用: summary / metrics / export")
+
     # 云端配置。
 
     # 配置云端配置。
@@ -556,6 +1668,59 @@ class Console:
             if len(tokens) == 2 and tokens[1].lower() in ("use", "rm"):
                 return [r["kb_id"] for r in self.registry.list()]
             return []
+        if cmd in ("/dk", "/knowledge"):
+            if len(tokens) == 1:
+                return DK_SUBCOMMANDS
+            if len(tokens) == 2 and tokens[1].lower() in (
+                "show",
+                "approve",
+                "reject",
+                "archive",
+                "delete",
+                "revise",
+                "candidates",
+                "batch-approve",
+                "batch-reject",
+            ):
+                rows = (
+                    self.knowledge_store.list(kb_id=self.active_kb)
+                    if self.active_kb
+                    else []
+                )
+                return [str(row.get("knowledge_id")) for row in rows]
+            if len(tokens) > 2 and tokens[1].lower() in (
+                "batch-approve",
+                "batch-reject",
+            ):
+                rows = (
+                    self.knowledge_store.list(kb_id=self.active_kb)
+                    if self.active_kb
+                    else []
+                )
+                selected = set(tokens[2:])
+                return [
+                    str(row.get("knowledge_id"))
+                    for row in rows
+                    if str(row.get("knowledge_id")) not in selected
+                ]
+            return []
+        if cmd == "/feedback":
+            return FEEDBACK_SUBCOMMANDS if len(tokens) == 1 else []
+        if cmd == "/tuning":
+            if len(tokens) == 1:
+                return TUNING_SUBCOMMANDS
+            if len(tokens) == 2 and tokens[1].lower() in ("enable", "disable"):
+                rows = (
+                    self.retrieval_feedback_store.list(
+                        kb_id=self.active_kb, enabled=None
+                    )
+                    if self.active_kb
+                    else []
+                )
+                return [str(row.get("retrieval_feedback_id")) for row in rows]
+            return []
+        if cmd == "/review":
+            return REVIEW_SUBCOMMANDS if len(tokens) == 1 else []
         if cmd == "/add":
             return self._inbox_pdfs() if len(tokens) == 1 else []
         if cmd in ("/rm", "/summary"):
@@ -648,6 +1813,18 @@ class Console:
             return True
         if cmd == "/rmchat":
             self.cmd_rmchat(arg)
+            return True
+        if cmd in ("/dk", "/knowledge"):
+            self.cmd_dk(arg)
+            return True
+        if cmd == "/feedback":
+            self.cmd_feedback(arg)
+            return True
+        if cmd == "/tuning":
+            self.cmd_tuning(arg)
+            return True
+        if cmd == "/review":
+            self.cmd_review(arg)
             return True
 
         forced_task, cleaned_query = parse_forced_mode(text)
