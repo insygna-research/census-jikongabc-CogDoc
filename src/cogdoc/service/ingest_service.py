@@ -1,10 +1,14 @@
+import hashlib
 import logging
 import os
 import shutil
 import threading
 import time
 from dataclasses import dataclass, field
-from cogdoc.api.derived_knowledge_store import DerivedKnowledgeStore
+from cogdoc.api.derived_knowledge_store import (
+    AUTO_REBIND_REVIEW_NOTE,
+    DerivedKnowledgeStore,
+)
 from cogdoc.config.settings import get_settings
 from cogdoc.graph.subgraphs.qa import RetrieverFactory
 from cogdoc.observability.logger import log_event
@@ -116,19 +120,117 @@ def _mark_stale_derived_knowledge(kb_id: str, bindings: list[tuple[str, str]]) -
     return marked
 
 
+# 计算分块文本哈希。
+def _chunk_text_hash(text: object) -> str:
+    normalized = " ".join(("" if text is None else str(text)).split())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+# 按来源组织新版分块。
+def _chunks_by_source(chunks: list[dict]) -> dict[str, list[dict]]:
+    grouped: dict[str, list[dict]] = {}
+    for chunk in chunks:
+        meta = chunk.get("meta") if isinstance(chunk.get("meta"), dict) else {}
+        source = str(meta.get("source") or "")
+        if source:
+            grouped.setdefault(source, []).append(chunk)
+    return grouped
+
+
+# 寻找可自动重绑的新版分块。
+def _auto_rebind_updates(row: dict, chunks: list[dict]) -> dict | None:
+    expected_hash = str(row.get("related_chunk_text_hash") or "")
+    anchor = str(row.get("related_anchor_text") or "").strip()
+    if not expected_hash and not anchor:
+        return None
+    scored = []
+    for chunk in chunks:
+        text = str(chunk.get("text") or "")
+        chunk_hash = _chunk_text_hash(text)
+        matched_by_hash = bool(expected_hash and chunk_hash == expected_hash)
+        matched_by_anchor = bool(anchor and anchor in text)
+        if not matched_by_hash and not matched_by_anchor:
+            continue
+        meta = chunk.get("meta") if isinstance(chunk.get("meta"), dict) else {}
+        priority = 0 if matched_by_hash else 1
+        scored.append((priority, chunk_hash, meta))
+    if not scored:
+        return None
+    _, chunk_hash, meta = min(scored, key=lambda item: item[0])
+    chunk_id = str(meta.get("chunk_id") or "")
+    updates = {
+        "related_source_sha256": meta.get("source_sha256"),
+        "related_page_start": meta.get("page_start", meta.get("page")),
+        "related_page_end": meta.get("page_end", meta.get("page")),
+        "related_chunk_text_hash": chunk_hash,
+        "related_anchor_text": anchor or row.get("related_anchor_text"),
+    }
+    if chunk_id:
+        updates["related_chunk_ids"] = [chunk_id]
+    return updates
+
+
+# 复核文档变化后的派生知识。
+def _review_changed_derived_knowledge(
+    kb_id: str, bindings: list[tuple[str, str]], chunks: list[dict] | None = None
+) -> dict[str, int]:
+    if not bindings:
+        return {"stale": 0, "rebound": 0}
+    if not chunks:
+        return {
+            "stale": _mark_stale_derived_knowledge(kb_id, bindings),
+            "rebound": 0,
+        }
+    store = DerivedKnowledgeStore()
+    grouped = _chunks_by_source(chunks)
+    stale = 0
+    rebound = 0
+    for source, old_hash in bindings:
+        rows = [
+            row
+            for row in store.list(kb_id=kb_id, status="approved", document_id=source)
+            if row.get("related_source") == source
+            and row.get("related_source_sha256") == old_hash
+        ]
+        for row in rows:
+            updates = _auto_rebind_updates(row, grouped.get(source, []))
+            if updates:
+                updated = store.set_status(
+                    row["knowledge_id"],
+                    "approved",
+                    actor="system",
+                    note=AUTO_REBIND_REVIEW_NOTE,
+                    binding_updates=updates,
+                )
+                rebound += 1 if updated is not None else 0
+            else:
+                updated = store.set_status(
+                    row["knowledge_id"],
+                    "stale",
+                    actor="system",
+                    note="文档更新后未找到可自动重绑分块",
+                )
+                stale += 1 if updated is not None else 0
+    return {"stale": stale, "rebound": rebound}
+
+
 # 提交后尽力标记派生知识过期。
 def _mark_stale_derived_knowledge_quiet(
-    kb_id: str, bindings: list[tuple[str, str]], state: dict | None = None
+    kb_id: str,
+    bindings: list[tuple[str, str]],
+    state: dict | None = None,
+    chunks: list[dict] | None = None,
 ) -> None:
     try:
-        marked = _mark_stale_derived_knowledge(kb_id, bindings)
-        if marked:
+        reviewed = _review_changed_derived_knowledge(kb_id, bindings, chunks)
+        if reviewed["stale"] or reviewed["rebound"]:
             log_event(
                 "ingest",
-                "derived_knowledge_marked_stale",
+                "derived_knowledge_reviewed_after_update",
                 state,
                 kb_id=kb_id,
-                count=marked,
+                stale=reviewed["stale"],
+                rebound=reviewed["rebound"],
             )
     except Exception as exc:
         log_event(
@@ -741,7 +843,7 @@ def _build_transactional_locked(
     stale_bindings = _stale_bindings_from_document_changes(
         previous_documents, manifest.get("documents", [])
     )
-    _mark_stale_derived_knowledge_quiet(kb_id, stale_bindings)
+    _mark_stale_derived_knowledge_quiet(kb_id, stale_bindings, chunks=all_chunks)
     try:
         save_index_manifest(manifest)
     except Exception:

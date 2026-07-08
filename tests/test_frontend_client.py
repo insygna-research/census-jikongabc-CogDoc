@@ -233,6 +233,30 @@ def test_feedback_client_list_method_calls_expected_endpoint(monkeypatch):
     }
 
 
+# 验证来源分块客户端携带锚点参数。
+def test_source_chunks_client_sends_anchor_text(monkeypatch):
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return httpx.Response(200, json={"chunks": []})
+
+    monkeypatch.setattr("cogdoc.frontend.api_client.httpx.get", fake_get)
+
+    response = CogDocClient("http://api", api_key="secret").list_source_chunks(
+        "kb", "a.pdf", limit=20, anchor_text="锚点"
+    )
+
+    assert response.status_code == 200
+    assert calls[0][0] == "http://api/v1/knowledge-bases/kb/sources/a.pdf/chunks"
+    assert calls[0][1]["headers"] == {"Authorization": "Bearer secret"}
+    assert calls[0][1]["params"] == {
+        "offset": 0,
+        "limit": 20,
+        "anchor_text": "锚点",
+    }
+
+
 # 验证派生知识客户端方法调用稳定端点场景。
 def test_knowledge_client_methods_call_expected_endpoints(monkeypatch):
     calls = []

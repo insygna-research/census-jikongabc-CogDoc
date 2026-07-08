@@ -91,6 +91,7 @@ def _build_review_queue_summary(
         created_after=created_after,
         created_before=created_before,
     )
+    auto_review = request.app.state.knowledge_store.auto_review_counts(kb_id=kb_id)
     feedback_rows = request.app.state.feedback_store.counts(kb_id=kb_id)
     feedback = request.app.state.feedback_analysis_store.counts(kb_id=kb_id)
     retrieval = request.app.state.retrieval_feedback_store.counts(kb_id=kb_id)
@@ -99,6 +100,10 @@ def _build_review_queue_summary(
         knowledge=knowledge["by_status"],
         knowledge_origin=knowledge["by_origin"],
         knowledge_conflicts=knowledge_conflicts,
+        knowledge_auto_review={
+            **auto_review,
+            "stale_pending": int(knowledge["by_status"].get("stale", 0)),
+        },
         feedback_counts=feedback_rows,
         feedback_analysis={
             **feedback["by_action"],
@@ -320,12 +325,17 @@ async def review_queue_export(
         is_bad_case=True,
         limit=limit,
     )
+    auto_review_events = request.app.state.knowledge_store.auto_review_events(
+        kb_id=kb_id,
+        limit=limit,
+    )
     return ReviewQueueExportResponse(
         kb_id=kb_id,
         generated_at=now_iso(),
         summary=summary,
         pending_knowledge=[_public(row) for row in pending],
         stale_knowledge=[_public(row) for row in stale],
+        auto_review_events=auto_review_events,
         feedback_analysis_needs_review=analysis,
         retrieval_feedback_enabled=retrieval,
         feedback_bad_cases=feedback,

@@ -9,9 +9,12 @@ from cogdoc.service.ingest_service import (
     IndexInconsistencyError,
     _populate_staging,
     _fill_staging_incremental,
+    _review_changed_derived_knowledge,
+    _chunk_text_hash,
     _stale_bindings_from_document_changes,
     _transactional_empty,
 )
+from cogdoc.api.derived_knowledge_store import DerivedKnowledgeStore
 from cogdoc.tools.chunk_identity import build_chunk_id
 from cogdoc.tools.embedder import Embedder
 
@@ -224,6 +227,87 @@ def test_transactional_empty_marks_previous_bindings_stale(tmp_path, monkeypatch
 
     assert result.document_count == 0
     assert calls == [(kb_id, [("a.pdf", "H1")])]
+
+
+# 验证文档更新后可按文本哈希自动重绑。
+def test_changed_document_rebinds_knowledge_by_chunk_hash(tmp_path, monkeypatch):
+    store = DerivedKnowledgeStore(path=str(tmp_path / "knowledge.jsonl"))
+    text = "差旅报销需要七天内提交。"
+    row, _ = store.create(
+        {
+            "kb_id": "kb",
+            "text": "报销规则",
+            "status": "approved",
+            "related_source": "a.pdf",
+            "related_source_sha256": "H1",
+            "related_chunk_text_hash": _chunk_text_hash(text),
+        }
+    )
+    chunk = _reg_doc("a.pdf", "H2", 0, 0, page_start=2, page_end=3)
+    chunk["text"] = text
+    monkeypatch.setattr(ingest_service, "DerivedKnowledgeStore", lambda: store)
+
+    reviewed = _review_changed_derived_knowledge("kb", [("a.pdf", "H1")], [chunk])
+    updated = store.list(kb_id="kb")[0]
+
+    assert reviewed == {"stale": 0, "rebound": 1}
+    assert updated["knowledge_id"] == row["knowledge_id"]
+    assert updated["status"] == "approved"
+    assert updated["related_source_sha256"] == "H2"
+    assert updated["related_page_start"] == 2
+    assert updated["related_page_end"] == 3
+
+
+# 验证文档更新后可按锚点自动重绑。
+def test_changed_document_rebinds_knowledge_by_anchor(tmp_path, monkeypatch):
+    store = DerivedKnowledgeStore(path=str(tmp_path / "knowledge.jsonl"))
+    row, _ = store.create(
+        {
+            "kb_id": "kb",
+            "text": "入职规则",
+            "status": "approved",
+            "related_source": "a.pdf",
+            "related_source_sha256": "H1",
+            "related_anchor_text": "直属经理确认",
+        }
+    )
+    chunk = _reg_doc("a.pdf", "H2", 1, 1, page_start=4, page_end=4)
+    chunk["text"] = "入职审批需要直属经理确认后提交。"
+    monkeypatch.setattr(ingest_service, "DerivedKnowledgeStore", lambda: store)
+
+    reviewed = _review_changed_derived_knowledge("kb", [("a.pdf", "H1")], [chunk])
+    updated = store.list(kb_id="kb")[0]
+
+    assert reviewed == {"stale": 0, "rebound": 1}
+    assert updated["knowledge_id"] == row["knowledge_id"]
+    assert updated["status"] == "approved"
+    assert updated["related_source_sha256"] == "H2"
+    assert updated["related_chunk_ids"] == [chunk["meta"]["chunk_id"]]
+
+
+# 验证无法定位新版分块时仍标记过期。
+def test_changed_document_marks_knowledge_stale_without_rebind(tmp_path, monkeypatch):
+    store = DerivedKnowledgeStore(path=str(tmp_path / "knowledge.jsonl"))
+    row, _ = store.create(
+        {
+            "kb_id": "kb",
+            "text": "旧规则",
+            "status": "approved",
+            "related_source": "a.pdf",
+            "related_source_sha256": "H1",
+            "related_anchor_text": "旧规则原文",
+        }
+    )
+    chunk = _reg_doc("a.pdf", "H2", 0, 0)
+    chunk["text"] = "新版内容没有旧锚点。"
+    monkeypatch.setattr(ingest_service, "DerivedKnowledgeStore", lambda: store)
+
+    reviewed = _review_changed_derived_knowledge("kb", [("a.pdf", "H1")], [chunk])
+    updated = store.list(kb_id="kb")[0]
+
+    assert reviewed == {"stale": 1, "rebound": 0}
+    assert updated["knowledge_id"] == row["knowledge_id"]
+    assert updated["status"] == "stale"
 
 
 # 索引编号不一致时回退全量。

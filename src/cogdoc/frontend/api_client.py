@@ -156,11 +156,17 @@ class CogDocClient:
 
     # 列出来源文件分块。
     def list_source_chunks(
-        self, kb_id: str, source: str, offset: int = 0, limit: int = 50
+        self,
+        kb_id: str,
+        source: str,
+        offset: int = 0,
+        limit: int = 50,
+        anchor_text: str | None = None,
     ) -> httpx.Response:
+        params = {"offset": offset, "limit": limit, "anchor_text": anchor_text}
         return httpx.get(
             self._url(f"/v1/knowledge-bases/{kb_id}/sources/{source}/chunks"),
-            params={"offset": offset, "limit": limit},
+            params={k: v for k, v in params.items() if v is not None},
             timeout=self.timeout,
             headers=self._headers,
         )

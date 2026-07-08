@@ -1019,6 +1019,66 @@ def _document_rows(client: CogDocClient, kb_id: str) -> list[Mapping]:
     return [doc for doc in docs if isinstance(doc, Mapping) and doc.get("name")]
 
 
+# 读取来源分块列表。
+def _source_chunk_rows(
+    client: CogDocClient,
+    kb_id: str,
+    source: str,
+    limit: int = 100,
+    anchor_text: str | None = None,
+) -> list[Mapping]:
+    try:
+        status_code, payload = _cached_api_value(
+            ("chunks", client.base_url, kb_id, source, 0, limit, anchor_text),
+            lambda: _response_status_payload(
+                client.list_source_chunks(
+                    kb_id, source, limit=limit, anchor_text=anchor_text
+                )
+            ),
+        )
+    except Exception:
+        return []
+    if status_code != 200 or not isinstance(payload, Mapping):
+        return []
+    chunks = payload.get("chunks", [])
+    return [chunk for chunk in chunks if isinstance(chunk, Mapping)]
+
+
+# 构建绑定摘要。
+def _binding_summary(item: Mapping, prefix: str = "绑定") -> str:
+    page = _page_range_label(
+        item.get("related_page_start"), item.get("related_page_end")
+    )
+    chunks = ", ".join(str(x) for x in item.get("related_chunk_ids") or []) or "-"
+    parts = [
+        f"{prefix}: {item.get('related_source') or '-'}",
+        f"sha {item.get('related_source_sha256') or '-'}",
+        f"chunk {chunks}",
+    ]
+    if page:
+        parts.append(page)
+    if item.get("related_chunk_text_hash"):
+        parts.append(f"hash {str(item.get('related_chunk_text_hash'))[:12]}")
+    if item.get("related_anchor_text"):
+        parts.append(f"锚点 {str(item.get('related_anchor_text'))[:40]}")
+    return " · ".join(parts)
+
+
+# 查找过期知识候选分块。
+def _stale_rebind_candidates(item: Mapping, chunks: list[Mapping]) -> list[Mapping]:
+    related_page = _parse_optional_int(item.get("related_page_start"))
+    scored = []
+    for chunk in chunks:
+        page = _parse_optional_int(chunk.get("page_start", chunk.get("page")))
+        anchor_hit = bool(chunk.get("anchor_hit"))
+        page_hit = related_page is not None and page == related_page
+        if not anchor_hit and not page_hit:
+            continue
+        priority = 0 if anchor_hit else 1
+        scored.append((priority, chunk))
+    return [chunk for _, chunk in sorted(scored, key=lambda item: item[0])[:3]]
+
+
 # 清理知识缓存。
 def _clear_knowledge_cache(client: CogDocClient, kb_id: str) -> None:
     _clear_api_cache(("knowledge", client.base_url, kb_id))
@@ -1425,6 +1485,60 @@ def _render_knowledge_revision_form(
     )
 
 
+# 渲染过期知识候选重绑。
+def _render_stale_rebind_candidates(
+    client: CogDocClient, kb_id: str, item: Mapping
+) -> None:
+    knowledge_id = str(item.get("knowledge_id") or "")
+    source = str(item.get("related_source") or "")
+    if not knowledge_id or not source:
+        return
+    anchor = str(item.get("related_anchor_text") or "").strip() or None
+    chunks = _source_chunk_rows(client, kb_id, source, anchor_text=anchor)
+    candidates = _stale_rebind_candidates(item, chunks)
+    if not candidates:
+        st.caption("未找到可直接确认的新版分块候选。")
+        return
+    st.caption("新版分块候选")
+    for idx, chunk in enumerate(candidates, start=1):
+        chunk_id = str(chunk.get("chunk_id") or "")
+        page_start = chunk.get("page_start", chunk.get("page"))
+        page_end = chunk.get("page_end", page_start)
+        page = _page_range_label(page_start, page_end)
+        title = f"候选 {idx}"
+        if page:
+            title += f" · {page}"
+        if chunk_id:
+            title += f" · `{chunk_id}`"
+        with st.expander(title):
+            st.write(str(chunk.get("text_preview") or ""))
+            if st.button(
+                "采用候选并通过",
+                key=f"stale-candidate-approve-{knowledge_id}-{chunk_id or idx}",
+                use_container_width=True,
+            ):
+                _handle_knowledge_response(
+                    client.review_knowledge(
+                        knowledge_id,
+                        "approve",
+                        actor="frontend",
+                        note="采用候选分块复核通过",
+                        related_source=source,
+                        related_source_sha256=str(chunk.get("source_sha256") or "")
+                        or None,
+                        related_chunk_ids=[chunk_id] if chunk_id else [],
+                        related_page_start=_parse_optional_int(page_start),
+                        related_page_end=_parse_optional_int(page_end),
+                        related_chunk_text_hash=str(chunk.get("text_hash") or "")
+                        or None,
+                        related_anchor_text=str(item.get("related_anchor_text") or "")
+                        or None,
+                    ),
+                    client,
+                    kb_id,
+                )
+
+
 # 渲染单条派生知识。
 def _render_knowledge_item(
     client: CogDocClient, kb_id: str, item: Mapping, suffix: str
@@ -1446,10 +1560,19 @@ def _render_knowledge_item(
         meta[3].caption(f"创建时间: {item.get('created_at') or '-'}")
         if conflict_group:
             st.caption(f"冲突组: {conflict_group}")
+        st.caption(_binding_summary(item))
+        if item.get("reviewed_by") or item.get("review_note"):
+            st.caption(
+                "审核: "
+                f"{item.get('reviewed_by') or '-'} · "
+                f"{item.get('reviewed_at') or '-'} · "
+                f"{item.get('review_note') or '-'}"
+            )
         if item.get("source_note"):
             st.caption(str(item["source_note"]))
         _render_knowledge_revision_form(client, kb_id, item, suffix)
         if item.get("status") == "stale":
+            _render_stale_rebind_candidates(client, kb_id, item)
             with st.form(f"stale-rebind-{knowledge_id}"):
                 stale_cols = st.columns([1, 1, 1, 1])
                 related_document_id = stale_cols[0].text_input(
@@ -1849,6 +1972,9 @@ def _knowledge_area(kb_id: str | None) -> None:
         loop_metrics = {}
     pending_count = _summary_count(summary, "knowledge", "pending")
     stale_count = _summary_count(summary, "knowledge", "stale")
+    auto_rebound_count = _summary_count(
+        summary, "knowledge_auto_review", "auto_rebound"
+    )
     conflict_count = _summary_count(summary, "knowledge_conflicts", "total")
     conflict_group_count = _summary_count(summary, "knowledge_conflicts", "groups")
     feedback_count = _summary_count(summary, "feedback_counts", "total")
@@ -1861,6 +1987,7 @@ def _knowledge_area(kb_id: str | None) -> None:
     metrics[0].metric("待审核知识", pending_count)
     metrics[0].caption(f"冲突 {conflict_count} · 组 {conflict_group_count}")
     metrics[1].metric("过期知识", stale_count)
+    metrics[1].caption(f"自动重绑 {auto_rebound_count}")
     metrics[2].metric("原始反馈", feedback_count)
     metrics[2].caption(f"坏样本 {bad_case_count}")
     metrics[3].metric("反馈分析", analysis_count, delta=needs_review_count)

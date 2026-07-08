@@ -17,6 +17,7 @@ ACTIVE_STATUSES = {"pending", "approved", "stale"}
 VALID_STATUSES = ACTIVE_STATUSES | {"rejected", "archived"}
 REVISION_SOURCE_STATUSES = {"approved", "stale"}
 SIMILARITY_CONFLICT_THRESHOLD = 0.72
+AUTO_REBIND_REVIEW_NOTE = "文档更新后自动重绑"
 ALLOWED_BINDING_UPDATE_FIELDS = {
     "related_document_id",
     "related_source",
@@ -353,6 +354,35 @@ class DerivedKnowledgeStore:
             if latest.get(knowledge_id, {}).get("status") != "stale"
         )
         return {"total": len(stale_ids), "reviewed": reviewed}
+
+    # 统计自动复核重绑情况。
+    def auto_review_counts(self, *, kb_id: str) -> dict[str, int]:
+        with self._lock:
+            history = self._read_history()
+        auto_rebound = sum(
+            1
+            for row in history
+            if row.get("kb_id") == kb_id
+            and row.get("reviewed_by") == "system"
+            and row.get("review_note") == AUTO_REBIND_REVIEW_NOTE
+            and row.get("status") == "approved"
+        )
+        return {"auto_rebound": auto_rebound}
+
+    # 列出自动复核重绑事件。
+    def auto_review_events(self, *, kb_id: str, limit: int = 100) -> list[dict]:
+        with self._lock:
+            history = self._read_history()
+        rows = [
+            row
+            for row in history
+            if row.get("kb_id") == kb_id
+            and row.get("reviewed_by") == "system"
+            and row.get("review_note") == AUTO_REBIND_REVIEW_NOTE
+            and row.get("status") == "approved"
+        ]
+        rows.sort(key=lambda row: str(row.get("reviewed_at") or ""), reverse=True)
+        return rows[:limit]
 
     # 修改审核状态，保留历史快照。
     def set_status(

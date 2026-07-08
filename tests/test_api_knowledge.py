@@ -4,7 +4,10 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from cogdoc.api.app import create_app
-from cogdoc.api.derived_knowledge_store import DerivedKnowledgeStore
+from cogdoc.api.derived_knowledge_store import (
+    AUTO_REBIND_REVIEW_NOTE,
+    DerivedKnowledgeStore,
+)
 from cogdoc.api.feedback_analysis_store import FeedbackAnalysisStore
 from cogdoc.api.feedback_store import FeedbackStore
 from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
@@ -533,6 +536,20 @@ async def test_review_queue_summary_counts_pending_work(tmp_path, monkeypatch):
                 "enable_immediately": True,
             },
         )
+        auto = await client.post(
+            "/v1/knowledge",
+            json={
+                "kb_id": "kb",
+                "text": "自动重绑知识。",
+                "enable_immediately": True,
+            },
+        )
+        app.state.knowledge_store.set_status(
+            auto.json()["knowledge"]["knowledge_id"],
+            "approved",
+            actor="system",
+            note=AUTO_REBIND_REVIEW_NOTE,
+        )
         summary = await client.get("/v1/review-queue", params={"kb_id": "kb"})
         export = await client.get(
             "/v1/review-queue/export",
@@ -546,8 +563,10 @@ async def test_review_queue_summary_counts_pending_work(tmp_path, monkeypatch):
     assert summary.status_code == 200
     body = summary.json()
     assert body["knowledge"]["pending"] == 1
-    assert body["knowledge"]["approved"] == 1
+    assert body["knowledge"]["approved"] == 2
     assert body["knowledge_origin"]["saved_answer"] == 1
+    assert body["knowledge_auto_review"]["auto_rebound"] == 1
+    assert body["knowledge_auto_review"]["stale_pending"] == 0
     assert body["feedback_counts"]["total"] == 1
     assert body["feedback_counts"]["bad_cases"] == 1
     assert body["feedback_analysis"]["create_pending_knowledge"] == 1
@@ -557,10 +576,13 @@ async def test_review_queue_summary_counts_pending_work(tmp_path, monkeypatch):
     exported = export.json()
     assert exported["kb_id"] == "kb"
     assert exported["summary"]["feedback_counts"]["bad_cases"] == 1
-    assert exported["summary"]["knowledge_origin"]["manual_entry"] == 1
+    assert exported["summary"]["knowledge_origin"]["manual_entry"] == 2
+    assert exported["summary"]["knowledge_auto_review"]["auto_rebound"] == 1
     assert len(exported["pending_knowledge"]) == 1
     assert exported["pending_knowledge"][0]["text"] == "待审核知识。"
     assert exported["stale_knowledge"] == []
+    assert len(exported["auto_review_events"]) == 1
+    assert exported["auto_review_events"][0]["review_note"] == AUTO_REBIND_REVIEW_NOTE
     assert len(exported["feedback_analysis_needs_review"]) == 1
     assert len(exported["retrieval_feedback_enabled"]) == 1
     assert len(exported["feedback_bad_cases"]) == 1

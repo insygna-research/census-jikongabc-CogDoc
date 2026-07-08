@@ -218,9 +218,12 @@ class ChunkPreview(ApiModel):
     chunk_id: str = ""
     chunk_index: int | None = None
     source: str = ""
+    source_sha256: str = ""
     page: int | None = None
     page_start: int | None = None
     page_end: int | None = None
+    text_hash: str = ""
+    anchor_hit: bool = False
     text_preview: str = ""
     context_preview: str = ""
 
@@ -501,6 +504,7 @@ class ReviewQueueSummaryResponse(ApiModel):
     knowledge: dict[str, int] = Field(default_factory=dict)
     knowledge_origin: dict[str, int] = Field(default_factory=dict)
     knowledge_conflicts: dict[str, int] = Field(default_factory=dict)
+    knowledge_auto_review: dict[str, int] = Field(default_factory=dict)
     feedback_counts: dict[str, Any] = Field(default_factory=dict)
     feedback_analysis: dict[str, int] = Field(default_factory=dict)
     feedback_analysis_type: dict[str, int] = Field(default_factory=dict)
@@ -515,6 +519,7 @@ class ReviewQueueExportResponse(ApiModel):
     summary: ReviewQueueSummaryResponse
     pending_knowledge: list[DerivedKnowledge] = Field(default_factory=list)
     stale_knowledge: list[DerivedKnowledge] = Field(default_factory=list)
+    auto_review_events: list[dict[str, Any]] = Field(default_factory=list)
     feedback_analysis_needs_review: list[dict[str, Any]] = Field(default_factory=list)
     retrieval_feedback_enabled: list[dict[str, Any]] = Field(default_factory=list)
     feedback_bad_cases: list[dict[str, Any]] = Field(default_factory=list)
