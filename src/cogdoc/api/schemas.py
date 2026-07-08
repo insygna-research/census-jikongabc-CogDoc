@@ -487,6 +487,19 @@ class ReviewQueueSummaryResponse(ApiModel):
     retrieval_feedback: dict[str, int] = Field(default_factory=dict)
 
 
+# 审核队列导出响应。
+class ReviewQueueExportResponse(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    kb_id: str
+    generated_at: str
+    summary: ReviewQueueSummaryResponse
+    pending_knowledge: list[DerivedKnowledge] = Field(default_factory=list)
+    stale_knowledge: list[DerivedKnowledge] = Field(default_factory=list)
+    feedback_analysis_needs_review: list[dict[str, Any]] = Field(default_factory=list)
+    retrieval_feedback_enabled: list[dict[str, Any]] = Field(default_factory=list)
+    feedback_bad_cases: list[dict[str, Any]] = Field(default_factory=list)
+
+
 # 待审核计数响应。
 class KnowledgePendingCountResponse(ApiModel):
     schema_version: Literal["v1"] = API_SCHEMA_VERSION

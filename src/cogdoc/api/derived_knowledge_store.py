@@ -195,6 +195,7 @@ class DerivedKnowledgeStore:
         has_conflict: bool | None = None,
         created_after: str | None = None,
         created_before: str | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         with self._lock:
             rows = list(self._latest().values())
@@ -230,9 +231,10 @@ class DerivedKnowledgeStore:
             rows = [
                 row for row in rows if str(row.get("created_at", "")) <= created_before
             ]
-        return sorted(
+        sorted_rows = sorted(
             rows, key=lambda row: str(row.get("created_at", "")), reverse=True
         )
+        return sorted_rows[:limit] if limit is not None else sorted_rows
 
     # 统计知识审核队列。
     def counts(

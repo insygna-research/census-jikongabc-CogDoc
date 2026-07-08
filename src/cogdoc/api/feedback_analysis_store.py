@@ -55,6 +55,7 @@ class FeedbackAnalysisStore:
         feedback_id: str | None = None,
         trace_id: str | None = None,
         recommended_action: str | None = None,
+        needs_review: bool | None = None,
         min_confidence: float | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
@@ -71,6 +72,8 @@ class FeedbackAnalysisStore:
                 for row in rows
                 if row.get("recommended_action") == recommended_action
             ]
+        if needs_review is not None:
+            rows = [row for row in rows if row.get("needs_review") is needs_review]
         if min_confidence is not None:
             rows = [
                 row

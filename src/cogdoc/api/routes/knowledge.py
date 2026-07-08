@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
@@ -17,6 +19,7 @@ from cogdoc.api.schemas import (
     KnowledgeReviewRequest,
     KnowledgeReviseRequest,
     KnowledgeStatus,
+    ReviewQueueExportResponse,
     ReviewQueueSummaryResponse,
     build_error_response,
 )
@@ -48,6 +51,11 @@ def _public(row: dict) -> DerivedKnowledge:
     return DerivedKnowledge(**row)
 
 
+# 返回当前协调世界时时间字符串。
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 # 构建冲突候选视图。
 def _conflict_public(row: dict) -> KnowledgeConflictCandidate:
     return KnowledgeConflictCandidate(
@@ -57,6 +65,53 @@ def _conflict_public(row: dict) -> KnowledgeConflictCandidate:
         origin=row.get("origin") or "manual_entry",
         related_source=row.get("related_source"),
         created_at=row["created_at"],
+    )
+
+
+# 构建审核队列摘要。
+def _build_review_queue_summary(
+    request: Request,
+    *,
+    kb_id: str,
+    document_id: str | None = None,
+    origin: KnowledgeOrigin | None = None,
+    created_by: str | None = None,
+    created_after: str | None = None,
+    created_before: str | None = None,
+) -> ReviewQueueSummaryResponse:
+    origin_value = origin.value if origin is not None else None
+    knowledge = request.app.state.knowledge_store.counts(
+        kb_id=kb_id,
+        document_id=document_id,
+        origin=origin_value,
+        created_by=created_by,
+        created_after=created_after,
+        created_before=created_before,
+    )
+    knowledge_conflicts = request.app.state.knowledge_store.conflict_counts(
+        kb_id=kb_id,
+        document_id=document_id,
+        origin=origin_value,
+        created_by=created_by,
+        created_after=created_after,
+        created_before=created_before,
+    )
+    feedback_rows = request.app.state.feedback_store.counts(kb_id=kb_id)
+    feedback = request.app.state.feedback_analysis_store.counts(kb_id=kb_id)
+    retrieval = request.app.state.retrieval_feedback_store.counts(kb_id=kb_id)
+    return ReviewQueueSummaryResponse(
+        kb_id=kb_id,
+        knowledge=knowledge["by_status"],
+        knowledge_origin=knowledge["by_origin"],
+        knowledge_conflicts=knowledge_conflicts,
+        feedback_counts=feedback_rows,
+        feedback_analysis={
+            **feedback["by_action"],
+            "needs_review": feedback["needs_review"],
+            "total": feedback["total"],
+        },
+        feedback_analysis_type=feedback["by_type"],
+        retrieval_feedback=retrieval,
     )
 
 
@@ -200,38 +255,83 @@ async def review_queue_summary(
     created_after: str | None = None,
     created_before: str | None = None,
 ):
-    knowledge = request.app.state.knowledge_store.counts(
+    return _build_review_queue_summary(
+        request,
         kb_id=kb_id,
         document_id=document_id,
-        origin=origin.value if origin is not None else None,
+        origin=origin,
         created_by=created_by,
         created_after=created_after,
         created_before=created_before,
     )
-    knowledge_conflicts = request.app.state.knowledge_store.conflict_counts(
+
+
+# 导出当前审核队列。
+@router.get("/review-queue/export", response_model=ReviewQueueExportResponse)
+async def review_queue_export(
+    request: Request,
+    kb_id: str = Query(min_length=1),
+    knowledge_document_id: str | None = None,
+    knowledge_origin: KnowledgeOrigin | None = None,
+    knowledge_created_by: str | None = None,
+    knowledge_created_after: str | None = None,
+    knowledge_created_before: str | None = None,
+    limit: int = Query(default=200, ge=1, le=1000),
+):
+    origin_value = knowledge_origin.value if knowledge_origin is not None else None
+    summary = _build_review_queue_summary(
+        request,
         kb_id=kb_id,
-        document_id=document_id,
-        origin=origin.value if origin is not None else None,
-        created_by=created_by,
-        created_after=created_after,
-        created_before=created_before,
+        document_id=knowledge_document_id,
+        origin=knowledge_origin,
+        created_by=knowledge_created_by,
+        created_after=knowledge_created_after,
+        created_before=knowledge_created_before,
     )
-    feedback_rows = request.app.state.feedback_store.counts(kb_id=kb_id)
-    feedback = request.app.state.feedback_analysis_store.counts(kb_id=kb_id)
-    retrieval = request.app.state.retrieval_feedback_store.counts(kb_id=kb_id)
-    return ReviewQueueSummaryResponse(
+    pending = request.app.state.knowledge_store.list(
         kb_id=kb_id,
-        knowledge=knowledge["by_status"],
-        knowledge_origin=knowledge["by_origin"],
-        knowledge_conflicts=knowledge_conflicts,
-        feedback_counts=feedback_rows,
-        feedback_analysis={
-            **feedback["by_action"],
-            "needs_review": feedback["needs_review"],
-            "total": feedback["total"],
-        },
-        feedback_analysis_type=feedback["by_type"],
-        retrieval_feedback=retrieval,
+        status=KnowledgeStatus.PENDING.value,
+        document_id=knowledge_document_id,
+        origin=origin_value,
+        created_by=knowledge_created_by,
+        created_after=knowledge_created_after,
+        created_before=knowledge_created_before,
+        limit=limit,
+    )
+    stale = request.app.state.knowledge_store.list(
+        kb_id=kb_id,
+        status=KnowledgeStatus.STALE.value,
+        document_id=knowledge_document_id,
+        origin=origin_value,
+        created_by=knowledge_created_by,
+        created_after=knowledge_created_after,
+        created_before=knowledge_created_before,
+        limit=limit,
+    )
+    analysis = request.app.state.feedback_analysis_store.list(
+        kb_id=kb_id,
+        needs_review=True,
+        limit=limit,
+    )
+    retrieval = request.app.state.retrieval_feedback_store.list(
+        kb_id=kb_id,
+        enabled=True,
+        limit=limit,
+    )
+    feedback = request.app.state.feedback_store.list(
+        kb_id=kb_id,
+        is_bad_case=True,
+        limit=limit,
+    )
+    return ReviewQueueExportResponse(
+        kb_id=kb_id,
+        generated_at=_now_iso(),
+        summary=summary,
+        pending_knowledge=[_public(row) for row in pending],
+        stale_knowledge=[_public(row) for row in stale],
+        feedback_analysis_needs_review=analysis,
+        retrieval_feedback_enabled=retrieval,
+        feedback_bad_cases=feedback,
     )
 
 

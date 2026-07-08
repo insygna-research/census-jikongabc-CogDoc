@@ -1,3 +1,4 @@
+import json
 import os
 import queue
 import threading
@@ -326,6 +327,13 @@ def _submit_feedback(
             ("retrieval-feedback", client.base_url, st.session_state.kb_id)
         )
         _clear_api_cache(("review-queue", client.base_url, st.session_state.kb_id))
+        _clear_api_cache(
+            ("review-queue-export", client.base_url, st.session_state.kb_id)
+        )
+        _clear_api_cache(("pending-count", client.base_url, st.session_state.kb_id))
+        _clear_api_cache(
+            ("feedback-loop-metrics", client.base_url, st.session_state.kb_id)
+        )
     st.toast(
         "反馈已记录" if resp.status_code == 201 else f"反馈失败: {resp.status_code}"
     )
@@ -955,6 +963,9 @@ def _document_rows(client: CogDocClient, kb_id: str) -> list[Mapping]:
 def _clear_knowledge_cache(client: CogDocClient, kb_id: str) -> None:
     _clear_api_cache(("knowledge", client.base_url, kb_id))
     _clear_api_cache(("review-queue", client.base_url, kb_id))
+    _clear_api_cache(("review-queue-export", client.base_url, kb_id))
+    _clear_api_cache(("pending-count", client.base_url, kb_id))
+    _clear_api_cache(("feedback-loop-metrics", client.base_url, kb_id))
 
 
 # 读取派生知识列表。
@@ -997,6 +1008,33 @@ def _review_queue_summary(client: CogDocClient, kb_id: str) -> Mapping:
     status_code, payload = _cached_api_value(
         ("review-queue", client.base_url, kb_id),
         lambda: _response_status_payload(client.review_queue_summary(kb_id)),
+    )
+    if status_code != 200 or not isinstance(payload, Mapping):
+        return {}
+    return payload
+
+
+# 读取待处理审核数量。
+def _pending_review_count(client: CogDocClient, kb_id: str | None) -> int:
+    if not kb_id:
+        return 0
+    try:
+        status_code, payload = _cached_api_value(
+            ("pending-count", client.base_url, kb_id),
+            lambda: _response_status_payload(client.pending_knowledge_count(kb_id)),
+        )
+    except Exception:
+        return 0
+    if status_code != 200 or not isinstance(payload, Mapping):
+        return 0
+    return int(payload.get("total") or 0)
+
+
+# 读取审核队列导出载荷。
+def _review_queue_export_payload(client: CogDocClient, kb_id: str) -> Mapping:
+    status_code, payload = _cached_api_value(
+        ("review-queue-export", client.base_url, kb_id),
+        lambda: _response_status_payload(client.review_queue_export(kb_id, limit=500)),
     )
     if status_code != 200 or not isinstance(payload, Mapping):
         return {}
@@ -1051,6 +1089,9 @@ def _tab_label(label: str, count: int) -> str:
 # 清理检索调权反馈缓存。
 def _clear_retrieval_feedback_cache(client: CogDocClient, kb_id: str) -> None:
     _clear_api_cache(("retrieval-feedback", client.base_url, kb_id))
+    _clear_api_cache(("review-queue", client.base_url, kb_id))
+    _clear_api_cache(("review-queue-export", client.base_url, kb_id))
+    _clear_api_cache(("feedback-loop-metrics", client.base_url, kb_id))
 
 
 # 读取检索调权反馈列表。
@@ -1708,6 +1749,25 @@ def _knowledge_area(kb_id: str | None) -> None:
             "调权回滚 "
             f"{_rate_label(rates.get('retrieval_feedback_rollback_rate'))}"
         )
+    try:
+        export_payload = _review_queue_export_payload(client, kb_id)
+    except Exception:
+        export_payload = {}
+    export_cols = st.columns([1, 1, 4])
+    export_cols[0].download_button(
+        "导出审核队列",
+        data=json.dumps(export_payload, ensure_ascii=False, indent=2),
+        file_name=f"cogdoc-review-queue-{kb_id}.json",
+        mime="application/json",
+        disabled=not bool(export_payload),
+        use_container_width=True,
+    )
+    if export_cols[1].button("刷新队列", use_container_width=True):
+        _clear_knowledge_cache(client, kb_id)
+        _clear_api_cache(("feedback", client.base_url, kb_id))
+        _clear_api_cache(("feedback-analysis", client.base_url, kb_id))
+        _clear_api_cache(("retrieval-feedback", client.base_url, kb_id))
+        st.rerun()
     (
         create_tab,
         pending_tab,
@@ -1977,6 +2037,9 @@ def _sidebar() -> None:
             return
 
         kb_id = st.session_state.kb_id
+        pending_total = _pending_review_count(client, kb_id)
+        if pending_total:
+            st.caption(f"待处理审核 {pending_total}")
 
         st.divider()
         _conversations(client, kb_id)
@@ -2270,6 +2333,7 @@ def _chat_area() -> None:
     if current_view not in MAIN_VIEWS:
         current_view = "对话"
         st.session_state.main_views_by_context[current_key] = current_view
+    pending_total = _pending_review_count(_client(), kb_id)
     view_key = (
         f"main-view-{kb_id}-{st.session_state.session_id}"
         if current_key
@@ -2282,6 +2346,9 @@ def _chat_area() -> None:
         horizontal=True,
         key=view_key,
         label_visibility="collapsed",
+        format_func=lambda value: (
+            _tab_label(value, pending_total) if value == "知识" else value
+        ),
     )
     if current_key:
         st.session_state.main_views_by_context[current_key] = view

@@ -320,11 +320,13 @@ class CogDocClient:
         self,
         kb_id: str,
         recommended_action: str | None = None,
+        needs_review: bool | None = None,
         limit: int = 100,
     ) -> httpx.Response:
         params = {
             "kb_id": kb_id,
             "recommended_action": recommended_action,
+            "needs_review": needs_review,
             "limit": limit,
         }
         return httpx.get(
@@ -417,6 +419,33 @@ class CogDocClient:
         }
         return httpx.get(
             self._url("/v1/review-queue"),
+            params={k: v for k, v in params.items() if v is not None},
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    # 导出审核队列。
+    def review_queue_export(
+        self,
+        kb_id: str,
+        limit: int = 200,
+        knowledge_document_id: str | None = None,
+        knowledge_origin: str | None = None,
+        knowledge_created_by: str | None = None,
+        knowledge_created_after: str | None = None,
+        knowledge_created_before: str | None = None,
+    ) -> httpx.Response:
+        params = {
+            "kb_id": kb_id,
+            "limit": limit,
+            "knowledge_document_id": knowledge_document_id,
+            "knowledge_origin": knowledge_origin,
+            "knowledge_created_by": knowledge_created_by,
+            "knowledge_created_after": knowledge_created_after,
+            "knowledge_created_before": knowledge_created_before,
+        }
+        return httpx.get(
+            self._url("/v1/review-queue/export"),
             params={k: v for k, v in params.items() if v is not None},
             timeout=self.timeout,
             headers=self._headers,

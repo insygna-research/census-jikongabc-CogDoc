@@ -363,7 +363,10 @@ def test_feedback_analysis_client_method_calls_expected_endpoint(monkeypatch):
     monkeypatch.setattr("cogdoc.frontend.api_client.httpx.get", fake_get)
 
     response = CogDocClient("http://api", api_key="secret").list_feedback_analysis(
-        "kb", recommended_action="create_pending_knowledge", limit=25
+        "kb",
+        recommended_action="create_pending_knowledge",
+        needs_review=False,
+        limit=25,
     )
 
     assert response.status_code == 200
@@ -372,6 +375,7 @@ def test_feedback_analysis_client_method_calls_expected_endpoint(monkeypatch):
     assert calls[0][1]["params"] == {
         "kb_id": "kb",
         "recommended_action": "create_pending_knowledge",
+        "needs_review": False,
         "limit": 25,
     }
 
@@ -389,6 +393,12 @@ def test_review_queue_summary_client_method_calls_expected_endpoint(monkeypatch)
     response = CogDocClient("http://api", api_key="secret").review_queue_summary(
         "kb", origin="saved_answer", created_by="frontend"
     )
+    export = CogDocClient("http://api", api_key="secret").review_queue_export(
+        "kb",
+        limit=50,
+        knowledge_origin="saved_answer",
+        knowledge_created_by="frontend",
+    )
 
     assert response.status_code == 200
     assert calls[0][0] == "http://api/v1/review-queue"
@@ -397,6 +407,15 @@ def test_review_queue_summary_client_method_calls_expected_endpoint(monkeypatch)
         "kb_id": "kb",
         "origin": "saved_answer",
         "created_by": "frontend",
+    }
+    assert export.status_code == 200
+    assert calls[1][0] == "http://api/v1/review-queue/export"
+    assert calls[1][1]["headers"] == {"Authorization": "Bearer secret"}
+    assert calls[1][1]["params"] == {
+        "kb_id": "kb",
+        "limit": 50,
+        "knowledge_origin": "saved_answer",
+        "knowledge_created_by": "frontend",
     }
 
 

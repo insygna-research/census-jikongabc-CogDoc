@@ -452,6 +452,14 @@ async def test_review_queue_summary_counts_pending_work(tmp_path, monkeypatch):
             },
         )
         summary = await client.get("/v1/review-queue", params={"kb_id": "kb"})
+        export = await client.get(
+            "/v1/review-queue/export",
+            params={
+                "kb_id": "kb",
+                "knowledge_origin": "manual_entry",
+                "limit": 50,
+            },
+        )
 
     assert summary.status_code == 200
     body = summary.json()
@@ -463,6 +471,17 @@ async def test_review_queue_summary_counts_pending_work(tmp_path, monkeypatch):
     assert body["feedback_analysis"]["create_pending_knowledge"] == 1
     assert body["feedback_analysis"]["needs_review"] == 1
     assert body["retrieval_feedback"]["enabled"] == 1
+    assert export.status_code == 200
+    exported = export.json()
+    assert exported["kb_id"] == "kb"
+    assert exported["summary"]["feedback_counts"]["bad_cases"] == 1
+    assert exported["summary"]["knowledge_origin"]["manual_entry"] == 1
+    assert len(exported["pending_knowledge"]) == 1
+    assert exported["pending_knowledge"][0]["text"] == "待审核知识。"
+    assert exported["stale_knowledge"] == []
+    assert len(exported["feedback_analysis_needs_review"]) == 1
+    assert len(exported["retrieval_feedback_enabled"]) == 1
+    assert len(exported["feedback_bad_cases"]) == 1
 
 
 # 验证待审核计数和反馈闭环指标场景。

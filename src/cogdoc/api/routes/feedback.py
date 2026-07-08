@@ -220,6 +220,7 @@ async def list_feedback_analysis(
     feedback_id: str | None = None,
     trace_id: str | None = None,
     recommended_action: str | None = None,
+    needs_review: bool | None = None,
     min_confidence: float | None = Query(default=None, ge=0, le=1),
     limit: int = Query(default=100, ge=1, le=500),
 ):
@@ -228,6 +229,7 @@ async def list_feedback_analysis(
         feedback_id=feedback_id,
         trace_id=trace_id,
         recommended_action=recommended_action,
+        needs_review=needs_review,
         min_confidence=min_confidence,
         limit=limit,
     )
