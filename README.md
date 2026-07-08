@@ -259,6 +259,9 @@ CogDoc/
 | `COGDOC_DATA_DIR` | `./data` | Root for persisted KB state, SQLite DBs, manifests, and index artifacts |
 | `COGDOC_TRACE_ENABLED` | `true` | Enable JSON trace export for request inspection |
 | `COGDOC_TRACE_DIR` | `logs/traces` | Directory for exported trace JSON files |
+| `COGDOC_WEBHOOK_URL` | unset | Optional endpoint for pending knowledge review events |
+| `COGDOC_WEBHOOK_SECRET` | unset | Optional shared secret sent with webhook requests |
+| `COGDOC_WEBHOOK_TIMEOUT_SECONDS` | `3` | Timeout for webhook delivery attempts |
 | `COGDOC_API_KEYS` | unset | Comma-separated API keys; empty disables API auth |
 | `RATE_LIMIT_PER_MINUTE` | `120` | Token-bucket refill rate for protected API routes |
 | `RATE_LIMIT_BURST` | `120` | Token-bucket burst capacity; `<=0` disables rate limiting |

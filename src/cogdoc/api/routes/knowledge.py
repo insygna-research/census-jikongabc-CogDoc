@@ -1,5 +1,3 @@
-from datetime import datetime, timezone
-
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
@@ -23,6 +21,8 @@ from cogdoc.api.schemas import (
     ReviewQueueSummaryResponse,
     build_error_response,
 )
+from cogdoc.api.time_utils import now_iso
+from cogdoc.api.webhooks import notify_pending_created
 
 router = APIRouter(prefix="/v1", tags=["knowledge"])
 
@@ -49,11 +49,6 @@ def _error(code: ErrorCode, message: str, status: int) -> JSONResponse:
 # 构建公开知识视图。
 def _public(row: dict) -> DerivedKnowledge:
     return DerivedKnowledge(**row)
-
-
-# 返回当前协调世界时时间字符串。
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 # 构建冲突候选视图。
@@ -131,6 +126,8 @@ async def create_knowledge(body: KnowledgeCreateRequest, request: Request):
     conflicts = (
         [] if deduplicated else request.app.state.knowledge_store.conflicts_for(row)
     )
+    if not deduplicated:
+        notify_pending_created(request.app, row, "knowledge_create")
     return KnowledgeCreateResponse(
         knowledge=_public(row),
         deduplicated=deduplicated,
@@ -325,7 +322,7 @@ async def review_queue_export(
     )
     return ReviewQueueExportResponse(
         kb_id=kb_id,
-        generated_at=_now_iso(),
+        generated_at=now_iso(),
         summary=summary,
         pending_knowledge=[_public(row) for row in pending],
         stale_knowledge=[_public(row) for row in stale],
@@ -420,6 +417,7 @@ async def revise_knowledge(
         return _error(ErrorCode.BAD_REQUEST, str(exc), 400)
     if row is None:
         return _error(ErrorCode.KNOWLEDGE_NOT_FOUND, f"知识不存在: {knowledge_id}", 404)
+    notify_pending_created(request.app, row, "knowledge_revision")
     return KnowledgeCreateResponse(knowledge=_public(row), deduplicated=False)
 
 

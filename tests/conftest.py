@@ -2,6 +2,22 @@ import sys
 import pytest
 
 
+class FakeWebhookDispatcher:
+    enabled = True
+
+    def __init__(self):
+        self.events = []
+
+    def emit(self, event, payload):
+        self.events.append((event, payload))
+        return True
+
+
+@pytest.fixture
+def webhook_dispatcher():
+    return FakeWebhookDispatcher()
+
+
 # 重置检索器检索引擎缓存。
 @pytest.fixture(autouse=True)
 def _reset_retriever_engine_cache():
@@ -14,10 +30,10 @@ def _reset_retriever_engine_cache():
             factory._engines.clear()
 
 
-# 隔离epoch存储。
+# 隔离版本存储。
 @pytest.fixture(autouse=True)
 def _isolate_epoch_store(tmp_path, monkeypatch):
-    # 全局 epoch / lifecycle / journal / purge 单例隔离到每个测试 tmp，避免污染仓库或跨测试串状态。
+    # 全局版本、生命周期、变更日志和删除队列单例隔离到每个测试临时目录。
     import cogdoc.service.kb_epoch as ke
     import cogdoc.service.kb_lifecycle as kl
     import cogdoc.service.mutation_journal as mj
@@ -35,10 +51,10 @@ def _isolate_epoch_store(tmp_path, monkeypatch):
     monkeypatch.setattr(
         pq, "_shared", pq.PurgeQueue(path=str(tmp_path / "purge_queue.json"))
     )
-    # 测试在同一进程内反复拉起 lifespan，关掉严格单实例避免进程锁争用误杀。
+    # 测试在同一进程内反复拉起应用生命周期，关闭严格单实例避免进程锁争用误杀。
     monkeypatch.setenv("COGDOC_ALLOW_MULTI", "1")
     yield
-    # 取消测试中残留的后台 Timer，避免 daemon 线程跨测试触发真实清理。
+    # 取消测试中残留的后台定时器，避免后台线程跨测试触发真实清理。
     import cogdoc.service.ingest_service as isvc
 
     isvc.cancel_all_timers()

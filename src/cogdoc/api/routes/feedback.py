@@ -10,6 +10,7 @@ from cogdoc.api.schemas import (
     FeedbackResponse,
     FeedbackType,
 )
+from cogdoc.api.webhooks import notify_pending_created
 from cogdoc.observability.logger import log_event
 
 router = APIRouter(prefix="/v1", tags=["feedback"])
@@ -126,6 +127,8 @@ def _create_knowledge_quiet(
         knowledge, deduplicated = request.app.state.knowledge_store.create(
             knowledge_payload
         )
+        if not deduplicated:
+            notify_pending_created(request.app, knowledge, "feedback")
         return knowledge["knowledge_id"], knowledge["status"], deduplicated
     except Exception as exc:
         log_event(

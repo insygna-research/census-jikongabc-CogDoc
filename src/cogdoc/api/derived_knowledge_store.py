@@ -5,11 +5,11 @@ import json
 import os
 import re
 import unicodedata
-from datetime import datetime, timezone
 from threading import RLock
 from typing import Any
 from uuid import uuid4
 
+from cogdoc.api.time_utils import now_iso
 from cogdoc.config.settings import get_settings
 
 
@@ -23,11 +23,6 @@ ALLOWED_BINDING_UPDATE_FIELDS = {
     "related_source_sha256",
     "related_chunk_ids",
 }
-
-
-# 返回当前协调世界时时间字符串。
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 # 归一化知识正文，供精确去重与后续相似检测打底。
@@ -87,7 +82,7 @@ class DerivedKnowledgeStore:
             conflict_group_id = None
             if similar:
                 conflict_group_id = self._ensure_conflict_group(similar)
-            now = _now_iso()
+            now = now_iso()
             entry = {
                 "knowledge_id": f"K{uuid4().hex[:12]}",
                 "kb_id": kb_id,
@@ -139,7 +134,7 @@ class DerivedKnowledgeStore:
                 raise ValueError(
                     f"duplicate active knowledge exists: {existing['knowledge_id']}"
                 )
-            now = _now_iso()
+            now = now_iso()
             entry = {
                 "knowledge_id": f"K{uuid4().hex[:12]}",
                 "kb_id": current["kb_id"],
@@ -355,7 +350,7 @@ class DerivedKnowledgeStore:
             if current is None:
                 return None
             updated = {**current}
-            now = _now_iso()
+            now = now_iso()
             updated["status"] = status
             updated["updated_at"] = now
             updated["reviewed_by"] = actor
@@ -448,7 +443,7 @@ class DerivedKnowledgeStore:
         )
         if not group_id:
             group_id = f"C{uuid4().hex[:12]}"
-        now = _now_iso()
+        now = now_iso()
         for row in rows:
             if row.get("conflict_group_id") == group_id:
                 continue
@@ -471,7 +466,7 @@ class DerivedKnowledgeStore:
         previous = self._latest().get(previous_id)
         if previous is None or previous.get("status") == "archived":
             return
-        now = _now_iso()
+        now = now_iso()
         archived = {
             **previous,
             "status": "archived",

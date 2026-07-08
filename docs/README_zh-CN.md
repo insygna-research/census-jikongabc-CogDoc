@@ -261,6 +261,9 @@ CogDoc/
 | `COGDOC_DATA_DIR` | `./data` | 知识库状态、SQLite、manifest 和索引产物根目录 |
 | `COGDOC_TRACE_ENABLED` | `true` | 是否导出请求 JSON trace |
 | `COGDOC_TRACE_DIR` | `logs/traces` | trace JSON 文件目录 |
+| `COGDOC_WEBHOOK_URL` | 未设置 | 待审核知识事件的可选回调地址 |
+| `COGDOC_WEBHOOK_SECRET` | 未设置 | 回调请求携带的可选共享密钥 |
+| `COGDOC_WEBHOOK_TIMEOUT_SECONDS` | `3` | 回调投递请求超时时间 |
 | `COGDOC_API_KEYS` | 未设置 | 逗号分隔的 API key；为空则关闭 API 鉴权 |
 | `RATE_LIMIT_PER_MINUTE` | `120` | 受保护 API 路由的令牌桶补充速率 |
 | `RATE_LIMIT_BURST` | `120` | 令牌桶突发容量；`<=0` 表示关闭限流 |

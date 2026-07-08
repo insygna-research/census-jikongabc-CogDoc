@@ -24,6 +24,13 @@ class Settings(BaseSettings):
     cogdoc_log_to_console: bool = Field(
         default=False, validation_alias="COGDOC_LOG_TO_CONSOLE"
     )
+    cogdoc_webhook_url: str = Field(default="", validation_alias="COGDOC_WEBHOOK_URL")
+    cogdoc_webhook_secret: str = Field(
+        default="", validation_alias="COGDOC_WEBHOOK_SECRET"
+    )
+    cogdoc_webhook_timeout_seconds: float = Field(
+        default=3.0, validation_alias="COGDOC_WEBHOOK_TIMEOUT_SECONDS"
+    )
     cogdoc_trace_enabled: bool = Field(
         default=True, validation_alias="COGDOC_TRACE_ENABLED"
     )

@@ -208,6 +208,53 @@ async def test_saved_answer_origin_creates_pending_knowledge(tmp_path, monkeypat
         assert row["related_chunk_ids"] == ["c1", "c2"]
 
 
+# 验证待审核知识创建会发送回调场景。
+@pytest.mark.anyio
+async def test_pending_knowledge_creation_emits_webhook(
+    tmp_path, monkeypatch, webhook_dispatcher
+):
+    import cogdoc.api.app as app_module
+
+    monkeypatch.setattr(app_module, "configure_logging", lambda: None)
+    app = create_app(
+        knowledge_store=DerivedKnowledgeStore(path=str(tmp_path / "knowledge.jsonl")),
+        feedback_store=FeedbackStore(
+            feedback_path=str(tmp_path / "feedback.jsonl"),
+            bad_cases_path=str(tmp_path / "bad_cases.jsonl"),
+        ),
+        feedback_analysis_store=FeedbackAnalysisStore(
+            path=str(tmp_path / "feedback_analysis.jsonl")
+        ),
+        retrieval_feedback_store=RetrievalFeedbackStore(
+            path=str(tmp_path / "retrieval_feedback.jsonl")
+        ),
+        webhook_dispatcher=webhook_dispatcher,
+    )
+
+    async with _client(app) as client:
+        pending = await client.post(
+            "/v1/knowledge", json={"kb_id": "kb", "text": "待审核知识。"}
+        )
+        approved = await client.post(
+            "/v1/knowledge",
+            json={
+                "kb_id": "kb",
+                "text": "直接通过知识。",
+                "enable_immediately": True,
+            },
+        )
+
+    assert pending.status_code == 201
+    assert approved.status_code == 201
+    assert [event for event, _ in webhook_dispatcher.events] == [
+        "knowledge.pending_created"
+    ]
+    payload = webhook_dispatcher.events[0][1]
+    assert payload["source"] == "knowledge_create"
+    assert payload["knowledge"]["status"] == "pending"
+    assert payload["knowledge"]["text"] == "待审核知识。"
+
+
 # 验证过期知识复核通过时刷新绑定场景。
 @pytest.mark.anyio
 async def test_stale_knowledge_approve_refreshes_binding(tmp_path, monkeypatch):

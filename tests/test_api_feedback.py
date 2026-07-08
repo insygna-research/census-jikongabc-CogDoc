@@ -15,7 +15,7 @@ def anyio_backend():
 
 
 # 构造应用。
-def _make_app(tmp_path, monkeypatch):
+def _make_app(tmp_path, monkeypatch, webhook_dispatcher=None):
     import cogdoc.api.app as app_module
 
     monkeypatch.setattr(app_module, "configure_logging", lambda: None)
@@ -36,6 +36,7 @@ def _make_app(tmp_path, monkeypatch):
             feedback_analysis_store=feedback_analysis_store,
             knowledge_store=knowledge_store,
             retrieval_feedback_store=retrieval_feedback_store,
+            webhook_dispatcher=webhook_dispatcher,
         ),
         tmp_path,
     )
@@ -175,8 +176,10 @@ async def test_correction_uses_correction_text_in_eval_draft(tmp_path, monkeypat
 
 # 验证纠错可以创建待审核知识场景。
 @pytest.mark.anyio
-async def test_correction_can_create_pending_knowledge(tmp_path, monkeypatch):
-    app, root = _make_app(tmp_path, monkeypatch)
+async def test_correction_can_create_pending_knowledge(
+    tmp_path, monkeypatch, webhook_dispatcher
+):
+    app, root = _make_app(tmp_path, monkeypatch, webhook_dispatcher)
 
     resp = await _post(
         app,
@@ -206,6 +209,10 @@ async def test_correction_can_create_pending_knowledge(tmp_path, monkeypatch):
     assert knowledge["created_from_trace_id"] == "t5"
     assert knowledge["related_source"] == "policy.pdf"
     assert knowledge["related_chunk_ids"] == ["c1"]
+    assert [event for event, _ in webhook_dispatcher.events] == [
+        "knowledge.pending_created"
+    ]
+    assert webhook_dispatcher.events[0][1]["source"] == "feedback"
 
 
 # 验证反馈理解结果可以查询场景。

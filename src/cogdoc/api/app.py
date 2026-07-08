@@ -26,6 +26,7 @@ from cogdoc.api.routes import (
 )
 from cogdoc.api.schemas import ErrorCode, build_error_response
 from cogdoc.api.session_store import SessionStore
+from cogdoc.api.webhooks import WebhookDispatcher
 import logging
 from cogdoc.config.settings import get_settings
 from cogdoc.observability.logger import configure_logging, log_event
@@ -70,6 +71,7 @@ def create_app(
     feedback_analysis_store: FeedbackAnalysisStore | None = None,
     knowledge_store: DerivedKnowledgeStore | None = None,
     retrieval_feedback_store: RetrievalFeedbackStore | None = None,
+    webhook_dispatcher: WebhookDispatcher | None = None,
     api_keys: set[str] | None = None,
     rate_limiter: TokenBucketRateLimiter | None = None,
     offload_workers: int | None = None,
@@ -213,6 +215,7 @@ def create_app(
     app.state.retrieval_feedback_store = (
         retrieval_feedback_store or RetrievalFeedbackStore()
     )
+    app.state.webhook_dispatcher = webhook_dispatcher or WebhookDispatcher()
 
     # 访问控制留空则鉴权关闭，限流默认按配置令牌桶。
     settings = get_settings()
