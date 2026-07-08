@@ -10,7 +10,7 @@ from cogdoc.api.access_control import (
 )
 from cogdoc.api.derived_knowledge_store import DerivedKnowledgeStore
 from cogdoc.api.feedback_analysis_store import FeedbackAnalysisStore
-from cogdoc.api.feedback_store import FeedbackStore
+from cogdoc.api.feedback_store import FeedbackStore, SqliteFeedbackStore
 from cogdoc.api.ingest import IndexJobManager, KnowledgeBaseRegistry
 from cogdoc.api.metrics import Metrics, MetricsMiddleware
 from cogdoc.api.persistence import SqliteJobStore, SqliteSessionStore
@@ -44,6 +44,14 @@ from cogdoc.service.sweeper import BackgroundSweeper
 
 
 ChatRunner = Callable[..., ChatResult]
+
+
+# 创建反馈存储。
+def _default_feedback_store():
+    settings = get_settings()
+    if settings.cogdoc_feedback_store.strip().lower() == "sqlite":
+        return SqliteFeedbackStore()
+    return FeedbackStore()
 
 
 # 构建未捕获异常响应。
@@ -207,7 +215,7 @@ def create_app(
     app.state.index_jobs = index_jobs or IndexJobManager(
         kb_exists=app.state.kb_registry.exists
     )
-    app.state.feedback_store = feedback_store or FeedbackStore()
+    app.state.feedback_store = feedback_store or _default_feedback_store()
     app.state.feedback_analysis_store = (
         feedback_analysis_store or FeedbackAnalysisStore()
     )

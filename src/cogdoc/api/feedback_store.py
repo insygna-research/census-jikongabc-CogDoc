@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
 from threading import RLock
 from typing import Any
 from uuid import uuid4
 
+from cogdoc.api.persistence import _connect, _execute_write_with_retry
+from cogdoc.api.time_utils import now_iso
 from cogdoc.config.settings import get_settings
 
 _BAD_CASE_TYPES = {"thumbs_down", "correction"}
@@ -52,11 +53,6 @@ def _build_eval_draft(entry: dict[str, Any]) -> dict[str, Any]:
     return draft
 
 
-# 返回当前协调世界时时间字符串。
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 # 反馈追加落逐行对象文件；点踩和纠错另写坏样本，供评测集自我进化。
 class FeedbackStore:
     # 反馈追加落逐行对象文件；点踩和纠错另写坏样本，供评测集自我进化。
@@ -79,7 +75,7 @@ class FeedbackStore:
     # 记录结果。
     def record(self, payload: dict[str, Any]) -> dict[str, Any]:
         feedback_id = uuid4().hex
-        entry = {"feedback_id": feedback_id, "created_at": _now_iso(), **payload}
+        entry = {"feedback_id": feedback_id, "created_at": now_iso(), **payload}
         is_bad_case = payload.get("feedback") in _BAD_CASE_TYPES
         if is_bad_case:
             entry["eval_draft"] = _build_eval_draft(entry)
@@ -172,3 +168,162 @@ class FeedbackStore:
         if path == self._feedback_path:
             self._cache_mtime = None
             self._cache_rows = None
+
+
+# 反馈落盘到数据库，逐行对象文件仅作为导出副本。
+class SqliteFeedbackStore:
+    def __init__(
+        self,
+        db_path: str | None = None,
+        feedback_path: str | None = None,
+        bad_cases_path: str | None = None,
+        export_jsonl: bool = True,
+    ):
+        settings = get_settings()
+        self._db_path = db_path or settings.feedback_db_path
+        self._feedback_path = feedback_path or settings.feedback_log_path
+        self._bad_cases_path = bad_cases_path or settings.bad_cases_path
+        self._export_jsonl = export_jsonl
+        self._lock = RLock()
+        self._conn = _connect(self._db_path)
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS feedback_entries ("
+            "feedback_id TEXT PRIMARY KEY, kb_id TEXT, trace_id TEXT, "
+            "session_id TEXT, feedback TEXT, feedback_type TEXT, "
+            "is_bad_case INTEGER, created_at TEXT, data TEXT)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_feedback_entries_kb_created "
+            "ON feedback_entries(kb_id, created_at DESC)"
+        )
+        self._conn.commit()
+        for path in (self._feedback_path, self._bad_cases_path):
+            directory = os.path.dirname(path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+        with self._lock:
+            self._bootstrap_from_jsonl_locked()
+
+    # 记录结果。
+    def record(self, payload: dict[str, Any]) -> dict[str, Any]:
+        feedback_id = uuid4().hex
+        entry = {"feedback_id": feedback_id, "created_at": now_iso(), **payload}
+        is_bad_case = payload.get("feedback") in _BAD_CASE_TYPES
+        if is_bad_case:
+            entry["eval_draft"] = _build_eval_draft(entry)
+        with self._lock:
+            self._insert_locked(entry, is_bad_case)
+            if self._export_jsonl:
+                self._append_export(self._feedback_path, entry)
+                if is_bad_case:
+                    self._append_export(self._bad_cases_path, entry)
+        return {"feedback_id": feedback_id, "is_bad_case": is_bad_case}
+
+    # 查询反馈记录。
+    def list(
+        self,
+        *,
+        kb_id: str,
+        trace_id: str | None = None,
+        session_id: str | None = None,
+        feedback: str | None = None,
+        feedback_type: str | None = None,
+        is_bad_case: bool | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        where = ["kb_id=?"]
+        params: list[Any] = [kb_id]
+        if trace_id is not None:
+            where.append("trace_id=?")
+            params.append(trace_id)
+        if session_id is not None:
+            where.append("session_id=?")
+            params.append(session_id)
+        if feedback is not None:
+            where.append("feedback=?")
+            params.append(feedback)
+        if feedback_type is not None:
+            where.append("feedback_type=?")
+            params.append(feedback_type)
+        if is_bad_case is not None:
+            where.append("is_bad_case=?")
+            params.append(1 if is_bad_case else 0)
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM feedback_entries WHERE "
+                + " AND ".join(where)
+                + " ORDER BY created_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    # 统计反馈记录。
+    def counts(self, *, kb_id: str) -> dict[str, Any]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT feedback, feedback_type, is_bad_case "
+                "FROM feedback_entries WHERE kb_id=?",
+                (kb_id,),
+            ).fetchall()
+        by_feedback: dict[str, int] = {}
+        by_type: dict[str, int] = {}
+        bad_cases = 0
+        for feedback, feedback_type, is_bad_case in rows:
+            feedback_key = str(feedback or "unknown")
+            type_key = str(feedback_type or "unknown")
+            by_feedback[feedback_key] = by_feedback.get(feedback_key, 0) + 1
+            by_type[type_key] = by_type.get(type_key, 0) + 1
+            if is_bad_case:
+                bad_cases += 1
+        return {
+            "total": len(rows),
+            "bad_cases": bad_cases,
+            "by_feedback": by_feedback,
+            "by_type": by_type,
+        }
+
+    # 从旧逐行对象文件导入数据库。
+    def _bootstrap_from_jsonl_locked(self) -> None:
+        count = self._conn.execute("SELECT COUNT(*) FROM feedback_entries").fetchone()[
+            0
+        ]
+        if count or not os.path.exists(self._feedback_path):
+            return
+        with open(self._feedback_path, encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                entry = json.loads(line)
+                feedback_id = str(entry.get("feedback_id") or uuid4().hex)
+                entry["feedback_id"] = feedback_id
+                is_bad_case = entry.get("feedback") in _BAD_CASE_TYPES
+                self._insert_locked(entry, is_bad_case)
+
+    # 写入数据库。
+    def _insert_locked(self, entry: dict[str, Any], is_bad_case: bool) -> None:
+        def _do():
+            self._conn.execute(
+                "INSERT OR REPLACE INTO feedback_entries "
+                "(feedback_id, kb_id, trace_id, session_id, feedback, feedback_type, "
+                "is_bad_case, created_at, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    entry["feedback_id"],
+                    entry.get("kb_id"),
+                    entry.get("trace_id"),
+                    entry.get("session_id"),
+                    entry.get("feedback"),
+                    entry.get("feedback_type"),
+                    1 if is_bad_case else 0,
+                    entry.get("created_at"),
+                    json.dumps(entry, ensure_ascii=False),
+                ),
+            )
+            self._conn.commit()
+
+        _execute_write_with_retry(_do)
+
+    # 追加导出副本。
+    def _append_export(self, path: str, entry: dict[str, Any]) -> None:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")

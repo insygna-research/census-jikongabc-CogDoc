@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     cogdoc_webhook_timeout_seconds: float = Field(
         default=3.0, validation_alias="COGDOC_WEBHOOK_TIMEOUT_SECONDS"
     )
+    cogdoc_feedback_store: str = Field(
+        default="jsonl", validation_alias="COGDOC_FEEDBACK_STORE"
+    )
     cogdoc_trace_enabled: bool = Field(
         default=True, validation_alias="COGDOC_TRACE_ENABLED"
     )
@@ -199,6 +202,11 @@ class Settings(BaseSettings):
     def state_db_path(self) -> str:
         # 会话与入库任务落盘，进程重启不丢状态。
         return str(self.data_dir / "state.db")
+
+    # 处理反馈数据库路径。
+    @property
+    def feedback_db_path(self) -> str:
+        return str(self.data_dir / "feedback" / "feedback.db")
 
     # 处理反馈日志路径。
     @property
