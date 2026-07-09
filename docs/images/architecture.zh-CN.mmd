@@ -1,0 +1,85 @@
+flowchart TB
+    classDef node fill:#ffffff,stroke:#8c959f,stroke-width:1px,color:#24292f
+    classDef core fill:#eef6ff,stroke:#54aeef,stroke-width:1px,color:#24292f
+    classDef guard fill:#fff1f1,stroke:#ff8182,stroke-width:1px,color:#24292f
+    classDef native fill:#fff8c5,stroke:#d4a72c,stroke-width:1px,color:#24292f
+    subgraph ENTRY["入口"]
+        direction LR
+        CLI["CLI 控制台"]
+        DEBUG["Debug 控制台"]
+        WEB["Streamlit 网页端"]
+    end
+
+    subgraph HTTP["FastAPI HTTP API"]
+        direction LR
+        APISTART["app startup"]
+        ACCESS["API key 鉴权 · 限流 ·<br/>metrics"]
+        ROUTES["路由<br/>chat · agent · documents<br/>knowledge · feedback<br/>· traces · health"]
+        APISTART -. 注册中间件 .-> ACCESS
+        APISTART -. 注册路由 .-> ROUTES
+        ACCESS --> ROUTES
+    end
+
+    subgraph CORE["Python 核心服务"]
+        direction LR
+        SERVICE["服务函数"]
+        CHAT["chat 服务"]
+        INGEST["ingest 服务"]
+        REVIEW["审核队列 · webhook"]
+        SERVICE --> CHAT
+        SERVICE -->|"入库 / KB 变更"| INGEST
+        SERVICE --> REVIEW
+    end
+
+    subgraph SAFETY["运行保护"]
+        direction LR
+        PROCLOCK["启动保护<br/>单实例进程锁"]
+        JOURNAL["mutation journal<br/>启动恢复"]
+        KBLOCK["按 KB<br/>写锁"]
+        PROCLOCK --> JOURNAL
+    end
+
+    subgraph GRAPH["LangGraph 工作流"]
+        direction LR
+        ROUTER["RouterAgent"]
+        QA["QA 子图<br/>rewrite · verify · retrieve<br/>rerank · generate · 引用<br/>自愈"]
+        SUMMARY["Summary 子图<br/>loader · plan · sections<br/>· global"]
+        COMPARE["Compare 子图<br/>loader · profile · table<br/>· citation"]
+        ROUTER --> QA
+        ROUTER --> SUMMARY
+        ROUTER --> COMPARE
+    end
+
+    subgraph BACKENDS["模型与原生后端"]
+        direction LR
+        LLM["LLM 客户端<br/>云端 / Ollama"]
+        RUST["Rust 核心<br/>分词 · BM25 · RRF · SHA-256<br/>· citation check"]
+    end
+
+    CLI -->|"in-process"| SERVICE
+    DEBUG -->|"in-process"| SERVICE
+    WEB -->|"HTTP + SSE"| ACCESS
+    ROUTES --> SERVICE
+    CLI -. 启动 .-> PROCLOCK
+    DEBUG -. 启动 .-> PROCLOCK
+    APISTART -. 启动 .-> PROCLOCK
+    INGEST -. 写入保护 .-> KBLOCK
+    CHAT --> ROUTER
+    INGEST --> RUST
+    QA --> LLM
+    SUMMARY --> LLM
+    COMPARE --> LLM
+    QA --> RUST
+    SUMMARY --> RUST
+    COMPARE --> RUST
+
+    style ENTRY fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style HTTP fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style CORE fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style SAFETY fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style GRAPH fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style BACKENDS fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    class CLI,DEBUG,WEB,APISTART,ROUTES,ACCESS,SERVICE,CHAT,INGEST,REVIEW,ROUTER,QA,SUMMARY,COMPARE node
+    class SERVICE,CHAT,INGEST,REVIEW core
+    class PROCLOCK,JOURNAL,KBLOCK guard
+    class LLM,RUST native

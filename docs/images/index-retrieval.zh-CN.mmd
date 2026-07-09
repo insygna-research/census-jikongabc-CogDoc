@@ -1,0 +1,114 @@
+flowchart TB
+    classDef node fill:#ffffff,stroke:#8c959f,stroke-width:1px,color:#24292f
+    classDef storage fill:#f0fff4,stroke:#4ac26b,stroke-width:1px,color:#24292f
+    classDef guard fill:#fff1f1,stroke:#ff8182,stroke-width:1px,color:#24292f
+    classDef native fill:#fff8c5,stroke:#d4a72c,stroke-width:1px,color:#24292f
+
+    subgraph SERVICES["Python 核心服务"]
+        direction LR
+        INGEST["ingest 服务"]
+        KBMUT["知识库变更<br/>创建 · 删除 · 上传 · 重建"]
+        CHAT["chat 服务"]
+        FEEDBACK["反馈入口"]
+        FBANALYSIS["反馈分析"]
+        REVIEW["知识审核"]
+    end
+
+    subgraph NATIVE["Rust 核心"]
+        direction LR
+        RUST["分词 · SHA-256<br/>BM25 · RRF"]
+    end
+
+    subgraph SAFETY["变更保护"]
+        direction LR
+        PROCLOCK["单实例进程锁<br/>(启动时获取)"]
+        KBLOCK["kb_write_lock"]
+        JOURNAL["mutation journal"]
+        EPOCH["KB epoch<br/>tombstone"]
+    end
+
+    subgraph INGESTION["入库流水线"]
+        direction LR
+        PARSE["PDF 解析 · 切块<br/>manifest"]
+    end
+
+    subgraph STORE["本地存储"]
+        direction LR
+        PDFVEC["Chroma<br/>PDF 向量"]
+        DKVEC["Chroma<br/>派生知识向量"]
+        BM25["BM25 artifact"]
+        SQLITE["SQLite<br/>会话 · 入库任务"]
+        FEEDSTORE["feedback store<br/>反馈记录"]
+        DKSTORE["derived knowledge store<br/>派生知识"]
+        TUNESTORE["retrieval tuning store<br/>调权记录"]
+        TRACELOG["trace / logs<br/>可观测日志"]
+        ARTIFACTS["artifacts<br/>manifest · journal"]
+    end
+
+    subgraph RETRIEVAL["QA 检索流水线"]
+        direction LR
+        QUERY["查询 + 改写"]
+        VECH["PDF 向量召回<br/>Chroma"]
+        BM25CH["PDF 关键词召回<br/>BM25"]
+        DKCH["派生知识通道<br/>向量搜索"]
+        FUSION["PDF RRF 融合"]
+        CAND["候选池"]
+        TUNE["反馈权重"]
+        RERANK["bge-reranker-v2-m3"]
+        EVIDENCE["回答证据"]
+        QUERY --> VECH
+        QUERY --> BM25CH
+        QUERY --> DKCH
+        VECH --> FUSION
+        BM25CH --> FUSION
+        FUSION --> CAND
+        DKCH -->|"单独合并"| CAND
+        CAND --> TUNE
+        TUNE --> RERANK
+        RERANK --> EVIDENCE
+    end
+
+    subgraph KNOWLEDGE["反馈与审核闭环"]
+        direction LR
+        APPROVED["已通过派生知识"]
+    end
+
+    PROCLOCK --> JOURNAL
+    INGEST --> KBLOCK
+    KBMUT --> KBLOCK
+    KBLOCK --> PARSE
+    KBLOCK --> EPOCH
+    PARSE --> RUST
+    PARSE --> PDFVEC
+    PARSE --> ARTIFACTS
+    RUST --> BM25
+    RUST -. RRF .-> FUSION
+    APPROVED --> DKVEC
+    PDFVEC --> VECH
+    BM25 --> BM25CH
+    DKVEC --> DKCH
+    CHAT --> QUERY
+    CHAT --> SQLITE
+    CHAT --> TRACELOG
+    CHAT --> FEEDBACK
+    FEEDBACK --> FEEDSTORE
+    FEEDBACK --> FBANALYSIS
+    FBANALYSIS --> REVIEW
+    FBANALYSIS --> TUNESTORE
+    REVIEW --> DKSTORE
+    KBLOCK --> JOURNAL
+    JOURNAL --> ARTIFACTS
+    REVIEW --> APPROVED
+    TUNESTORE --> TUNE
+
+    style SERVICES fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style NATIVE fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style SAFETY fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style INGESTION fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style STORE fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style RETRIEVAL fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style KNOWLEDGE fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    class INGEST,KBMUT,CHAT,FEEDBACK,FBANALYSIS,REVIEW,PARSE,QUERY,VECH,BM25CH,DKCH,FUSION,CAND,TUNE,RERANK,EVIDENCE,APPROVED node
+    class PDFVEC,DKVEC,BM25,SQLITE,FEEDSTORE,DKSTORE,TUNESTORE,TRACELOG,ARTIFACTS storage
+    class PROCLOCK,KBLOCK,JOURNAL,EPOCH guard
+    class RUST native

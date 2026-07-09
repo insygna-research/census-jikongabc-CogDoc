@@ -4,9 +4,11 @@
 
 [English](README.md) · [简体中文](docs/README_zh-CN.md)
 
-A local RAG knowledge-base console for individuals and teams, built on **LangGraph multi-agent orchestration** with a **deterministic Rust core (PyO3 + maturin)** underneath. It answers questions, summarizes a single document, and compares multiple documents over your own PDF knowledge base — and every generated claim is pinned back to a `[source:Pn]` citation that is *checked, not trusted*. Use it from a **CLI console**, a **Streamlit web app** backed by FastAPI, or a standalone **Debug console** for trace inspection.
+A local RAG knowledge-base console for individuals and teams, built on **LangGraph multi-agent orchestration** with a **deterministic Rust core (PyO3 + maturin)** underneath. It answers questions, summarizes a single document, compares multiple documents, and turns feedback into reviewable derived knowledge over your own PDF knowledge base — and every generated claim is pinned back to a `[source:Pn]` citation that is *checked, not trusted*. Use it from a **CLI console**, a **Streamlit web app** backed by FastAPI, or a standalone **Debug console** for trace inspection.
 
 > ⚠️ **Text-layer PDFs only — no OCR yet.** Parsing extracts the text layer; pages that look scanned/image-only are flagged (`is_ocr_fallback`) and skipped, not recognized. Use PDFs that contain a real text layer.
+
+## Feature Highlights
 
 - **Grounded QA with verified citations** — generation is constrained to retrieved document blocks; fabricated file/page tags are caught by a Rust validator and re-generated in a self-heal loop.
 
@@ -14,7 +16,7 @@ A local RAG knowledge-base console for individuals and teams, built on **LangGra
 
 - **Multi-document comparison** — per-document profiles across fixed dimensions, rendered as cited dimension-by-dimension blocks.
 
-- **Hybrid retrieval, native scoring** — Vector (Chroma + multilingual BGE-M3) and BM25 recall fused by a Rust RRF kernel; tokenization and BM25 are native — Chinese via `jieba-rs`, English lowercased + Snowball-stemmed + stopword-filtered, so both languages retrieve well.
+- **Hybrid retrieval, native scoring** — Vector (Chroma + multilingual BGE-M3) and BM25 recall fused by a Rust RRF kernel, with approved derived knowledge searched as an additional evidence source; tokenization and BM25 are native — Chinese via `jieba-rs`, English lowercased + Snowball-stemmed + stopword-filtered, so both languages retrieve well.
 
 - **Content-addressed incremental cache** — a per-file SHA-256 manifest plus a versioned chunk-identity contract: unchanged files reuse the existing index, and only a changed PDF or chunking scheme triggers an incremental rebuild.
 
@@ -22,49 +24,51 @@ A local RAG knowledge-base console for individuals and teams, built on **LangGra
 
 - **Web, CLI, and Debug entry points** — a slash-command CLI console, a Streamlit web UI over FastAPI, and a focused `make debug` console for trace inspection.
 
-- **Trace observability and feedback loop** — every request can export a safe JSON trace with config, node timings, rewrites, evidence previews, and errors; the web UI scopes traces to the current conversation, and feedback is stored by `trace_id`.
+- **Derived knowledge review loop** — manually add knowledge, save validated answers, or turn corrections / no-evidence feedback into pending knowledge cards with source bindings, conflict groups, stale scans, revisions, batch approve/reject, and archive/delete flows.
+
+- **Feedback analysis and retrieval tuning** — thumbs-up/down, corrections, ratings, issue types, and evidence context are persisted by `trace_id`; bad cases feed the offline quality ledger, feedback is analyzed into recommended actions, and retrieval-weight records can be enabled or rolled back.
+
+- **Trace observability, review queue, and webhooks** — every request can export a safe JSON trace with config, node timings, rewrites, evidence previews, and errors; the web UI scopes traces to the current conversation, aggregates pending/stale knowledge and feedback into a review queue, and can emit webhook events for new pending knowledge.
 
 - **API access control and rate limiting** — optional API keys protect `/v1` routes, with a token-bucket limiter that avoids throttling high-frequency health/session/trace polling.
 
-  
+## Feature Walkthrough
 
 1. **Web chat with citations and evidence.** Pick a knowledge base, ask in natural language, watch the answer stream, then inspect citation sources, evidence snippets, and feedback controls.
 
-   <img src="./docs/images/web-chat.png" alt="Web chat" width="900">
+   <img src="./docs/images/web-chat.png" alt="Web chat" width="800">
 
 2. **CLI console.** A slash-command console for knowledge bases, ingestion, multi-conversation history, and forced task modes.
 
-   <img src="./docs/images/cli-console.png" alt="CLI console" width="900">
+   <img src="./docs/images/cli-console1.png" alt="CLI console" width="800">
 
 3. **Standalone Debug console.** `make debug` opens a focused console for one KB; after a normal answer, continue with `/trace`, `/steps`, `/rewrite`, `/evidence`, and `/config`, or run `/retrieve <query>` to inspect retrieval without calling the LLM.
 
-   <img src="./docs/images/debug-console1.png" alt="Standalone Debug console" width="900">
-
-   <img src="./docs/images/debug-console2.png" alt="Standalone Debug console trace view" width="900">
+   <img src="./docs/images/debug-console1.png" alt="Standalone Debug console" width="800">
 
 4. **Grounded QA.** Every factual sentence ends with a citation whose file name and page exist in the retrieved context; invalid ones bounce the answer back for regeneration.
 
-   <img src="./docs/images/qa_net.png" alt="Grounded QA web view" width="900">
-
-   <img src="./docs/images/qa_cli.png" alt="Grounded QA CLI view" width="900">
+   <img src="./docs/images/qa_net.png" alt="Grounded QA web view" width="800">
 
 5. **Structured summary.** Summarize one named document into fixed sections with deterministic per-section citations.
 
-   <img src="./docs/images/summary_net.png" alt="Structured summary web view" width="900">
-
-   <img src="./docs/images/summary_cli.png" alt="Structured summary CLI view" width="900">
+   <img src="./docs/images/summary_net.png" alt="Structured summary web view" width="800">
 
 6. **Multi-document comparison.** Compare two or more named documents method-by-method, metric-by-metric, with citations on every cell.
 
-   <img src="./docs/images/compare_net.png" alt="Comparison web view" width="900">
-
-   <img src="./docs/images/compare_cli.png" alt="Comparison CLI view" width="900">
+   <img src="./docs/images/compare_net.png" alt="Comparison web view" width="800">
 
 7. **Trace debug panel.** Inspect only the current conversation's traces, including routing, query rewrites, retrieval/rerank steps, request config, and citation audits.
 
-   <img src="./docs/images/web-trace-debug.png" alt="Trace debug panel" width="900">
+   <img src="./docs/images/web-trace-debug.png" alt="Trace debug panel" width="800">
 
-   <img src="./docs/images/debug.png" alt="Retrieval debug" width="900">
+8. **Derived knowledge review center.** Add manual knowledge, save an answer, inspect source bindings, review conflicts, approve/reject/archive items, and rebuild the approved derived-knowledge index.
+
+   <img src="./docs/images/derived-knowledge3.png" alt="Derived knowledge review center" width="800">
+
+9. **Feedback and tuning.** Every thumbs-up/down, correction, and no-evidence feedback entry is tied to the answer's `trace_id`, query, answer, citations, and evidence; CogDoc turns bad cases into the evaluation ledger, converts fixable content into pending derived knowledge, and creates enable/disable retrieval-tuning records so future ranking can keep improving from human feedback.
+
+   <img src="./docs/images/feedback.png" alt="Feedback and tuning" width="800">
 
 ## Quick Start
 
@@ -98,6 +102,7 @@ Then drive everything with slash commands inside the console:
 3. `/new` — start a conversation; `/chats` and `/open` browse persisted history.
 4. Ask directly to run **QA**; "summarize `<file>`" runs **Summary**; "compare `<a>` and `<b>`" runs **Compare**.
 5. `/cloud` uses the cloud LLM, `/local` uses Ollama; `/help` lists commands; `exit` quits.
+6. Use `/dk` or `/knowledge` for derived knowledge, `/feedback` for feedback records and analyses, `/tuning` for retrieval-weight controls, and `/review` for queue summaries, metrics, and export.
 
 `make debug` opens the standalone Debug console for one KB. Ask questions there to get normal answers plus trace summaries, use `/trace`, `/steps`, `/rewrite`, `/evidence`, and `/config` to inspect the latest request, or run `/retrieve <query>` to inspect retrieval and rerank output without calling the LLM. To debug a specific KB directly, run `python -m cogdoc.debug --kb <kb_id>`.
 
@@ -116,6 +121,7 @@ In the browser:
 4. **Chat** — pick a mode (`auto` / `qa` / `summary` / `compare`), ask, and read the streamed answer with its citation sources, evidence snippets, and 👍/👎 feedback.
 5. Toggle **Local Ollama mode** in the sidebar to route generation to the local model.
 6. Open **Debug** to inspect traces for the current conversation only, or use **Retrieval debug** to call `/v1/retrieve` directly and inspect chunk hits, rerank scores, and retrieval metadata.
+7. Switch the main view to **Derived Knowledge** to create knowledge, review pending/stale items, inspect feedback analysis, enable/disable retrieval tuning, export the review queue, and scan for stale bindings after document changes.
 
 ### Calling the API directly
 
@@ -134,6 +140,14 @@ The Streamlit app is a thin client over the FastAPI service — you can hit it d
 | `GET /v1/traces?doc_id=...&session_id=...` | List recent traces, optionally scoped to one KB/session |
 | `GET /v1/traces/{trace_id}` | Fetch an exported request trace |
 | `POST /v1/feedback` | Submit thumbs-up/down on a `trace_id` |
+| `GET /v1/feedback`, `GET /v1/feedback-analysis` | Browse feedback records and structured feedback understanding results |
+| `POST /v1/knowledge`, `GET /v1/knowledge` | Create / list derived knowledge entries |
+| `POST /v1/knowledge/{id}/approve`, `/reject`, `/archive`, `/revise` | Review or revise derived knowledge |
+| `POST /v1/knowledge/batch-approve`, `POST /v1/knowledge/batch-reject` | Batch review derived knowledge |
+| `GET /v1/knowledge/pending-count`, `GET /v1/knowledge/index-status`, `POST /v1/knowledge/stale-scan` | Inspect pending/stale counts, derived-knowledge index state, and stale source bindings |
+| `GET /v1/review-queue`, `GET /v1/review-queue/export` | Summarize and export the review queue |
+| `GET /v1/feedback-loop-metrics` | Return feedback / review / tuning loop metrics |
+| `GET /v1/retrieval-feedback`, `POST /v1/retrieval-feedback/{id}/enable`, `POST /v1/retrieval-feedback/{id}/disable` | Inspect or roll back feedback-derived retrieval tuning |
 | `GET /healthz`, `GET /readyz`, `GET /metrics` | Health, readiness, Prometheus metrics |
 
 If `COGDOC_API_KEYS` is configured, `/v1` requests are authenticated and rate-limited; with no keys set, `/v1` is open (the server logs a warning at startup).
@@ -141,47 +155,30 @@ If `COGDOC_API_KEYS` is configured, `/v1` requests are authenticated and rate-li
 ## Tech Stack
 
 - **Deterministic core** — a custom [Rust](https://www.rust-lang.org/) extension ([PyO3](https://pyo3.rs/) + [maturin](https://www.maturin.rs/)) carries `jieba-rs` CN/EN tokenization, BM25, RRF fusion, SHA-256 manifest, and citation validation — all native, independently unit-tested, stable across agent/prompt churn.
-- **Retrieval** — `bge-m3` multilingual vector recall + BM25 keyword recall, fused by the Rust RRF kernel and reranked by `bge-reranker-v2-m3`; vectors live in [Chroma](https://www.trychroma.com/), PDFs are parsed by PyMuPDF.
+- **Retrieval** — `bge-m3` multilingual vector recall + BM25 keyword recall, fused by the Rust RRF kernel and reranked by `bge-reranker-v2-m3`; PDF vectors and approved derived-knowledge vectors live in [Chroma](https://www.trychroma.com/), PDFs are parsed by PyMuPDF.
 - **Orchestration** — [LangGraph](https://langchain-ai.github.io/langgraph/) wires routing → rewrite → retrieve → generate → citation self-heal into a loopable state graph.
 - **Models** — OpenAI-compatible dual backend, hot-swappable: cloud DeepSeek or local Ollama `qwen2.5:7b`.
-- **Serving and observability** — FastAPI with SSE streaming, optional API-key auth and token-bucket rate limiting; sessions / index jobs / feedback persisted in SQLite; JSON traces exported for the web Trace panel and standalone Debug console.
+- **Serving and observability** — FastAPI with SSE streaming, optional API-key auth and token-bucket rate limiting; sessions, index jobs, feedback, review queues, and derived knowledge are persisted locally; JSON traces exported for the web Trace panel and standalone Debug console.
 
 ## Architecture
 
-```text
-┌───────────────────┐     ┌───────────────────┐     ┌───────────────────┐
-│ CLI console       │     │ Debug console     │     │ Streamlit web UI  │
-└─────────┬─────────┘     └─────────┬─────────┘     └─────────┬─────────┘
-          │                         │                         │
-          │ in-process              │ in-process              │ HTTP + SSE
-          ▼                         ▼                         ▼
-┌───────────────────────────────────────────────────────────────────────┐
-│                          LangGraph workflow                           │
-│                                                                       │
-│  intent_router  →  qa / summary / compare / unknown                   │
-│                                                                       │
-│  QA:       rewrite → verify → retrieve → rerank → generate            │
-│                                                   ▲          │        │
-│                                                   │          ▼        │
-│                                                citation ◄────┘        │
-│                                                self-heal loop         │
-│                                                                       │
-│  Summary:  loader → plan → section → global                           │
-│  Compare:  loader → profile → table → citation                        │
-└─────────────────────────────┬───────────────────────────┬─────────────┘
-                              │                           │
-                              │ hybrid retrieval          │ native kernels
-                              ▼                           ▼
-┌───────────────────────────────┐     ┌───────────────────────────────┐
-│ Chroma vectors                │     │ Rust core                     │
-│ BM25 native artifact          │◄───►│ tokenize · BM25 · RRF         │
-│ PDFs via PyMuPDF              │     │ SHA-256 · citation check      │
-└───────────────────────────────┘     └───────────────────────────────┘
-```
+>  **Solid lines** → runtime call / data flow &nbsp;|&nbsp; **Dashed lines** → startup / safeguard relations
 
-Summary builds a fixed-section structured summary of one named document; Compare builds a per-document profile across fixed dimensions and renders cited Markdown comparison blocks grouped by dimension. Both bind `[source:Pn]` citations deterministically from chunk metadata and run the same `validate_citations_native` checker as QA — no subgraph is exempt.
+**Runtime Path**
 
-The Python layer owns orchestration, prompts, model clients, indexing, the CLI console, the standalone Debug console, and the FastAPI/Streamlit front ends. The Rust layer (`rust_core`) owns deterministic kernels that stay stable across agent changes and are unit-tested independently.
+<img src="docs/images/architecture.svg" alt="Runtime Path" width="800">
+
+CLI and Debug bypass the FastAPI HTTP adapter; they call the same Python services in-process. The Streamlit UI is the built-in entry point that talks to FastAPI over HTTP/SSE. CLI, Debug, and FastAPI all acquire the single-instance process lock at startup, then recover the mutation journal before serving KB mutations.
+
+The next diagram expands ingestion, retrieval, and local persistence boundaries: source PDFs and approved derived knowledge are indexed separately, then joined into one candidate pool at query time; feedback does not rewrite indexes directly, but is persisted as reviewable records or rollbackable retrieval tuning.
+
+**Index, Retrieval, and Storage**
+
+<img src="docs/images/index-retrieval.svg" alt="Index, Retrieval, and Storage" width="800">
+
+Summary builds a fixed-section structured summary of one named document; Compare builds a per-document profile across fixed dimensions and renders cited Markdown comparison blocks grouped by dimension. Both bind `[source:Pn]` citations deterministically from chunk metadata and run the same `validate_citations_native` checker as QA.
+
+The Python layer owns orchestration, prompts, model clients, indexing, the CLI console, the standalone Debug console, and the FastAPI/Streamlit front ends. Approved derived knowledge is stored/reviewed in Python, indexed into Chroma, and searched as a separate QA evidence source; pending, stale, rejected, and archived entries do not enter retrieval. The Rust layer (`rust_core`) owns deterministic kernels that stay stable across agent changes and are unit-tested independently.
 
 ## Indexing Pipeline
 
@@ -192,6 +189,8 @@ Driven by `build_kb_index_transactional` whenever a KB's files change (`/add`, `
 3. **Parse** — `smart_parse` (PyMuPDF) extracts page text, reflows two-column layouts by block center-x, and flags likely scanned pages (`is_ocr_fallback`). No OCR is performed; flagged pages contribute no text.
 4. **Chunk** — `chunk_paper` keeps each chunk under 600 chars with 60-char overlap (30-char min), preferring paragraph, sentence/semicolon, newline, and whitespace boundaries before falling back to a fixed window for very long unbroken text. Each chunk stores up to 160 chars of surrounding context, maps back to its page span via `bisect`, and receives a stable `chunk_id`.
 5. **Index** — chunks land in Chroma (vector) and a persisted BM25 artifact that stores a compact chunk registry plus native `Bm25Index` bytes. Loading restores the native index from bytes instead of rebuilding it from a Python tokenized corpus. `save_index_manifest` persists the manifest. Tokenization uses `tokenize_mixed_text_native` / `tokenize_corpus_native` (`jieba-rs` for Chinese, Snowball stemming + stopword removal for English).
+
+Approved derived knowledge is indexed separately from source PDFs. Review actions can rebuild its Chroma collection, and stale scans mark knowledge whose document binding no longer matches the current KB documents.
 
 **Chunk identity contract:**
 
@@ -205,7 +204,7 @@ chunk_id = sha256:{source_sha256}:src:{source_name}:p{page_start}-p{page_end}:c{
 
 - **Intent routing** — `RouterAgent` asks the LLM for structured `task_type ∈ {qa, summary, compare, unknown}` and falls back to a keyword rule on any parse error. All of `qa`, `summary`, and `compare` are wired to real subgraphs.
 - **Rewrite + drift guard** — `QueryRewriteAgent` emits 1–3 keyword queries (pydantic structured output). `RewriteVerifyAgent` embeds `[original] + rewrites` in one batch, keeps those with `cosine >= rewrite_similarity_threshold` (default `0.5`), logs kept/dropped to `steps_trace`, and falls back to the original query alone if all are dropped.
-- **Hybrid retrieval + RRF** — per query, both channels over-recall `top_k * 3` (QA uses `top_k = 9` → 27/channel); `rrf_fusion_native` (Rust, `k = 60`) computes `score(d) = Σ_c 1 / (k + rank_c(d))`, merges hits sharing a `chunk_id`, and sorts by score desc then identity key asc for determinism.
+- **Hybrid retrieval + RRF** — per query, both PDF channels over-recall `top_k * 3` (QA uses `top_k = 9` → 27/channel); `rrf_fusion_native` (Rust, `k = 60`) computes `score(d) = Σ_c 1 / (k + rank_c(d))`, merges hits sharing a `chunk_id`, and sorts by score desc then identity key asc for determinism. Approved derived knowledge is searched per original/rewrite query and merged into the same evidence pool, then feedback-derived retrieval weights are applied before rerank.
 - **Rerank** — `BGEReranker` (`bge-reranker-v2-m3`) scores `(original_query, doc)` and keeps `top_n = 3`; rewrites never bias the final ranking.
 - **Generation + citation self-heal** — `Generator` (OpenAI-compatible; cloud `deepseek-chat` or local `qwen2.5:7b`, `temperature = 0.2`) wraps docs as `<Document source=… page=… chunk_id=…>` and forces `[source:Pn]` tags. `validate_citations_native` (Rust) returns structured `missing_citations` / `invalid_sources` / `invalid_pages`; `citation_node` turns failures into a critique and loops `generate → citation` up to `max_iteration_count` (default `2`). Only validated answers are printed.
 
@@ -230,26 +229,40 @@ chunk_id = sha256:{source_sha256}:src:{source_name}:p{page_start}-p{page_end}:c{
 
 ```text
 CogDoc/
-├── src/cogdoc/              # the importable package (src-layout)
-│   ├── cli.py               # multi-KB / multi-conversation console (python -m cogdoc.cli / `cogdoc`)
-│   ├── debug.py             # standalone trace Debug console (python -m cogdoc.debug / `cogdoc-debug`)
-│   ├── agents/              # router, query_rewriter, rewrite_verifier, qa_generator,
-│   │                        # citation_validator, structured_output, summary_*, compare_*
-│   ├── api/                 # FastAPI app, routes, persistence, access control, metrics
-│   ├── config/              # pydantic-settings configuration
-│   ├── frontend/            # Streamlit thin client + api_client
-│   ├── graph/               # state.py, workflow.py, subgraphs/ (qa, summary, compare)
-│   ├── observability/       # structured logging + trace export
-│   ├── service/             # chat/ingest services, KB lifecycle, transactional indexing
-│   └── tools/               # parser, chunker, manifest, tokenizer, embedder, reranker,
-│                            # rust_core_loader, retriever/ (vector, native bm25, hybrid)
-├── rust_core/src/           # lib.rs, scanner.rs, rrf.rs, citation.rs, tokenizer.rs, bm25.rs
-├── scripts/check_native.py  # native extension health check (6 required symbols)
-├── tests/                   # Python regression tests
-├── eval/                    # example offline-eval datasets
-├── docs/                    # README_zh-CN and other docs
-└── pyproject.toml           # project metadata, dependencies, build, pytest config
+├── src/cogdoc/
+│   ├── cli.py
+│   ├── debug.py
+│   ├── agents/
+│   ├── api/
+│   │   └── routes/
+│   ├── config/
+│   ├── frontend/
+│   ├── graph/
+│   │   └── subgraphs/
+│   ├── observability/
+│   ├── service/
+│   └── tools/
+│       └── retriever/
+├── rust_core/src/
+├── scripts/
+├── tests/
+├── eval/
+├── docs/
+└── pyproject.toml
 ```
+
+| Path | Responsibility |
+| --- | --- |
+| `src/cogdoc/cli.py` | Multi-KB, multi-conversation CLI entry point (`python -m cogdoc.cli` / `cogdoc`) |
+| `src/cogdoc/debug.py` | Standalone Trace Debug console (`python -m cogdoc.debug` / `cogdoc-debug`) |
+| `src/cogdoc/agents/` | Routing, query rewrite, generation, citation validation, feedback understanding, and Summary / Compare agent primitives |
+| `src/cogdoc/api/` | FastAPI app, routes, schemas, persistence, access control, metrics, feedback / knowledge stores, webhooks |
+| `src/cogdoc/frontend/` | Streamlit thin client and API client |
+| `src/cogdoc/graph/` | LangGraph state, main workflow, and QA / Summary / Compare subgraphs |
+| `src/cogdoc/service/` | Chat / ingest services, KB lifecycle, transactional indexing, locks, cleanup, and background work |
+| `src/cogdoc/tools/` | PDF parsing, chunking, manifests, embedding, rerank, Rust loading, and retrievers |
+| `rust_core/src/` | PyO3 native core: scanner, tokenizer, BM25, RRF, citation validator |
+| `scripts/`, `tests/`, `eval/`, `docs/` | Health-check scripts, tests, offline eval sets, and project docs |
 
 ## Configuration
 
@@ -263,7 +276,7 @@ CogDoc/
 | `COGDOC_WEBHOOK_SECRET` | unset | Optional shared secret sent with webhook requests |
 | `COGDOC_WEBHOOK_TIMEOUT_SECONDS` | `3` | Timeout for webhook delivery attempts |
 | `COGDOC_FEEDBACK_STORE` | `jsonl` | Feedback storage backend; set `sqlite` to use SQLite with JSONL export |
-| `COGDOC_DERIVED_KNOWLEDGE_INDEX_AUTO_REFRESH` | `false` | Auto-refresh vectors |
+| `COGDOC_DERIVED_KNOWLEDGE_INDEX_AUTO_REFRESH` | `false` | Rebuild approved derived-knowledge vectors in the background after review changes |
 | `COGDOC_API_KEYS` | unset | Comma-separated API keys; empty disables API auth |
 | `RATE_LIMIT_PER_MINUTE` | `120` | Token-bucket refill rate for protected API routes |
 | `RATE_LIMIT_BURST` | `120` | Token-bucket burst capacity; `<=0` disables rate limiting |
@@ -287,11 +300,13 @@ Requirements: Python 3.11+ (developed on 3.13; the extension targets 3.8+), a Ru
 | `make check` | Verify the extension is importable and all native symbols exist |
 | `make test` | Run the Python test suite |
 | `make smoke-api` | Run an in-process API smoke test without real LLM/index work |
+| `make backup` | Back up local runtime state under `backups/` |
 | `make eval` | Run offline retrieval evaluation (`recall@k`, MRR) |
 | `make eval-coverage` | Check retrieval eval coverage without running real retrieval |
 | `make eval-quality` | Run offline quality evaluation (router, citations, faithfulness ledger) |
 | `make eval-quality-coverage` | Run quality metrics and enforce coverage dimensions |
 | `make eval-suite` | Run the combined eval gate (coverage audits + quality metrics) |
+| `make eval-suite-run-retrieval` | Run the combined eval suite and execute real retrieval metrics |
 | `make eval-suite-report` | Write `eval/eval_suite_report.json` |
 | `make eval-suite-baseline` | Compare against `eval/eval_suite_baseline.json` |
 | `make eval-suite-update-baseline` | Refresh `eval/eval_suite_baseline.json` after review |
@@ -304,9 +319,11 @@ Requirements: Python 3.11+ (developed on 3.13; the extension targets 3.8+), a Ru
 
 Test layering: business logic and the Python↔native API contract are tested in Python (`tests/`); pure-Rust logic uses Rust `#[test]` in `rust_core/src/`. Native-dependent Python tests `importorskip` when `rust_core` is not built, so run `make native` before a full regression.
 
-Offline evaluation uses local JSONL files under `eval/`. `make eval-suite` is the default gate: it audits retrieval and quality coverage, runs the cheap quality metrics, prints quality metrics by case type and layer, and skips real retrieval by default. `make eval-suite-report` writes `eval/eval_suite_report.json`; `make eval-suite-baseline` compares aggregate, case-type, and layer-level quality metrics against `eval/eval_suite_baseline.json`; `make eval-suite-update-baseline` refreshes that baseline after review. Both generated files are ignored by Git. Add `--run-retrieval` when a real index is available and retrieval metrics should also be compared. `make eval` measures retrieval (`recall@k`, hit rate, MRR) against `eval/retrieval_eval.jsonl`, falling back to `eval/retrieval_eval.example.jsonl` on a clean checkout. Use `make eval-coverage` to check whether the retrieval eval set covers single-source, multi-source, and no-answer cases without touching the real index. `make eval-quality` measures router accuracy, citation accuracy, and the manual faithfulness ledger; use `make eval-quality-coverage` to run those quality metrics and fail when the eval set misses required case types or recommended layers. For a coverage-only quality check, run `python scripts/eval_quality.py --coverage-only`. `--coverage-only` is intentionally incompatible with `--check-coverage`, `--json`, and `--baseline`.
+Offline evaluation uses local JSONL files under `eval/`. `make eval-suite` is the default gate: it audits retrieval and quality eval coverage, runs lightweight quality metrics, prints quality summaries by case type and layer, and skips real retrieval by default. `make eval-suite-report` writes `eval/eval_suite_report.json`; `make eval-suite-baseline` compares aggregate, case-type, and layer-level quality metrics against `eval/eval_suite_baseline.json`; `make eval-suite-update-baseline` refreshes that baseline after review. Both generated files are ignored by Git. When a real index is available and retrieval metrics should also be compared, run `make eval-suite-run-retrieval`. `make eval` measures retrieval (`recall@k`, hit rate, MRR) against `eval/retrieval_eval.jsonl`, falling back to `eval/retrieval_eval.example.jsonl` on a clean checkout. Use `make eval-coverage` to check whether the retrieval eval set covers single-source, multi-source, and no-answer cases without touching the real index. `make eval-quality` measures router accuracy, citation accuracy, and the manual faithfulness ledger across QA, Summary, Compare, multi-turn, no-answer, and feedback layers; use `make eval-quality-coverage` to run those quality metrics and fail when the eval set misses required case types or recommended layers. Thumbs-down and correction feedback writes `eval_draft` rows to `bad_cases.jsonl`, so reviewed cases can be promoted into the quality eval set. For a coverage-only quality check, run `python scripts/eval_quality.py --coverage-only`. `--coverage-only` is intentionally incompatible with `--check-coverage`, `--json`, and `--baseline`.
 
 Every chat request gets a `request_id`/`trace_id`. When `COGDOC_TRACE_ENABLED=true`, the service writes JSON traces under `COGDOC_TRACE_DIR` (default `logs/traces`), and the same safe payload is available through `GET /v1/traces/{trace_id}`. `GET /v1/traces` lists recent traces and can be scoped by `doc_id` and `session_id`, which is how the Streamlit Trace panel shows only the current conversation. Trace files include `schema_version`, `status` (`ok`, `degraded`, or `failed`), total `duration_ms`, a safe config snapshot, step summaries, rewrite summaries, error summaries, and only truncated evidence previews rather than full document text. The standalone Debug console reads the same trace format.
+
+Backup/restore and index rebuild rules are covered in [PRODUCTION_zh-CN.md](docs/PRODUCTION_zh-CN.md).
 
 ## Known Limitations
 

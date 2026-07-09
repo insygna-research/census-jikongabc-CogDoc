@@ -4,7 +4,7 @@
 
 [English](../README.md) · [简体中文](README_zh-CN.md)
 
-一个面向个人 / 企业的本地 RAG 知识库控制台，上层是 **LangGraph 多 Agent 编排**，底层是**确定性 Rust 核心（PyO3 + maturin）**。它能在你自己的 PDF 知识库上做问答、总结单篇文档、对比多篇文档——而且每条生成结论都会绑定回 `[source:Pn]` 引用，并且这个引用是**经过校验的，而非默认可信**。你可以用**命令行控制台**、基于 FastAPI 服务的 **Streamlit 网页端**，也可以用独立 **Debug 控制台**查看 trace。
+一个面向个人 / 企业的本地 RAG 知识库控制台，上层是 **LangGraph 多 Agent 编排**，底层是**确定性 Rust 核心（PyO3 + maturin）**。它能在你自己的 PDF 知识库上做问答、总结单篇文档、对比多篇文档，也能把反馈沉淀为可审核的派生知识——而且每条生成结论都会绑定回 `[source:Pn]` 引用，并且这个引用是**经过校验的，而非默认可信**。你可以用**命令行控制台**、基于 FastAPI 服务的 **Streamlit 网页端**，也可以用独立 **Debug 控制台**查看 trace。
 
 > ⚠️ **目前仅支持带文字层的 PDF——暂未做 OCR。** 解析只抽取文本层；疑似扫描版/纯图片的页面会被标记（`is_ocr_fallback`）并跳过，不做识别。请使用包含真实文本的 PDF。
 
@@ -16,7 +16,7 @@
 
 - **多文档对比** — 在固定维度上逐文档建 profile，按维度渲染带引用的对比块。
 
-- **混合检索、native 打分** — 向量（Chroma + 多语言 BGE-M3）与 BM25 两路召回由 Rust RRF kernel 融合；分词与 BM25 均为 native——中文走 `jieba-rs`，英文做小写化 + Snowball 词干化 + 停用词过滤，中英文都召得回。
+- **混合检索、native 打分** — 向量（Chroma + 多语言 BGE-M3）与 BM25 两路召回由 Rust RRF kernel 融合，已审核派生知识会作为额外证据源一起检索；分词与 BM25 均为 native——中文走 `jieba-rs`，英文做小写化 + Snowball 词干化 + 停用词过滤，中英文都召得回。
 
 - **内容寻址的增量缓存** — 逐文件 SHA-256 manifest 加带版本的 chunk 身份契约：未变化的文件直接复用已建索引，只有 PDF 内容或切块方案真正变化时才增量重建。
 
@@ -24,49 +24,51 @@
 
 - **网页端、CLI 与 Debug 入口** — 斜杠命令 CLI、基于 FastAPI 的 Streamlit 网页端，以及聚焦 trace 诊断的 `make debug` 控制台。
 
-- **Trace 可观测与反馈闭环** — 每次请求可导出安全 JSON trace，包含请求配置、节点耗时、改写、证据预览与错误摘要；网页端只展示当前对话的 trace，赞踩反馈按 `trace_id` 归档。
+- **派生知识审核闭环** — 支持手动新增知识、保存已校验答案、把纠错/无依据反馈转成待审核知识卡片；每条知识可绑定来源、检测冲突、扫描过期、创建修订版本，并支持批量通过/驳回、归档和删除。
+
+- **反馈分析与检索调权** — 赞踩、纠错、评分、问题类型和 evidence 上下文按 `trace_id` 落盘；坏样本进入离线质量台账，反馈会被结构化分析为建议动作，检索调权记录可启用或回滚。
+
+- **Trace 可观测、审核队列与 webhook** — 每次请求可导出安全 JSON trace，包含请求配置、节点耗时、改写、证据预览与错误摘要；网页端只展示当前对话的 trace，并把待审核/过期知识、反馈分析、检索调权聚合成审核队列，也可在新待审核知识产生时投递 webhook。
 
 - **API 鉴权与限流** — 可选 API key 保护 `/v1` 路由，并使用令牌桶限流；健康检查、会话列表和 trace 轮询等高频只读接口不会误伤正常使用。
 
-  
+## 功能演示
 
 1. **网页端对话、引用与证据。** 选一个知识库，自然语言提问，看着答案流式生成，再展开引用来源和证据片段，并打 👍/👎 反馈。
 
-   <img src="./images/web-chat.png" alt="网页端对话" width="900">
+   <img src="./images/web-chat.png" alt="网页端对话" width="800">
 
 2. **命令行控制台。** 用斜杠命令管理知识库、入库、多对话历史和强制任务模式。
 
-   <img src="./images/cli-console.png" alt="命令行控制台" width="900">
+   <img src="./images/cli-console1.png" alt="命令行控制台" width="800">
 
 3. **独立 Debug 控制台。** `make debug` 针对一个知识库调试，普通提问后可继续用 `/trace`、`/steps`、`/rewrite`、`/evidence`、`/config` 查看细节，也可以用 `/retrieve <问题>` 只看召回与重排结果。
 
-   <img src="./images/debug-console1.png" alt="独立 Debug 控制台" width="900">
-
-   <img src="./images/debug-console2.png" alt="独立 Debug 控制台 trace 视图" width="900">
+   <img src="./images/debug-console1.png" alt="独立 Debug 控制台" width="800">
 
 4. **带引用的问答。** 每条事实性句子都以引用结尾，且引用的文件名和页码必须存在于本轮检索上下文中；非法引用会把回答打回重新生成。
 
-   <img src="./images/qa_net.png" alt="带引用的问答网页视图" width="900">
-
-   <img src="./images/qa_cli.png" alt="带引用的问答 CLI 视图" width="900">
+   <img src="./images/qa_net.png" alt="带引用的问答网页视图" width="800">
 
 5. **结构化摘要。** 把一篇点名文档总结为固定章节，每节带确定性引用。
 
-   <img src="./images/summary_net.png" alt="结构化摘要网页视图" width="900">
-
-   <img src="./images/summary_cli.png" alt="结构化摘要 CLI 视图" width="900">
+   <img src="./images/summary_net.png" alt="结构化摘要网页视图" width="800">
 
 6. **多文档对比。** 对两篇或更多点名文档逐方法、逐指标对比，每个单元格都带引用。
 
-   <img src="./images/compare_net.png" alt="多文档对比网页视图" width="900">
-
-   <img src="./images/compare_cli.png" alt="多文档对比 CLI 视图" width="900">
+   <img src="./images/compare_net.png" alt="多文档对比网页视图" width="800">
 
 7. **Trace 调试面板。** 只查看当前对话的 trace，可视化路由判别、问题改写、召回与重排、请求配置和引证审计。
 
-   <img src="./images/web-trace-debug.png" alt="Trace 调试面板" width="900">
+   <img src="./images/web-trace-debug.png" alt="Trace 调试面板" width="800">
 
-   <img src="./images/debug.png" alt="检索调试" width="900">
+8. **派生知识审核中心。** 新增知识、保存答案、检查来源绑定、查看冲突、通过/驳回/归档待处理项，并重建已通过派生知识索引。
+
+   <img src="./images/derived-knowledge3.png" alt="派生知识审核中心" width="800">
+
+9. **反馈与调权。** 每次赞踩、纠错和无依据反馈都会关联到本次回答的 `trace_id`、问题、答案、引用与证据；系统会把坏样本沉淀到评测台账，把可修正内容转为待审核派生知识，并生成可启用/禁用的检索调权记录，让后续召回排序能被人工反馈持续校正。
+
+   <img src="./images/feedback.png" alt="反馈与调权" width="800">
 
 ## 快速开始
 
@@ -100,6 +102,7 @@ make run            # python -m cogdoc.cli
 3. `/new` — 开新对话；`/chats`、`/open` 浏览持久化历史。
 4. 直接提问走 **QA**；"总结 `<文件>`" 走 **Summary**；"对比 `<a>` 和 `<b>`" 走 **Compare**。
 5. `/cloud` 用云端 LLM，`/local` 用 Ollama；`/help` 列出命令；`exit` 退出。
+6. `/dk` 或 `/knowledge` 管理派生知识，`/feedback` 查看反馈与反馈分析，`/tuning` 控制检索调权，`/review` 查看审核队列摘要、闭环指标和导出结果。
 
 `make debug` 打开针对单个库的独立 Debug 控制台。可以直接提问获得回答和 trace 摘要，再用 `/trace`、`/steps`、`/rewrite`、`/evidence`、`/config` 查看最近一次请求，也可以用 `/retrieve <问题>` 只检查召回和重排输出、不调用 LLM。需要直接调试指定知识库时，可运行 `python -m cogdoc.debug --kb <kb_id>`。
 
@@ -118,6 +121,7 @@ make frontend       # 终端 2：Streamlit 网页端（自动在浏览器打开�
 4. **聊天** — 选模式（`auto` / `qa` / `summary` / `compare`），提问，读流式答案及其引用来源、证据片段和 👍/👎 反馈。
 5. 在侧栏打开 **本地 Ollama 模式** 即可把生成切到本地模型。
 6. 打开 **调试**，只查看当前对话的请求 trace；也可以用 **检索调试** 直接调用 `/v1/retrieve`，检查命中 chunk、重排分数和 retrieval 元数据。
+7. 切到主视图里的 **派生知识**，可以新增知识、审核待处理/过期项、查看反馈分析、启用/禁用检索调权、导出审核队列，并在文档变化后扫描过期绑定。
 
 ### 直接调用 API
 
@@ -136,6 +140,14 @@ Streamlit 前端只是 FastAPI 服务上的瘦客户端——你也可以直接�
 | `GET /v1/traces?doc_id=...&session_id=...` | 列出最近 trace，可限定到某个知识库/会话 |
 | `GET /v1/traces/{trace_id}` | 查询已导出的请求 trace |
 | `POST /v1/feedback` | 按 `trace_id` 提交赞/踩 |
+| `GET /v1/feedback`、`GET /v1/feedback-analysis` | 浏览反馈记录与结构化反馈理解结果 |
+| `POST /v1/knowledge`、`GET /v1/knowledge` | 创建 / 查询派生知识 |
+| `POST /v1/knowledge/{id}/approve`、`/reject`、`/archive`、`/revise` | 审核或修订派生知识 |
+| `POST /v1/knowledge/batch-approve`、`POST /v1/knowledge/batch-reject` | 批量审核派生知识 |
+| `GET /v1/knowledge/pending-count`、`GET /v1/knowledge/index-status`、`POST /v1/knowledge/stale-scan` | 查询待审/过期数量、派生知识索引状态和过期来源绑定 |
+| `GET /v1/review-queue`、`GET /v1/review-queue/export` | 汇总并导出审核队列 |
+| `GET /v1/feedback-loop-metrics` | 返回反馈 / 审核 / 调权闭环指标 |
+| `GET /v1/retrieval-feedback`、`POST /v1/retrieval-feedback/{id}/enable`、`POST /v1/retrieval-feedback/{id}/disable` | 查看或回滚反馈生成的检索调权 |
 | `GET /healthz`、`GET /readyz`、`GET /metrics` | 健康、就绪、Prometheus 指标 |
 
 若配置了 `COGDOC_API_KEYS`，`/v1` 请求会被鉴权并限流；不配 key 时 `/v1` 对外开放（服务启动时会打告警日志）。
@@ -143,47 +155,30 @@ Streamlit 前端只是 FastAPI 服务上的瘦客户端——你也可以直接�
 ## 技术栈
 
 - **确定性内核** — 自研 [Rust](https://www.rust-lang.org/) 扩展（[PyO3](https://pyo3.rs/) + [maturin](https://www.maturin.rs/)）扛下 `jieba-rs` 中英分词、BM25、RRF 融合、SHA-256 manifest 与引用校验，全部 native、独立单测，不随 Agent / Prompt 漂移。
-- **检索** — `bge-m3` 多语言向量召回 + BM25 关键词召回，Rust RRF 融合后再用 `bge-reranker-v2-m3` 精排；向量落 [Chroma](https://www.trychroma.com/)，PDF 解析走 PyMuPDF。
+- **检索** — `bge-m3` 多语言向量召回 + BM25 关键词召回，Rust RRF 融合后再用 `bge-reranker-v2-m3` 精排；PDF 向量和已通过派生知识向量都落 [Chroma](https://www.trychroma.com/)，PDF 解析走 PyMuPDF。
 - **编排** — [LangGraph](https://langchain-ai.github.io/langgraph/) 把路由 → 改写 → 检索 → 生成 → 引用自愈串成可循环的状态图。
 - **模型** — OpenAI 兼容双后端、一键热切：云端 DeepSeek，本地 Ollama `qwen2.5:7b`。
-- **服务与可观测** — FastAPI 提供 SSE 流式接口、可选 API key 鉴权和令牌桶限流；会话 / 入库任务 / 反馈落 SQLite；JSON trace 同时服务于网页 Trace 面板和独立 Debug 控制台。
+- **服务与可观测** — FastAPI 提供 SSE 流式接口、可选 API key 鉴权和令牌桶限流；会话、入库任务、反馈、审核队列和派生知识都本地持久化；JSON trace 同时服务于网页 Trace 面板和独立 Debug 控制台。
 
 ## 架构
 
-```text
-┌───────────────────┐     ┌───────────────────┐     ┌───────────────────┐
-│ CLI console       │     │ Debug console     │     │ Streamlit web UI  │
-└─────────┬─────────┘     └─────────┬─────────┘     └─────────┬─────────┘
-          │                         │                         │
-          │ in-process              │ in-process              │ HTTP + SSE
-          ▼                         ▼                         ▼
-┌───────────────────────────────────────────────────────────────────────┐
-│                          LangGraph workflow                           │
-│                                                                       │
-│  intent_router  →  qa / summary / compare / unknown                   │
-│                                                                       │
-│  QA:       rewrite → verify → retrieve → rerank → generate            │
-│                                                   ▲          │        │
-│                                                   │          ▼        │
-│                                                citation ◄────┘        │
-│                                                self-heal loop         │
-│                                                                       │
-│  Summary:  loader → plan → section → global                           │
-│  Compare:  loader → profile → table → citation                        │
-└─────────────────────────────┬───────────────────────────┬─────────────┘
-                              │                           │
-                              │ hybrid retrieval          │ native kernels
-                              ▼                           ▼
-┌───────────────────────────────┐     ┌───────────────────────────────┐
-│ Chroma vectors                │     │ Rust core                     │
-│ BM25 native artifact          │◄───►│ tokenize · BM25 · RRF         │
-│ PDFs via PyMuPDF              │     │ SHA-256 · citation check      │
-└───────────────────────────────┘     └───────────────────────────────┘
-```
+>  **实线** → 运行时调用 / 数据流 &nbsp;|&nbsp; **虚线** → 启动 / 保护关系
 
-Summary 为单个点名文档生成固定章节结构化摘要；Compare 为每篇文档在固定维度上建 profile，再按维度渲染带引用的 Markdown 对比块。两者都从 chunk 元数据确定性地绑定 `[source:Pn]` 引用，并跑与 QA 同一套 `validate_citations_native` 校验——任何子图都不豁免。
+**运行链路**
 
-Python 层负责图编排、Prompt、模型客户端、索引、CLI 控制台、独立 Debug 控制台以及 FastAPI/Streamlit 前端。Rust 层（`rust_core`）负责确定性 kernel，不随 Agent 逻辑漂移，并独立做单元测试。
+<img src="images/architecture.zh-CN.svg" alt="运行链路" width="800">
+
+CLI 和 Debug 会绕过 FastAPI HTTP 适配层，直接在同一进程内调用 Python 核心服务；内置 Streamlit 网页端才通过 HTTP/SSE 访问 FastAPI。CLI、Debug 和 FastAPI 都会在启动时获取单实例进程锁，并先恢复 mutation journal，再处理知识库变更。
+
+下图展开入库、检索和本地持久化的边界：PDF 内容与已审核派生知识分别建索引，查询时再汇入同一候选池；反馈不会直接改写索引，而是先沉淀为可审核记录或可回滚的检索调权。
+
+**索引、检索与存储**
+
+<img src="images/index-retrieval.zh-CN.svg" alt="索引、检索与存储" width="800">
+
+Summary 为单个点名文档生成固定章节结构化摘要；Compare 为每篇文档在固定维度上建 profile，再按维度渲染带引用的 Markdown 对比块。两者都从 chunk 元数据确定性地绑定 `[source:Pn]` 引用，并跑与 QA 同一套 `validate_citations_native` 校验。
+
+Python 层负责图编排、Prompt、模型客户端、索引、CLI 控制台、独立 Debug 控制台以及 FastAPI/Streamlit 前端。已通过的派生知识在 Python 层存储和审核，单独写入 Chroma，并作为 QA 的独立证据源参与检索；待审核、过期、驳回和归档知识不会进入召回。Rust 层（`rust_core`）负责确定性 kernel，不随 Agent 逻辑漂移，并独立做单元测试。
 
 ## 索引链路
 
@@ -194,6 +189,8 @@ Python 层负责图编排、Prompt、模型客户端、索引、CLI 控制台、
 3. **解析** — `smart_parse`（PyMuPDF）抽取页文本，按文本块中心 x 坐标重排双栏布局，对疑似扫描页打 `is_ocr_fallback` 标记。不做 OCR；被标记的页不贡献任何文字。
 4. **切块** — `chunk_paper` 以 600 字符为硬上限、60 字符 overlap（最小 30）切过页文本流；边界优先按段落、句末标点/分号、换行/空白确定，超长无边界文本才退回固定窗口。每个 chunk 会保存前后最多 160 字符的定位上下文，通过 `bisect` 映射回页跨度，并赋予稳定的 `chunk_id`。
 5. **建索引** — chunk 写入 Chroma（向量）和 BM25 持久化 artifact；BM25 artifact 保存精简 chunk registry 与 native `Bm25Index` 字节，加载时直接从字节恢复 native 索引，不再从 Python 分词语料重建。`save_index_manifest` 落盘 manifest。分词走 `tokenize_mixed_text_native` / `tokenize_corpus_native`（中文 `jieba-rs`，英文 Snowball 词干化 + 停用词过滤）。
+
+已审核派生知识与 PDF 源文档分开建索引。审核状态变化后可重建派生知识 Chroma collection，过期扫描会标记那些来源绑定已不再匹配当前知识库文档的知识。
 
 **Chunk 身份契约：**
 
@@ -207,7 +204,7 @@ chunk_id = sha256:{source_sha256}:src:{source_name}:p{page_start}-p{page_end}:c{
 
 - **意图路由** — `RouterAgent` 要求 LLM 返回结构化 `task_type ∈ {qa, summary, compare, unknown}`，任何解析异常都按关键词规则回退。`qa`、`summary`、`compare` 都已接到真实子图。
 - **改写 + 漂移守卫** — `QueryRewriteAgent` 生成 1–3 条关键词查询（pydantic 结构化输出）。`RewriteVerifyAgent` 一次批量 embed `[原问题] + 改写`，保留 `cosine >= rewrite_similarity_threshold`（默认 `0.5`）的改写，把保留/丢弃写入 `steps_trace`；若全被丢弃则只用原问题。
-- **混合检索 + RRF** — 每条 query 下两路各超召 `top_k * 3`（QA 用 `top_k = 9` → 每路 27）；`rrf_fusion_native`（Rust，`k = 60`）计算 `score(d) = Σ_c 1 / (k + rank_c(d))`，合并共享同一 `chunk_id` 的命中，并按分数降序、身份键升序排序保证确定性。
+- **混合检索 + RRF** — 每条 query 下 PDF 两路各超召 `top_k * 3`（QA 用 `top_k = 9` → 每路 27）；`rrf_fusion_native`（Rust，`k = 60`）计算 `score(d) = Σ_c 1 / (k + rank_c(d))`，合并共享同一 `chunk_id` 的命中，并按分数降序、身份键升序排序保证确定性。已通过派生知识会按原问题/改写问题单独检索并并入同一证据池，随后应用反馈生成的检索调权，再进入重排。
 - **重排** — `BGEReranker`（`bge-reranker-v2-m3`）对 `(原问题, doc)` 打分并取 `top_n = 3`；改写不会影响最终排序。
 - **生成 + 引用自愈** — `Generator`（OpenAI 兼容；云端 `deepseek-chat` 或本地 `qwen2.5:7b`，`temperature = 0.2`）把文档包装为 `<Document source=… page=… chunk_id=…>` 并强制 `[source:Pn]` 标签。`validate_citations_native`（Rust）返回结构化的 `missing_citations` / `invalid_sources` / `invalid_pages`；`citation_node` 把失败转成 critique，循环 `generate → citation` 至 `max_iteration_count`（默认 `2`）。只有通过校验的回答才会打印。
 
@@ -232,26 +229,40 @@ chunk_id = sha256:{source_sha256}:src:{source_name}:p{page_start}-p{page_end}:c{
 
 ```text
 CogDoc/
-├── src/cogdoc/              # 可导入的发行包（src-layout）
-│   ├── cli.py               # 多库/多对话控制台（python -m cogdoc.cli / `cogdoc`）
-│   ├── debug.py             # 独立 Trace Debug 控制台（python -m cogdoc.debug / `cogdoc-debug`）
-│   ├── agents/              # router、query_rewriter、rewrite_verifier、qa_generator、
-│   │                        # citation_validator、structured_output、summary_*、compare_*
-│   ├── api/                 # FastAPI app、routes、持久化、访问控制、metrics
-│   ├── config/              # pydantic-settings 配置
-│   ├── frontend/            # Streamlit 瘦客户端 + api_client
-│   ├── graph/               # state.py、workflow.py、subgraphs/（qa、summary、compare）
-│   ├── observability/       # 结构化日志 + trace 导出
-│   ├── service/             # chat/ingest 服务、KB 生命周期、事务化索引
-│   └── tools/               # parser、chunker、manifest、tokenizer、embedder、reranker、
-│                            # rust_core_loader、retriever/（vector、native bm25、hybrid）
-├── rust_core/src/           # lib.rs、scanner.rs、rrf.rs、citation.rs、tokenizer.rs、bm25.rs
-├── scripts/check_native.py  # 原生扩展健康检查（6 个必需符号）
-├── tests/                   # Python 回归测试
-├── eval/                    # 离线评测示例数据集
-├── docs/                    # 中文 README 及其他文档
-└── pyproject.toml           # 项目元数据、依赖、构建、pytest 配置
+├── src/cogdoc/
+│   ├── cli.py
+│   ├── debug.py
+│   ├── agents/
+│   ├── api/
+│   │   └── routes/
+│   ├── config/
+│   ├── frontend/
+│   ├── graph/
+│   │   └── subgraphs/
+│   ├── observability/
+│   ├── service/
+│   └── tools/
+│       └── retriever/
+├── rust_core/src/
+├── scripts/
+├── tests/
+├── eval/
+├── docs/
+└── pyproject.toml
 ```
+
+| 路径 | 负责内容 |
+| --- | --- |
+| `src/cogdoc/cli.py` | 多知识库、多对话命令行入口（`python -m cogdoc.cli` / `cogdoc`） |
+| `src/cogdoc/debug.py` | 独立 Trace Debug 控制台（`python -m cogdoc.debug` / `cogdoc-debug`） |
+| `src/cogdoc/agents/` | 路由、问题改写、生成、引用校验、反馈理解，以及 Summary / Compare 的 Agent 原语 |
+| `src/cogdoc/api/` | FastAPI app、路由、schema、持久化、访问控制、metrics、feedback / knowledge store、webhook |
+| `src/cogdoc/frontend/` | Streamlit 瘦客户端和 API client |
+| `src/cogdoc/graph/` | LangGraph 状态、主 workflow、QA / Summary / Compare 子图 |
+| `src/cogdoc/service/` | chat / ingest 服务、KB 生命周期、事务化索引、锁、清理和后台任务 |
+| `src/cogdoc/tools/` | PDF 解析、切块、manifest、embedding、rerank、Rust loader 和检索器 |
+| `rust_core/src/` | PyO3 原生内核：scanner、tokenizer、BM25、RRF、citation validator |
+| `scripts/`、`tests/`、`eval/`、`docs/` | 健康检查脚本、测试、离线评测集和项目文档 |
 
 ## 配置
 

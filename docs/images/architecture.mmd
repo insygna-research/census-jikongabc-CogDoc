@@ -1,0 +1,85 @@
+flowchart TB
+    classDef node fill:#ffffff,stroke:#8c959f,stroke-width:1px,color:#24292f
+    classDef core fill:#eef6ff,stroke:#54aeef,stroke-width:1px,color:#24292f
+    classDef guard fill:#fff1f1,stroke:#ff8182,stroke-width:1px,color:#24292f
+    classDef native fill:#fff8c5,stroke:#d4a72c,stroke-width:1px,color:#24292f
+    subgraph ENTRY["Entry points"]
+        direction LR
+        CLI["CLI console"]
+        DEBUG["Debug console"]
+        WEB["Streamlit web UI"]
+    end
+
+    subgraph HTTP["FastAPI HTTP API"]
+        direction LR
+        APISTART["app startup"]
+        ACCESS["API key auth · rate limit · metrics"]
+        ROUTES["routes<br/>chat · agent · documents<br/>knowledge · feedback · traces · health"]
+        APISTART -. register middleware .-> ACCESS
+        APISTART -. register routes .-> ROUTES
+        ACCESS --> ROUTES
+    end
+
+    subgraph CORE["Core Python services"]
+        direction LR
+        SERVICE["service functions"]
+        CHAT["chat service"]
+        INGEST["ingest service"]
+        REVIEW["review queue · webhooks"]
+        SERVICE --> CHAT
+        SERVICE -->|"ingest / KB mutation"| INGEST
+        SERVICE --> REVIEW
+    end
+
+    subgraph SAFETY["Runtime safeguards"]
+        direction LR
+        PROCLOCK["startup gate<br/>single-instance lock"]
+        JOURNAL["mutation journal<br/>startup recovery"]
+        KBLOCK["per-KB<br/>write lock"]
+        PROCLOCK --> JOURNAL
+    end
+
+    subgraph GRAPH["LangGraph workflow"]
+        direction LR
+        ROUTER["RouterAgent"]
+        QA["QA subgraph<br/>rewrite · verify · retrieve<br/>rerank · generate · self-heal"]
+        SUMMARY["Summary subgraph<br/>loader · plan · sections · global"]
+        COMPARE["Compare subgraph<br/>loader · profile · table · citation"]
+        ROUTER --> QA
+        ROUTER --> SUMMARY
+        ROUTER --> COMPARE
+    end
+
+    subgraph BACKENDS["Model and native backends"]
+        direction LR
+        LLM["LLM clients<br/>Cloud / Ollama"]
+        RUST["Rust core<br/>tokenize · BM25 · RRF · SHA-256 · citation check"]
+    end
+
+    CLI -->|"in-process"| SERVICE
+    DEBUG -->|"in-process"| SERVICE
+    WEB -->|"HTTP + SSE"| ACCESS
+    ROUTES --> SERVICE
+    CLI -. startup .-> PROCLOCK
+    DEBUG -. startup .-> PROCLOCK
+    APISTART -. startup .-> PROCLOCK
+    INGEST -. write protection .-> KBLOCK
+    CHAT --> ROUTER
+    INGEST --> RUST
+    QA --> LLM
+    SUMMARY --> LLM
+    COMPARE --> LLM
+    QA --> RUST
+    SUMMARY --> RUST
+    COMPARE --> RUST
+
+    style ENTRY fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style HTTP fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style CORE fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style SAFETY fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style GRAPH fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style BACKENDS fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    class CLI,DEBUG,WEB,APISTART,ROUTES,ACCESS,SERVICE,CHAT,INGEST,REVIEW,ROUTER,QA,SUMMARY,COMPARE node
+    class SERVICE,CHAT,INGEST,REVIEW core
+    class PROCLOCK,JOURNAL,KBLOCK guard
+    class LLM,RUST native
