@@ -166,7 +166,94 @@ Streamlit 前端只是 FastAPI 服务上的瘦客户端——你也可以直接�
 
 **运行链路**
 
-<img src="images/architecture.zh-CN.svg" alt="运行链路" width="800">
+```mermaid
+%%{init: {"theme":"base","htmlLabels":true,"flowchart":{"curve":"linear","nodeSpacing":50,"rankSpacing":50,"padding":15,"useMaxWidth":true},"themeVariables":{"fontSize":"12px","fontFamily":"Times New Roman, Times, serif","clusterBkg":"#f6f8fa","clusterBorder":"#d0d7de","lineColor":"#333333","primaryColor":"#ffffff","primaryBorderColor":"#8c959f","primaryTextColor":"#24292f"}}}%%
+flowchart TB
+    classDef node fill:#ffffff,stroke:#8c959f,stroke-width:1px,color:#24292f
+    classDef core fill:#eef6ff,stroke:#54aeef,stroke-width:1px,color:#24292f
+    classDef guard fill:#fff1f1,stroke:#ff8182,stroke-width:1px,color:#24292f
+    classDef native fill:#fff8c5,stroke:#d4a72c,stroke-width:1px,color:#24292f
+    subgraph ENTRY["入口"]
+        direction LR
+        CLI["CLI 控制台"]
+        DEBUG["Debug 控制台"]
+        WEB["Streamlit 网页端"]
+    end
+
+    subgraph HTTP["FastAPI HTTP API"]
+        direction LR
+        APISTART["app startup"]
+        ACCESS["API key 鉴权 · 限流 ·<br/>metrics"]
+        ROUTES["路由<br/>chat · agent · documents<br/>knowledge · feedback<br/>· traces · health"]
+        APISTART -. 注册中间件 .-> ACCESS
+        APISTART -. 注册路由 .-> ROUTES
+        ACCESS --> ROUTES
+    end
+
+    subgraph CORE["Python 核心服务"]
+        direction LR
+        SERVICE["服务函数"]
+        CHAT["chat 服务"]
+        INGEST["ingest 服务"]
+        REVIEW["审核队列 · webhook"]
+        SERVICE --> CHAT
+        SERVICE -->|"入库 / KB 变更"| INGEST
+        SERVICE --> REVIEW
+    end
+
+    subgraph SAFETY["运行保护"]
+        direction LR
+        PROCLOCK["启动保护<br/>单实例进程锁"]
+        JOURNAL["mutation journal<br/>启动恢复"]
+        KBLOCK["按 KB<br/>写锁"]
+        PROCLOCK --> JOURNAL
+    end
+
+    subgraph GRAPH["LangGraph 工作流"]
+        direction LR
+        ROUTER["RouterAgent"]
+        QA["QA 子图<br/>rewrite · verify · retrieve<br/>rerank · generate · 引用<br/>自愈"]
+        SUMMARY["Summary 子图<br/>loader · plan · sections<br/>· global"]
+        COMPARE["Compare 子图<br/>loader · profile · table<br/>· citation"]
+        ROUTER --> QA
+        ROUTER --> SUMMARY
+        ROUTER --> COMPARE
+    end
+
+    subgraph BACKENDS["模型与原生后端"]
+        direction LR
+        LLM["LLM 客户端<br/>云端 / Ollama"]
+        RUST["Rust 核心<br/>分词 · BM25 · RRF · SHA-256<br/>· citation check"]
+    end
+
+    CLI -->|"in-process"| SERVICE
+    DEBUG -->|"in-process"| SERVICE
+    WEB -->|"HTTP + SSE"| ACCESS
+    ROUTES --> SERVICE
+    CLI -. 启动 .-> PROCLOCK
+    DEBUG -. 启动 .-> PROCLOCK
+    APISTART -. 启动 .-> PROCLOCK
+    INGEST -. 写入保护 .-> KBLOCK
+    CHAT --> ROUTER
+    INGEST --> RUST
+    QA --> LLM
+    SUMMARY --> LLM
+    COMPARE --> LLM
+    QA --> RUST
+    SUMMARY --> RUST
+    COMPARE --> RUST
+
+    style ENTRY fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style HTTP fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style CORE fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style SAFETY fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style GRAPH fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style BACKENDS fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    class CLI,DEBUG,WEB,APISTART,ROUTES,ACCESS,SERVICE,CHAT,INGEST,REVIEW,ROUTER,QA,SUMMARY,COMPARE node
+    class SERVICE,CHAT,INGEST,REVIEW core
+    class PROCLOCK,JOURNAL,KBLOCK guard
+    class LLM,RUST native
+```
 
 CLI 和 Debug 会绕过 FastAPI HTTP 适配层，直接在同一进程内调用 Python 核心服务；内置 Streamlit 网页端才通过 HTTP/SSE 访问 FastAPI。CLI、Debug 和 FastAPI 都会在启动时获取单实例进程锁，并先恢复 mutation journal，再处理知识库变更。
 
@@ -174,7 +261,123 @@ CLI 和 Debug 会绕过 FastAPI HTTP 适配层，直接在同一进程内调用 
 
 **索引、检索与存储**
 
-<img src="images/index-retrieval.zh-CN.svg" alt="索引、检索与存储" width="800">
+```mermaid
+%%{init: {"theme":"base","htmlLabels":true,"flowchart":{"curve":"linear","nodeSpacing":50,"rankSpacing":50,"padding":15,"useMaxWidth":true},"themeVariables":{"fontSize":"12px","fontFamily":"Times New Roman, Times, serif","clusterBkg":"#f6f8fa","clusterBorder":"#d0d7de","lineColor":"#333333","primaryColor":"#ffffff","primaryBorderColor":"#8c959f","primaryTextColor":"#24292f"}}}%%
+flowchart TB
+    classDef node fill:#ffffff,stroke:#8c959f,stroke-width:1px,color:#24292f
+    classDef storage fill:#f0fff4,stroke:#4ac26b,stroke-width:1px,color:#24292f
+    classDef guard fill:#fff1f1,stroke:#ff8182,stroke-width:1px,color:#24292f
+    classDef native fill:#fff8c5,stroke:#d4a72c,stroke-width:1px,color:#24292f
+
+    subgraph SERVICES["Python 核心服务"]
+        direction LR
+        INGEST["ingest 服务"]
+        KBMUT["知识库变更<br/>创建 · 删除 · 上传 · 重建"]
+        CHAT["chat 服务"]
+        FEEDBACK["反馈入口"]
+        FBANALYSIS["反馈分析"]
+        REVIEW["知识审核"]
+    end
+
+    subgraph NATIVE["Rust 核心"]
+        direction LR
+        RUST["分词 · SHA-256<br/>BM25 · RRF"]
+    end
+
+    subgraph SAFETY["变更保护"]
+        direction LR
+        PROCLOCK["单实例进程锁<br/>(启动时获取)"]
+        KBLOCK["kb_write_lock"]
+        JOURNAL["mutation journal"]
+        EPOCH["KB epoch<br/>tombstone"]
+    end
+
+    subgraph INGESTION["入库流水线"]
+        direction LR
+        PARSE["PDF 解析 · 切块<br/>manifest"]
+    end
+
+    subgraph STORE["本地存储"]
+        direction LR
+        PDFVEC["Chroma<br/>PDF 向量"]
+        DKVEC["Chroma<br/>派生知识向量"]
+        BM25["BM25 artifact"]
+        SQLITE["SQLite<br/>会话 · 入库任务"]
+        FEEDSTORE["feedback store<br/>反馈记录"]
+        DKSTORE["derived knowledge store<br/>派生知识"]
+        TUNESTORE["retrieval tuning store<br/>调权记录"]
+        TRACELOG["trace / logs<br/>可观测日志"]
+        ARTIFACTS["artifacts<br/>manifest · journal"]
+    end
+
+    subgraph RETRIEVAL["QA 检索流水线"]
+        direction LR
+        QUERY["查询 + 改写"]
+        VECH["PDF 向量召回<br/>Chroma"]
+        BM25CH["PDF 关键词召回<br/>BM25"]
+        DKCH["派生知识通道<br/>向量搜索"]
+        FUSION["PDF RRF 融合"]
+        CAND["候选池"]
+        TUNE["反馈权重"]
+        RERANK["bge-reranker-v2-m3"]
+        EVIDENCE["回答证据"]
+        QUERY --> VECH
+        QUERY --> BM25CH
+        QUERY --> DKCH
+        VECH --> FUSION
+        BM25CH --> FUSION
+        FUSION --> CAND
+        DKCH -->|"单独合并"| CAND
+        CAND --> TUNE
+        TUNE --> RERANK
+        RERANK --> EVIDENCE
+    end
+
+    subgraph KNOWLEDGE["反馈与审核闭环"]
+        direction LR
+        APPROVED["已通过派生知识"]
+    end
+
+    PROCLOCK --> JOURNAL
+    INGEST --> KBLOCK
+    KBMUT --> KBLOCK
+    KBLOCK --> PARSE
+    KBLOCK --> EPOCH
+    PARSE --> RUST
+    PARSE --> PDFVEC
+    PARSE --> ARTIFACTS
+    RUST --> BM25
+    RUST -. RRF .-> FUSION
+    APPROVED --> DKVEC
+    PDFVEC --> VECH
+    BM25 --> BM25CH
+    DKVEC --> DKCH
+    CHAT --> QUERY
+    CHAT --> SQLITE
+    CHAT --> TRACELOG
+    CHAT --> FEEDBACK
+    FEEDBACK --> FEEDSTORE
+    FEEDBACK --> FBANALYSIS
+    FBANALYSIS --> REVIEW
+    FBANALYSIS --> TUNESTORE
+    REVIEW --> DKSTORE
+    KBLOCK --> JOURNAL
+    JOURNAL --> ARTIFACTS
+    REVIEW --> APPROVED
+    TUNESTORE --> TUNE
+
+    style SERVICES fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style NATIVE fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style SAFETY fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style INGESTION fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style STORE fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style RETRIEVAL fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style KNOWLEDGE fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    class INGEST,KBMUT,CHAT,FEEDBACK,FBANALYSIS,REVIEW,PARSE,QUERY,VECH,BM25CH,DKCH,FUSION,CAND,TUNE,RERANK,EVIDENCE,APPROVED node
+    class PDFVEC,DKVEC,BM25,SQLITE,FEEDSTORE,DKSTORE,TUNESTORE,TRACELOG,ARTIFACTS storage
+    class PROCLOCK,KBLOCK,JOURNAL,EPOCH guard
+    class RUST native
+```
 
 Summary 为单个点名文档生成固定章节结构化摘要；Compare 为每篇文档在固定维度上建 profile，再按维度渲染带引用的 Markdown 对比块。两者都从 chunk 元数据确定性地绑定 `[source:Pn]` 引用，并跑与 QA 同一套 `validate_citations_native` 校验。
 

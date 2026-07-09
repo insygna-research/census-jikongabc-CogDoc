@@ -166,7 +166,94 @@ If `COGDOC_API_KEYS` is configured, `/v1` requests are authenticated and rate-li
 
 **Runtime Path**
 
-<img src="docs/images/architecture.svg" alt="Runtime Path" width="800">
+```mermaid
+%%{init: {"theme":"base","htmlLabels":true,"flowchart":{"curve":"linear","nodeSpacing":50,"rankSpacing":50,"padding":15,"useMaxWidth":true},"themeVariables":{"fontSize":"12px","fontFamily":"Times New Roman, Times, serif","clusterBkg":"#f6f8fa","clusterBorder":"#d0d7de","lineColor":"#333333","primaryColor":"#ffffff","primaryBorderColor":"#8c959f","primaryTextColor":"#24292f"}}}%%
+flowchart TB
+    classDef node fill:#ffffff,stroke:#8c959f,stroke-width:1px,color:#24292f
+    classDef core fill:#eef6ff,stroke:#54aeef,stroke-width:1px,color:#24292f
+    classDef guard fill:#fff1f1,stroke:#ff8182,stroke-width:1px,color:#24292f
+    classDef native fill:#fff8c5,stroke:#d4a72c,stroke-width:1px,color:#24292f
+    subgraph ENTRY["Entry points"]
+        direction LR
+        CLI["CLI console"]
+        DEBUG["Debug console"]
+        WEB["Streamlit web UI"]
+    end
+
+    subgraph HTTP["FastAPI HTTP API"]
+        direction LR
+        APISTART["app startup"]
+        ACCESS["API key auth · rate limit · metrics"]
+        ROUTES["routes<br/>chat · agent · documents<br/>knowledge · feedback · traces · health"]
+        APISTART -. register middleware .-> ACCESS
+        APISTART -. register routes .-> ROUTES
+        ACCESS --> ROUTES
+    end
+
+    subgraph CORE["Core Python services"]
+        direction LR
+        SERVICE["service functions"]
+        CHAT["chat service"]
+        INGEST["ingest service"]
+        REVIEW["review queue · webhooks"]
+        SERVICE --> CHAT
+        SERVICE -->|"ingest / KB mutation"| INGEST
+        SERVICE --> REVIEW
+    end
+
+    subgraph SAFETY["Runtime safeguards"]
+        direction LR
+        PROCLOCK["startup gate<br/>single-instance lock"]
+        JOURNAL["mutation journal<br/>startup recovery"]
+        KBLOCK["per-KB<br/>write lock"]
+        PROCLOCK --> JOURNAL
+    end
+
+    subgraph GRAPH["LangGraph workflow"]
+        direction LR
+        ROUTER["RouterAgent"]
+        QA["QA subgraph<br/>rewrite · verify · retrieve<br/>rerank · generate · self-heal"]
+        SUMMARY["Summary subgraph<br/>loader · plan · sections · global"]
+        COMPARE["Compare subgraph<br/>loader · profile · table · citation"]
+        ROUTER --> QA
+        ROUTER --> SUMMARY
+        ROUTER --> COMPARE
+    end
+
+    subgraph BACKENDS["Model and native backends"]
+        direction LR
+        LLM["LLM clients<br/>Cloud / Ollama"]
+        RUST["Rust core<br/>tokenize · BM25 · RRF · SHA-256 · citation check"]
+    end
+
+    CLI -->|"in-process"| SERVICE
+    DEBUG -->|"in-process"| SERVICE
+    WEB -->|"HTTP + SSE"| ACCESS
+    ROUTES --> SERVICE
+    CLI -. startup .-> PROCLOCK
+    DEBUG -. startup .-> PROCLOCK
+    APISTART -. startup .-> PROCLOCK
+    INGEST -. write protection .-> KBLOCK
+    CHAT --> ROUTER
+    INGEST --> RUST
+    QA --> LLM
+    SUMMARY --> LLM
+    COMPARE --> LLM
+    QA --> RUST
+    SUMMARY --> RUST
+    COMPARE --> RUST
+
+    style ENTRY fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style HTTP fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style CORE fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style SAFETY fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style GRAPH fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style BACKENDS fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    class CLI,DEBUG,WEB,APISTART,ROUTES,ACCESS,SERVICE,CHAT,INGEST,REVIEW,ROUTER,QA,SUMMARY,COMPARE node
+    class SERVICE,CHAT,INGEST,REVIEW core
+    class PROCLOCK,JOURNAL,KBLOCK guard
+    class LLM,RUST native
+```
 
 CLI and Debug bypass the FastAPI HTTP adapter; they call the same Python services in-process. The Streamlit UI is the built-in entry point that talks to FastAPI over HTTP/SSE. CLI, Debug, and FastAPI all acquire the single-instance process lock at startup, then recover the mutation journal before serving KB mutations.
 
@@ -174,7 +261,123 @@ The next diagram expands ingestion, retrieval, and local persistence boundaries:
 
 **Index, Retrieval, and Storage**
 
-<img src="docs/images/index-retrieval.svg" alt="Index, Retrieval, and Storage" width="800">
+```mermaid
+%%{init: {"theme":"base","htmlLabels":true,"flowchart":{"curve":"linear","nodeSpacing":50,"rankSpacing":50,"padding":15,"useMaxWidth":true},"themeVariables":{"fontSize":"12px","fontFamily":"Times New Roman, Times, serif","clusterBkg":"#f6f8fa","clusterBorder":"#d0d7de","lineColor":"#333333","primaryColor":"#ffffff","primaryBorderColor":"#8c959f","primaryTextColor":"#24292f"}}}%%
+flowchart TB
+    classDef node fill:#ffffff,stroke:#8c959f,stroke-width:1px,color:#24292f
+    classDef storage fill:#f0fff4,stroke:#4ac26b,stroke-width:1px,color:#24292f
+    classDef guard fill:#fff1f1,stroke:#ff8182,stroke-width:1px,color:#24292f
+    classDef native fill:#fff8c5,stroke:#d4a72c,stroke-width:1px,color:#24292f
+
+    subgraph SERVICES["Core Python services"]
+        direction LR
+        INGEST["ingest service"]
+        KBMUT["KB mutations<br/>create · delete · upload · reindex"]
+        CHAT["chat service"]
+        FEEDBACK["feedback entry"]
+        FBANALYSIS["feedback analysis"]
+        REVIEW["knowledge review"]
+    end
+
+    subgraph NATIVE["Rust core"]
+        direction LR
+        RUST["tokenize · SHA-256<br/>BM25 · RRF"]
+    end
+
+    subgraph SAFETY["Mutation safety"]
+        direction LR
+        PROCLOCK["single-instance lock<br/>(acquired at startup)"]
+        KBLOCK["kb_write_lock"]
+        JOURNAL["mutation journal"]
+        EPOCH["KB epoch<br/>tombstone"]
+    end
+
+    subgraph INGESTION["Ingestion pipeline"]
+        direction LR
+        PARSE["PDF parse · chunk<br/>manifest"]
+    end
+
+    subgraph STORE["Local storage"]
+        direction LR
+        PDFVEC["Chroma<br/>PDF vectors"]
+        DKVEC["Chroma<br/>derived-knowledge vectors"]
+        BM25["BM25 artifact"]
+        SQLITE["SQLite<br/>sessions · index jobs"]
+        FEEDSTORE["feedback store<br/>feedback records"]
+        DKSTORE["derived knowledge store<br/>derived knowledge"]
+        TUNESTORE["retrieval tuning store<br/>tuning records"]
+        TRACELOG["trace / logs<br/>observability logs"]
+        ARTIFACTS["artifacts<br/>manifest · journal"]
+    end
+
+    subgraph RETRIEVAL["QA retrieval pipeline"]
+        direction LR
+        QUERY["query + rewrites"]
+        VECH["PDF vector recall<br/>Chroma"]
+        BM25CH["PDF keyword recall<br/>BM25"]
+        DKCH["derived-knowledge channel<br/>vector search"]
+        FUSION["PDF RRF fusion"]
+        CAND["candidate pool"]
+        TUNE["feedback weights"]
+        RERANK["bge-reranker-v2-m3"]
+        EVIDENCE["evidence for answer"]
+        QUERY --> VECH
+        QUERY --> BM25CH
+        QUERY --> DKCH
+        VECH --> FUSION
+        BM25CH --> FUSION
+        FUSION --> CAND
+        DKCH -->|"merge separately"| CAND
+        CAND --> TUNE
+        TUNE --> RERANK
+        RERANK --> EVIDENCE
+    end
+
+    subgraph KNOWLEDGE["Feedback and review loop"]
+        direction LR
+        APPROVED["approved derived knowledge"]
+    end
+
+    PROCLOCK --> JOURNAL
+    INGEST --> KBLOCK
+    KBMUT --> KBLOCK
+    KBLOCK --> PARSE
+    KBLOCK --> EPOCH
+    PARSE --> RUST
+    PARSE --> PDFVEC
+    PARSE --> ARTIFACTS
+    RUST --> BM25
+    RUST -. RRF .-> FUSION
+    APPROVED --> DKVEC
+    PDFVEC --> VECH
+    BM25 --> BM25CH
+    DKVEC --> DKCH
+    CHAT --> QUERY
+    CHAT --> SQLITE
+    CHAT --> TRACELOG
+    CHAT --> FEEDBACK
+    FEEDBACK --> FEEDSTORE
+    FEEDBACK --> FBANALYSIS
+    FBANALYSIS --> REVIEW
+    FBANALYSIS --> TUNESTORE
+    REVIEW --> DKSTORE
+    KBLOCK --> JOURNAL
+    JOURNAL --> ARTIFACTS
+    REVIEW --> APPROVED
+    TUNESTORE --> TUNE
+
+    style SERVICES fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style NATIVE fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style SAFETY fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style INGESTION fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style STORE fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style RETRIEVAL fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    style KNOWLEDGE fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
+    class INGEST,KBMUT,CHAT,FEEDBACK,FBANALYSIS,REVIEW,PARSE,QUERY,VECH,BM25CH,DKCH,FUSION,CAND,TUNE,RERANK,EVIDENCE,APPROVED node
+    class PDFVEC,DKVEC,BM25,SQLITE,FEEDSTORE,DKSTORE,TUNESTORE,TRACELOG,ARTIFACTS storage
+    class PROCLOCK,KBLOCK,JOURNAL,EPOCH guard
+    class RUST native
+```
 
 Summary builds a fixed-section structured summary of one named document; Compare builds a per-document profile across fixed dimensions and renders cited Markdown comparison blocks grouped by dimension. Both bind `[source:Pn]` citations deterministically from chunk metadata and run the same `validate_citations_native` checker as QA.
 

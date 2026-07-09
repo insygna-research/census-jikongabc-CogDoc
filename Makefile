@@ -7,7 +7,7 @@ SHELL   := /bin/bash
 # src-layout：包源码在 src/，入口经 PYTHONPATH 注入，无需先安装即可 run/serve/test。
 export PYTHONPATH := src
 
-.PHONY: help install native check test smoke-api run debug backup eval eval-coverage eval-quality eval-quality-coverage eval-suite eval-suite-run-retrieval eval-suite-report eval-suite-baseline eval-suite-update-baseline serve frontend docs docs-install
+.PHONY: help install native check test smoke-api run debug backup eval eval-coverage eval-quality eval-quality-coverage eval-suite eval-suite-run-retrieval eval-suite-report eval-suite-baseline eval-suite-update-baseline serve frontend
 
 help:
 	@echo "make install - 可编辑安装含开发依赖 (pip install -e '.[dev]')"
@@ -29,8 +29,6 @@ help:
 	@echo "make debug   - 启动独立 Debug 控制台 (python -m cogdoc.debug)"
 	@echo "make serve   - 启动 FastAPI 服务 (uvicorn cogdoc.api.app:app)"
 	@echo "make frontend - 启动 Streamlit 前端 (src/cogdoc/frontend/app.py)"
-	@echo "make docs     - 本地渲染 Mermaid 图 (docs/images/*.mmd → .png)"
-	@echo "make docs-install - 安装 mermaid-cli 依赖 (首次使用 make docs 前运行)"
 
 install:
 	$(PYTHON) -m pip install -e ".[dev]"
@@ -89,27 +87,3 @@ serve:
 
 frontend:
 	$(PYTHON) -m streamlit run src/cogdoc/frontend/app.py
-
-docs-install:
-	PUPPETEER_SKIP_DOWNLOAD=true npm install --prefix docs/images
-
-docs:
-	@test -x docs/images/node_modules/.bin/mmdc || (echo ">> 先运行 make docs-install"; exit 1)
-	@CHROME=$$(which google-chrome-stable 2>/dev/null || which chromium-browser 2>/dev/null || which chromium 2>/dev/null); \
-	if [ -z "$$CHROME" ]; then echo ">> 未找到 Chrome/Chromium，请先安装"; exit 1; fi; \
-	set -euo pipefail; \
-	MMDC=docs/images/node_modules/.bin/mmdc; \
-	for mmd in docs/images/*.mmd; do \
-		echo ">> 渲染 $$mmd"; \
-		svg="$${mmd%.mmd}.svg"; \
-		rm -f "$$svg"; \
-		if [[ "$$(basename "$$mmd")" == architecture*.mmd ]]; then \
-			PUPPETEER_EXECUTABLE_PATH=$$CHROME "$$MMDC" -i "$$mmd" -o "$$svg" \
-				-b white --width 1600 --height 1400 \
-				-c docs/images/mermaid-config.json -p .github/puppeteer-config.json; \
-		else \
-			PUPPETEER_EXECUTABLE_PATH=$$CHROME "$$MMDC" -i "$$mmd" -o "$$svg" \
-				-b white \
-				-c docs/images/mermaid-config.json -p .github/puppeteer-config.json; \
-		fi; \
-	done
