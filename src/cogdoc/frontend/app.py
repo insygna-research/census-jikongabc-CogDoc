@@ -1577,13 +1577,7 @@ def _render_create_knowledge(client: CogDocClient, kb_id: str) -> None:
     with st.form(f"create-knowledge-{kb_id}", clear_on_submit=True):
         text = st.text_area("内容", height=140)
         selected_source = st.selectbox("关联文档", doc_options)
-        related_chunk_ids = st.text_input("关联分块标识")
-        page_fields = st.columns([1, 1, 2])
-        related_page_start_text = page_fields[0].text_input("起始页")
-        related_page_end_text = page_fields[1].text_input("结束页")
-        related_chunk_text_hash = page_fields[2].text_input("分块文本哈希")
-        related_anchor_text = st.text_input("锚点文本")
-        source_note = st.text_area("来源说明", height=80)
+        source_note = st.text_area("来源备注", height=80)
         certainty = st.selectbox(
             "可信度",
             ["medium", "high", "low"],
@@ -1598,19 +1592,16 @@ def _render_create_knowledge(client: CogDocClient, kb_id: str) -> None:
         st.warning("请输入派生知识内容。")
         return
     doc = doc_by_name.get(selected_source) if selected_source else None
-    chunk_ids = [item.strip() for item in related_chunk_ids.split(",") if item.strip()]
-    related_page_start = _parse_optional_int(related_page_start_text.strip())
-    related_page_end = _parse_optional_int(related_page_end_text.strip())
     resp = client.create_knowledge(
         kb_id=kb_id,
         text=text.strip(),
         related_source=selected_source or None,
         related_source_sha256=str(doc.get("sha256")) if doc else None,
-        related_chunk_ids=chunk_ids,
-        related_page_start=related_page_start,
-        related_page_end=related_page_end,
-        related_chunk_text_hash=related_chunk_text_hash.strip() or None,
-        related_anchor_text=related_anchor_text.strip() or None,
+        related_chunk_ids=[],
+        related_page_start=None,
+        related_page_end=None,
+        related_chunk_text_hash=None,
+        related_anchor_text=None,
         source_note=source_note.strip() or None,
         certainty=certainty,
     )
