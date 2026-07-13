@@ -1,7 +1,12 @@
 from cogdoc.agents.answer_markers import NO_RELEVANT_CONTENT_ANSWER
 from cogdoc.config.settings import Settings
 from cogdoc.graph.subgraphs import qa
-from cogdoc.graph.subgraphs.qa import abstain_node, rerank_node, retrieval_check
+from cogdoc.graph.subgraphs.qa import (
+    abstain_node,
+    evidence_check,
+    rerank_node,
+    retrieval_check,
+)
 from cogdoc.tools.retriever.confidence import assess_retrieval_support
 
 
@@ -91,6 +96,18 @@ def test_rerank_node_marks_low_confidence_retrieval_for_abstention(monkeypatch):
     assert output["retrieval_abstained"] is True
     assert output["retrieval_abstain_reason"] == "below_threshold"
     assert output["retrieval_signals"] == {"distance": 0.95, "bm25_score": 5.0}
+    assert output["verification_docs"]
+    assert output["evidence_verification_pending"] is False
+
+    borderline = rerank_node(
+        {
+            "query": "比赛时长是多少",
+            "doc_id": "kb",
+            "retrieved_docs": [_doc(distance=0.95, bm25_score=5.0)],
+        }
+    )
+    assert borderline["retrieval_abstained"] is True
+    assert borderline["evidence_verification_pending"] is True
 
 
 # 验证拒答节点不携带候选证据并直接结束 QA。
@@ -109,3 +126,17 @@ def test_abstain_node_returns_stable_answer_without_evidence():
     assert output["reranked_docs"] == []
     assert retrieval_check(output) == "abstain_node"
     assert retrieval_check({"retrieval_abstained": False}) == "generate_node"
+    assert (
+        retrieval_check(
+            {
+                "query": "比赛时长是多少",
+                "retrieval_first_stage_supported": False,
+                "retrieval_abstained": True,
+                "retrieval_abstain_reason": "below_threshold",
+                "retrieval_confidence": 0.9,
+            }
+        )
+        == "evidence_verify_node"
+    )
+    assert evidence_check({"evidence_supported": True}) == "generate_node"
+    assert evidence_check({"evidence_supported": False}) == "abstain_node"

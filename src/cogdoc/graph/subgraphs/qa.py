@@ -6,6 +6,11 @@ from langchain_core.messages import AIMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
 from cogdoc.config.settings import get_settings
 from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
+from cogdoc.agents.evidence_verifier import (
+    EvidenceVerifierAgent,
+    select_verification_docs,
+    should_verify_evidence,
+)
 from cogdoc.graph.state import GraphState, Evidence, RetrievedDoc
 from cogdoc.observability.logger import log_event
 from cogdoc.service.kb_lifecycle import LIFECYCLE_ACTIVE, shared_lifecycle_store
@@ -348,17 +353,29 @@ def rerank_node(state: GraphState) -> dict:
     rerank_skipped_reason = ""
     if target_device == "cpu" and not settings.qa_rerank_on_cpu:
         rerank_skipped_reason = "cpu_disabled"
-        reranked_docs = skipped_cpu_rerank_docs(
-            candidate_docs, settings.qa_rerank_top_n, rerank_skipped_reason
+        ranked_candidates = skipped_cpu_rerank_docs(
+            candidate_docs, len(candidate_docs), rerank_skipped_reason
         )
     else:
-        reranked_docs = BGEReranker.rerank(
+        ranked_candidates = BGEReranker.rerank(
             query=query,
             docs=candidate_docs,
-            top_n=settings.qa_rerank_top_n,
+            top_n=len(candidate_docs),
             device=target_device,
         )
+    reranked_docs = ranked_candidates[: settings.qa_rerank_top_n]
+    verification_docs = select_verification_docs(
+        ranked_candidates, settings.qa_evidence_verify_max_docs
+    )
     support = assess_retrieval_support(reranked_docs, settings)
+    decision_state = {
+        **state,
+        "retrieval_first_stage_supported": support.supported,
+        "retrieval_confidence": support.score,
+        "retrieval_abstained": not support.supported,
+        "retrieval_abstain_reason": support.reason,
+    }
+    verification_pending = should_verify_evidence(decision_state, settings)
     # 下游沿用重排结果字段名，实际内容已包含相邻上下文扩展。
     expanded_docs = _expand_with_neighbor_chunks(doc_id, reranked_docs, state)
     log_event(
@@ -368,20 +385,58 @@ def rerank_node(state: GraphState) -> dict:
         candidate_count=len(docs),
         rerank_candidate_count=len(candidate_docs),
         reranked_count=len(reranked_docs),
+        verification_candidate_count=len(verification_docs),
         expanded_count=len(expanded_docs),
         device=target_device,
         rerank_skipped_reason=rerank_skipped_reason,
         retrieval_confidence=round(support.score, 6),
         retrieval_abstained=not support.supported,
         retrieval_abstain_reason=support.reason,
+        evidence_verification_pending=verification_pending,
     )
     return {
         "reranked_docs": expanded_docs,
+        "verification_docs": verification_docs,
+        "retrieval_first_stage_supported": support.supported,
         "retrieval_confidence": support.score,
         "retrieval_abstained": not support.supported,
         "retrieval_abstain_reason": support.reason,
         "retrieval_signals": support.signals,
+        "evidence_verification_pending": verification_pending,
     }
+
+
+# 对精确事实问题执行结构化证据充分性校验。
+def evidence_verify_node(state: GraphState) -> dict:
+    output = EvidenceVerifierAgent.verify(state)
+    if output.get("evidence_supported"):
+        verified_ids = set(output.get("evidence_verified_chunk_ids", []))
+        generation_docs = list(state.get("reranked_docs", []))
+        generation_ids = {
+            str(doc.get("meta", {}).get("chunk_id") or "")
+            for doc in generation_docs
+        }
+        for doc in state.get("verification_docs", []):
+            chunk_id = str(doc.get("meta", {}).get("chunk_id") or "")
+            if chunk_id in verified_ids and chunk_id not in generation_ids:
+                generation_docs.append(copy.deepcopy(doc))
+                generation_ids.add(chunk_id)
+        output["reranked_docs"] = generation_docs
+    log_event(
+        "qa",
+        "qa_evidence_verify",
+        state,
+        evidence_supported=output.get("evidence_supported", False),
+        evidence_verified_chunk_count=len(
+            output.get("evidence_verified_chunk_ids", [])
+        ),
+        generation_evidence_count=len(output.get("reranked_docs", [])),
+        evidence_verification_reason=output.get(
+            "evidence_verification_reason", ""
+        ),
+        evidence_verifier_error=output.get("evidence_verifier_error", ""),
+    )
+    return output
 
 
 # 证据不足时不调用 LLM，返回稳定拒答并清空候选，避免无关证据进入引用和会话记忆。
@@ -392,6 +447,7 @@ def abstain_node(state: GraphState) -> dict:
         state,
         retrieval_confidence=round(state.get("retrieval_confidence", 0.0), 6),
         retrieval_abstain_reason=state.get("retrieval_abstain_reason", ""),
+        evidence_verification_reason=state.get("evidence_verification_reason", ""),
     )
     return {
         "messages": [AIMessage(content=NO_RELEVANT_CONTENT_ANSWER)],
@@ -406,7 +462,14 @@ def abstain_node(state: GraphState) -> dict:
 
 # 根据检索置信度选择生成或确定性拒答。
 def retrieval_check(state: GraphState) -> str:
+    if should_verify_evidence(state, get_settings()):
+        return "evidence_verify_node"
     return "abstain_node" if state.get("retrieval_abstained", False) else "generate_node"
+
+
+# 根据二阶段证据结论选择生成或拒答。
+def evidence_check(state: GraphState) -> str:
+    return "generate_node" if state.get("evidence_supported", False) else "abstain_node"
 
 
 # 生成节点。
@@ -517,6 +580,7 @@ sub_graph.add_node("rewrite_node", rewrite_node)
 sub_graph.add_node("verify_rewrite_node", verify_rewrite_node)
 sub_graph.add_node("retrieve_node", retrieve_node)
 sub_graph.add_node("rerank_node", rerank_node)
+sub_graph.add_node("evidence_verify_node", evidence_verify_node)
 sub_graph.add_node("abstain_node", abstain_node)
 sub_graph.add_node("generate_node", generate_node)
 sub_graph.add_node("citation_node", citation_node)
@@ -528,6 +592,15 @@ sub_graph.add_edge("retrieve_node", "rerank_node")
 sub_graph.add_conditional_edges(
     "rerank_node",
     retrieval_check,
+    {
+        "evidence_verify_node": "evidence_verify_node",
+        "abstain_node": "abstain_node",
+        "generate_node": "generate_node",
+    },
+)
+sub_graph.add_conditional_edges(
+    "evidence_verify_node",
+    evidence_check,
     {"abstain_node": "abstain_node", "generate_node": "generate_node"},
 )
 sub_graph.add_edge("abstain_node", END)

@@ -95,6 +95,26 @@ def build_trace_step(
             step["retrieval_signals"] = {
                 str(key): value for key, value in signals.items()
             }
+    if "evidence_verification_required" in output:
+        step["evidence_verification_required"] = bool(
+            output.get("evidence_verification_required")
+        )
+        step["evidence_supported"] = bool(output.get("evidence_supported"))
+        step["evidence_verification_reason"] = _preview(
+            output.get("evidence_verification_reason"), 300
+        )
+        step["evidence_verified_chunk_ids"] = [
+            _preview(chunk_id, 120)
+            for chunk_id in list(output.get("evidence_verified_chunk_ids") or [])[:5]
+        ]
+        if output.get("evidence_verifier_error"):
+            step["evidence_verifier_error"] = _preview(
+                output.get("evidence_verifier_error"), 80
+            )
+    if "evidence_verification_pending" in output:
+        step["evidence_verification_pending"] = bool(
+            output.get("evidence_verification_pending")
+        )
     if output.get("rewritten_queries"):
         step["rewritten_queries"] = [
             _preview(query, 120)
@@ -115,6 +135,7 @@ def build_trace_step(
         "rewritten_queries": "rewritten_query_count",
         "retrieved_docs": "retrieved_count",
         "reranked_docs": "reranked_count",
+        "verification_docs": "verification_candidate_count",
         "summary_docs": "summary_doc_count",
         "summary_section_results": "summary_section_count",
         "compare_sources": "compare_source_count",

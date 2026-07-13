@@ -24,6 +24,10 @@ def test_settings_defaults_match_current_runtime_contract():
     assert settings.qa_abstain_max_vector_distance == 0.86
     assert settings.qa_abstain_min_bm25_score == 10.0
     assert settings.qa_abstain_min_knowledge_score == 0.5
+    assert settings.qa_evidence_verify_enabled is True
+    assert settings.qa_evidence_verify_max_docs == 3
+    assert settings.qa_evidence_verify_max_chars_per_doc == 1600
+    assert settings.qa_evidence_verify_borderline_min_score == 0.75
     assert settings.hybrid_rrf_k == 60
     assert settings.cogdoc_log_level == "INFO"
     assert settings.cogdoc_log_file == "logs/cogdoc.jsonl"

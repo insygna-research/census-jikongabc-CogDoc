@@ -192,6 +192,79 @@ def test_run_chat_emits_retrieval_abstention_event(monkeypatch):
     assert result.evidence == []
 
 
+# 二阶段证据不足会发出独立进度事件并返回稳定拒答。
+class EvidenceRejectedApp:
+    def stream(self, initial_state, config, stream_mode, subgraphs):
+        yield (
+            (),
+            "updates",
+            {"intent_router": {"task_type": "qa", "router_reason": "文档问答"}},
+        )
+        yield (
+            ("qa_subgraph",),
+            "updates",
+            {
+                "rerank_node": {
+                    "retrieval_abstained": True,
+                    "retrieval_confidence": 0.9,
+                    "retrieval_abstain_reason": "below_threshold",
+                    "evidence_verification_pending": True,
+                    "reranked_docs": [_doc()],
+                }
+            },
+        )
+        yield (
+            ("qa_subgraph",),
+            "updates",
+            {
+                "evidence_verify_node": {
+                    "evidence_verification_required": True,
+                    "evidence_supported": False,
+                    "evidence_verification_reason": "缺少明确报销比例",
+                    "evidence_verified_chunk_ids": [],
+                    "retrieval_abstained": True,
+                    "retrieval_abstain_reason": "evidence_not_supported",
+                }
+            },
+        )
+        yield (
+            (),
+            "updates",
+            {
+                "qa_subgraph": {
+                    "answer": NO_RELEVANT_CONTENT_ANSWER,
+                    "critique": "",
+                    "retrieval_abstained": True,
+                    "reranked_docs": [],
+                    "sources": [],
+                    "evidence": [],
+                }
+            },
+        )
+
+
+def test_run_chat_emits_evidence_rejected_event(monkeypatch):
+    monkeypatch.setattr(chat_service, "app", EvidenceRejectedApp())
+    monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
+    monkeypatch.setattr(chat_service, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(chat_service, "export_trace", lambda **kwargs: None)
+
+    events = list(chat_service.run_chat("kb", "报销比例是多少", is_local=False))
+
+    assert [event.type for event in events] == [
+        "request_started",
+        "router_decided",
+        "evidence_rejected",
+        "final",
+    ]
+    assert events[2].payload == {
+        "supported": False,
+        "reason": "缺少明确报销比例",
+        "evidence_chunk_ids": [],
+    }
+    assert events[-1].payload["result"].answer == NO_RELEVANT_CONTENT_ANSWER
+
+
 # 路由后流式迭代中途崩溃，父子图始终未产出可信输出。
 class StreamInterruptApp:
     # 路由后流式迭代中途崩溃，父子图始终未产出可信输出。

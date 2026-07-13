@@ -64,7 +64,15 @@ def retrieve_sources(query: str, doc_id: str, top_k: int, rerank: bool) -> List[
 
 
 # 执行检索并用线上同一套规则判断是否有足够证据。
-def retrieve_result(query: str, doc_id: str, top_k: int, rerank: bool) -> dict:
+def retrieve_result(
+    query: str,
+    doc_id: str,
+    top_k: int,
+    rerank: bool,
+    *,
+    verify_evidence: bool = False,
+    is_local_verifier: bool = False,
+) -> dict:
     from cogdoc.graph.subgraphs.qa import RetrieverFactory
     from cogdoc.tools.retriever.confidence import assess_retrieval_support
 
@@ -75,31 +83,110 @@ def retrieve_result(query: str, doc_id: str, top_k: int, rerank: bool) -> dict:
 
         docs = BGEReranker.rerank(query=query, docs=docs, top_n=len(docs))
     support = assess_retrieval_support(docs)
-    return {
+    result = {
         "sources": [doc["meta"]["source"] for doc in docs],
         "supported": support.supported,
+        "first_stage_supported": support.supported,
         "confidence": support.score,
         "reason": support.reason,
         "signals": support.signals,
+        "evidence_verification_required": False,
+        "evidence_supported": support.supported,
+        "evidence_verification_reason": "not_requested",
+        "evidence_verified_chunk_ids": [],
     }
+    if not verify_evidence:
+        return result
+
+    from cogdoc.agents.evidence_verifier import (
+        EvidenceVerifierAgent,
+        select_verification_docs,
+        should_verify_evidence,
+    )
+
+    settings = get_settings()
+    verify_state = {
+        "query": query,
+        "is_local": is_local_verifier,
+        "retrieval_first_stage_supported": support.supported,
+        "retrieval_abstained": not support.supported,
+        "retrieval_abstain_reason": support.reason,
+        "retrieval_confidence": support.score,
+        "verification_docs": select_verification_docs(
+            docs, settings.qa_evidence_verify_max_docs
+        ),
+    }
+    if not should_verify_evidence(verify_state, settings):
+        result["evidence_verification_reason"] = "not_required"
+        return result
+
+    verification = EvidenceVerifierAgent.verify(verify_state)
+    result.update(
+        {
+            "supported": bool(verification.get("evidence_supported")),
+            "reason": str(
+                verification.get("retrieval_abstain_reason") or support.reason
+            ),
+            "evidence_verification_required": True,
+            "evidence_supported": bool(verification.get("evidence_supported")),
+            "evidence_verification_reason": str(
+                verification.get("evidence_verification_reason") or ""
+            ),
+            "evidence_verified_chunk_ids": list(
+                verification.get("evidence_verified_chunk_ids") or []
+            ),
+            "evidence_verifier_error": str(
+                verification.get("evidence_verifier_error") or ""
+            ),
+        }
+    )
+    return result
 
 
 # 运行评测。
-def run_eval(items: List[dict], k_values: List[int], rerank: bool) -> dict:
+def run_eval(
+    items: List[dict],
+    k_values: List[int],
+    rerank: bool,
+    verify_evidence: bool = False,
+    is_local_verifier: bool = False,
+) -> dict:
     top_k = max(k_values)
     rows: List[dict] = []
 
     # 模型加载、设备选择和首轮内核初始化单独计时，不污染稳态请求 P95。
+    warmup_item = items[0]
+    if verify_evidence:
+        from cogdoc.agents.evidence_verifier import requires_evidence_verification
+
+        warmup_item = next(
+            (
+                item
+                for item in items
+                if requires_evidence_verification(str(item.get("query") or ""))
+            ),
+            items[0],
+        )
     warmup_started = time.perf_counter()
     retrieve_result(
-        items[0]["query"], items[0].get("doc_id", "default"), top_k, rerank
+        warmup_item["query"],
+        warmup_item.get("doc_id", "default"),
+        top_k,
+        rerank,
+        verify_evidence=verify_evidence,
+        is_local_verifier=is_local_verifier,
     )
     warmup_latency_ms = (time.perf_counter() - warmup_started) * 1000.0
 
     for item in items:
         started = time.perf_counter()
         retrieval_result = retrieve_result(
-            item["query"], item.get("doc_id", "default"), top_k, rerank
+            item["query"],
+            item.get("doc_id", "default"),
+            top_k,
+            rerank,
+            verify_evidence=verify_evidence,
+            is_local_verifier=is_local_verifier,
         )
         retrieved = retrieval_result["sources"]
         latency_ms = (time.perf_counter() - started) * 1000.0
@@ -108,10 +195,18 @@ def run_eval(items: List[dict], k_values: List[int], rerank: bool) -> dict:
             metrics["answerable_acceptance_rate"] = (
                 1.0 if retrieval_result["supported"] else 0.0
             )
+            if verify_evidence:
+                metrics["answerable_first_stage_acceptance_rate"] = (
+                    1.0 if retrieval_result["first_stage_supported"] else 0.0
+                )
         else:
             metrics["no_answer_abstention_rate"] = (
                 0.0 if retrieval_result["supported"] else 1.0
             )
+            if verify_evidence:
+                metrics["no_answer_first_stage_abstention_rate"] = (
+                    0.0 if retrieval_result["first_stage_supported"] else 1.0
+                )
         rows.append(
             {
                 "id": item.get("id"),
@@ -123,6 +218,22 @@ def run_eval(items: List[dict], k_values: List[int], rerank: bool) -> dict:
                 "retrieval_confidence": retrieval_result["confidence"],
                 "retrieval_abstain_reason": retrieval_result["reason"],
                 "retrieval_signals": retrieval_result["signals"],
+                "retrieval_first_stage_supported": retrieval_result[
+                    "first_stage_supported"
+                ],
+                "evidence_verification_required": retrieval_result[
+                    "evidence_verification_required"
+                ],
+                "evidence_supported": retrieval_result["evidence_supported"],
+                "evidence_verification_reason": retrieval_result[
+                    "evidence_verification_reason"
+                ],
+                "evidence_verified_chunk_ids": retrieval_result[
+                    "evidence_verified_chunk_ids"
+                ],
+                "evidence_verifier_error": retrieval_result.get(
+                    "evidence_verifier_error", ""
+                ),
                 "latency_ms": latency_ms,
                 "metrics": metrics,
             }
@@ -140,6 +251,8 @@ def run_eval(items: List[dict], k_values: List[int], rerank: bool) -> dict:
         "config": {
             "k_values": k_values,
             "rerank": rerank,
+            "verify_evidence": verify_evidence,
+            "is_local_verifier": is_local_verifier,
             "num_queries": len(items),
             "answerable_queries": sum(bool(item["expected_sources"]) for item in items),
             "no_answer_queries": sum(not item["expected_sources"] for item in items),
@@ -216,6 +329,14 @@ def print_report(report: dict) -> None:
             f"reason={row['retrieval_abstain_reason']} "
             f"signals={row['retrieval_signals']}"
         )
+        if cfg.get("verify_evidence"):
+            print(
+                "        evidence_verify="
+                f"{row['evidence_verification_required']} "
+                f"supported={row['evidence_supported']} "
+                f"chunks={row['evidence_verified_chunk_ids']} "
+                f"reason={row['evidence_verification_reason']}"
+            )
 
     print("\n聚合:")
     for key, value in report["aggregate"].items():
@@ -289,6 +410,16 @@ def main() -> int:
     )
     parser.add_argument("--rerank", action="store_true", help="在检索后加 BGE 精排")
     parser.add_argument(
+        "--verify-evidence",
+        action="store_true",
+        help="对精确事实问题执行二阶段证据充分性模型校验",
+    )
+    parser.add_argument(
+        "--local-verifier",
+        action="store_true",
+        help="二阶段证据校验使用本地 Ollama；必须同时指定 --verify-evidence",
+    )
+    parser.add_argument(
         "--k",
         type=int,
         nargs="+",
@@ -325,6 +456,8 @@ def main() -> int:
         help="绝对指标门禁 JSON，包含 minimum/maximum 两组阈值",
     )
     args = parser.parse_args()
+    if args.local_verifier and not args.verify_evidence:
+        parser.error("--local-verifier 必须与 --verify-evidence 同时使用")
     if args.coverage_only and (
         args.check_coverage or args.json or args.baseline or args.gate
     ):
@@ -343,7 +476,13 @@ def main() -> int:
         print_coverage(coverage)
         return 0 if coverage["is_coverage_complete"] else 1
 
-    report = run_eval(items, sorted(args.k), args.rerank)
+    report = run_eval(
+        items,
+        sorted(args.k),
+        args.rerank,
+        verify_evidence=args.verify_evidence,
+        is_local_verifier=args.local_verifier,
+    )
     threshold_gate = None
     if args.gate:
         threshold_config = json.loads(args.gate.read_text(encoding="utf-8"))

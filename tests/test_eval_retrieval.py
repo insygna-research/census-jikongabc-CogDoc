@@ -266,14 +266,27 @@ def test_retrieval_cli_coverage_only_rejects_check_coverage(tmp_path, monkeypatc
 
 # 验证真实检索报告包含分层指标和延迟。
 def test_retrieval_run_eval_reports_layers_and_latency(monkeypatch):
-    def fake_retrieve(query, doc_id, top_k, rerank):
+    def fake_retrieve(
+        query,
+        doc_id,
+        top_k,
+        rerank,
+        *,
+        verify_evidence=False,
+        is_local_verifier=False,
+    ):
         supported = query != "none"
         return {
             "sources": ["a.pdf"] if supported else [],
             "supported": supported,
+            "first_stage_supported": supported,
             "confidence": 1.0 if supported else 0.0,
             "reason": "supported" if supported else "no_candidates",
             "signals": {},
+            "evidence_verification_required": False,
+            "evidence_supported": supported,
+            "evidence_verification_reason": "not_required",
+            "evidence_verified_chunk_ids": [],
         }
 
     monkeypatch.setattr(
@@ -293,12 +306,16 @@ def test_retrieval_run_eval_reports_layers_and_latency(monkeypatch):
         ],
         [1, 5],
         False,
+        verify_evidence=True,
     )
 
     assert report["aggregate"]["mrr"] == 1.0
     assert report["aggregate"]["no_answer_false_positive@5"] == 0.0
     assert report["aggregate"]["answerable_acceptance_rate"] == 1.0
     assert report["aggregate"]["no_answer_abstention_rate"] == 1.0
+    assert report["aggregate"]["answerable_first_stage_acceptance_rate"] == 1.0
+    assert report["aggregate"]["no_answer_first_stage_abstention_rate"] == 1.0
+    assert report["config"]["verify_evidence"] is True
     assert report["aggregate"]["latency_p95_ms"] >= 0.0
     assert report["by_layer"]["single-source"]["count"] == 1
     assert report["by_layer"]["no-answer"]["count"] == 1

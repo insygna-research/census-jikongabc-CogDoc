@@ -2,6 +2,7 @@ import pytest
 import threading
 from httpx import ASGITransport, AsyncClient
 from cogdoc.api.app import create_app
+from cogdoc.api.routes.chat import _event_to_frame
 from cogdoc.api.session_store import SessionStore
 from cogdoc.service.chat_service import ChatEvent, ChatResult, ChatServiceError
 
@@ -49,6 +50,23 @@ def _result(answer: str, trace_id: str, messages=None) -> ChatResult:
         ],
         raw_output={"answer": answer},
     )
+
+
+# 证据校验进度通过统一 node SSE 帧暴露给瘦客户端。
+def test_evidence_rejected_event_maps_to_node_sse_frame():
+    frame = _event_to_frame(
+        ChatEvent(
+            "evidence_rejected",
+            {"supported": False, "reason": "缺少明确事实"},
+        ),
+        doc_id="kb",
+        session_id="s1",
+    )
+
+    assert frame is not None
+    assert "event: node" in frame
+    assert '"stage": "evidence_rejected"' in frame
+    assert '"supported": false' in frame
 
 
 # 验证 chat endpoint maps response and trace header 场景。

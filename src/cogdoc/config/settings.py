@@ -112,6 +112,24 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias="QA_ABSTAIN_MIN_KNOWLEDGE_SCORE",
     )
+    qa_evidence_verify_enabled: bool = Field(
+        default=True, validation_alias="QA_EVIDENCE_VERIFY_ENABLED"
+    )
+    qa_evidence_verify_max_docs: int = Field(
+        default=3, ge=1, le=10, validation_alias="QA_EVIDENCE_VERIFY_MAX_DOCS"
+    )
+    qa_evidence_verify_max_chars_per_doc: int = Field(
+        default=1600,
+        ge=200,
+        le=10000,
+        validation_alias="QA_EVIDENCE_VERIFY_MAX_CHARS_PER_DOC",
+    )
+    qa_evidence_verify_borderline_min_score: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=1.0,
+        validation_alias="QA_EVIDENCE_VERIFY_BORDERLINE_MIN_SCORE",
+    )
     hybrid_rrf_k: int = Field(default=60, validation_alias="HYBRID_RRF_K")
     cloud_section_max_workers: int = Field(
         default=6, validation_alias="CLOUD_SECTION_MAX_WORKERS"

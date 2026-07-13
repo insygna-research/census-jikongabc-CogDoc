@@ -131,6 +131,14 @@ def _trace_config(
         ),
         "qa_abstain_min_bm25_score": settings.qa_abstain_min_bm25_score,
         "qa_abstain_min_knowledge_score": settings.qa_abstain_min_knowledge_score,
+        "qa_evidence_verify_enabled": settings.qa_evidence_verify_enabled,
+        "qa_evidence_verify_max_docs": settings.qa_evidence_verify_max_docs,
+        "qa_evidence_verify_max_chars_per_doc": (
+            settings.qa_evidence_verify_max_chars_per_doc
+        ),
+        "qa_evidence_verify_borderline_min_score": (
+            settings.qa_evidence_verify_borderline_min_score
+        ),
         "model": settings.ollama_model_name if is_local else settings.llm_model_name,
     }
 
@@ -302,7 +310,11 @@ def run_chat(
                 elif mode == "updates" and in_subgraph and "rerank_node" in data:
                     rerank_output = data["rerank_node"]
                     fallback_outputs["qa"].update(rerank_output)
-                    if rerank_output.get("retrieval_abstained"):
+                    is_abstained = bool(rerank_output.get("retrieval_abstained"))
+                    verification_pending = bool(
+                        rerank_output.get("evidence_verification_pending", False)
+                    )
+                    if is_abstained and not verification_pending:
                         yield ChatEvent(
                             "retrieval_abstained",
                             {
@@ -314,6 +326,26 @@ def run_chat(
                                 ),
                             },
                         )
+                elif (
+                    mode == "updates"
+                    and in_subgraph
+                    and "evidence_verify_node" in data
+                ):
+                    verify_output = data["evidence_verify_node"]
+                    fallback_outputs["qa"].update(verify_output)
+                    supported = bool(verify_output.get("evidence_supported"))
+                    yield ChatEvent(
+                        "evidence_verified" if supported else "evidence_rejected",
+                        {
+                            "supported": supported,
+                            "reason": verify_output.get(
+                                "evidence_verification_reason", ""
+                            ),
+                            "evidence_chunk_ids": list(
+                                verify_output.get("evidence_verified_chunk_ids", [])
+                            ),
+                        },
+                    )
                 elif mode == "updates" and in_subgraph and "citation_node" in data:
                     citation_output = data["citation_node"]
                     fallback_outputs["qa"].update(citation_output)

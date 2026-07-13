@@ -87,6 +87,27 @@ def test_build_trace_step_keeps_retrieval_abstention_decision():
     assert step["retrieval_signals"] == {"distance": 0.95, "bm25_score": 5.0}
 
 
+# 验证 trace 保留二阶段证据结论但不写入完整证据正文。
+def test_build_trace_step_keeps_evidence_verification_decision():
+    step = build_trace_step(
+        "evidence_verify_node",
+        {
+            "evidence_verification_required": True,
+            "evidence_supported": False,
+            "evidence_verification_reason": "缺少明确的报销比例",
+            "evidence_verified_chunk_ids": [],
+            "retrieval_abstained": True,
+            "retrieval_abstain_reason": "evidence_not_supported",
+        },
+        1.0,
+    )
+
+    assert step["evidence_verification_required"] is True
+    assert step["evidence_supported"] is False
+    assert step["evidence_verification_reason"] == "缺少明确的报销比例"
+    assert step["evidence_verified_chunk_ids"] == []
+
+
 # 验证跟踪载荷包含审计字段。
 def test_build_trace_payload_includes_audit_fields():
     step = build_trace_step("intent_router", {"task_type": "qa"}, 1.0)

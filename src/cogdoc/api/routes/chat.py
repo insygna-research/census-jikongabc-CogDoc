@@ -151,6 +151,8 @@ _SSE_PROGRESS_TYPES = {
     "router_decided",
     "rewrite_queries",
     "retrieval_abstained",
+    "evidence_verified",
+    "evidence_rejected",
     "citation_passed",
     "citation_rejected",
     "compare_citation_passed",
