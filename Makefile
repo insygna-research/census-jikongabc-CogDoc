@@ -7,7 +7,7 @@ SHELL   := /bin/bash
 # src-layout：包源码在 src/，入口经 PYTHONPATH 注入，无需先安装即可 run/serve/test。
 export PYTHONPATH := src
 
-.PHONY: help install native check test smoke-api run debug backup eval eval-coverage eval-quality eval-quality-coverage eval-suite eval-suite-run-retrieval eval-suite-report eval-suite-baseline eval-suite-update-baseline serve frontend
+.PHONY: help install native check test smoke-api run debug backup eval eval-coverage eval-retrieval-report eval-retrieval-baseline eval-retrieval-gate eval-quality eval-quality-coverage eval-suite eval-suite-run-retrieval eval-suite-report eval-suite-baseline eval-suite-update-baseline serve frontend
 
 help:
 	@echo "make install - 可编辑安装含开发依赖 (pip install -e '.[dev]')"
@@ -18,6 +18,9 @@ help:
 	@echo "make backup  - 备份 data/ 与 logs/traces/ 到 backups/"
 	@echo "make eval    - 离线检索评测 recall@k/MRR (scripts/eval_retrieval.py)"
 	@echo "make eval-coverage - 只检查检索评测集覆盖面，不执行真实检索"
+	@echo "make eval-retrieval-report - 用 100 条真实集运行检索并写入报告"
+	@echo "make eval-retrieval-baseline - 生成真实检索基线"
+	@echo "make eval-retrieval-gate - 对比真实检索基线并执行绝对门禁"
 	@echo "make eval-quality - 离线质量评测 router/citation/faithfulness (scripts/eval_quality.py)"
 	@echo "make eval-quality-coverage - 检查质量评测集覆盖面"
 	@echo "make eval-suite - 运行组合评测门禁（覆盖审计 + 质量评测）"
@@ -54,6 +57,15 @@ eval:
 
 eval-coverage:
 	$(PYTHON) scripts/eval_retrieval.py --coverage-only
+
+eval-retrieval-report:
+	$(PYTHON) scripts/eval_retrieval.py --coverage-profile baseline --check-coverage --rerank --gate eval/retrieval_gate.json --json eval/retrieval_eval_report.json
+
+eval-retrieval-baseline:
+	$(PYTHON) scripts/eval_retrieval.py --coverage-profile baseline --check-coverage --rerank --json eval/retrieval_eval_baseline.json
+
+eval-retrieval-gate:
+	$(PYTHON) scripts/eval_retrieval.py --coverage-profile baseline --check-coverage --rerank --gate eval/retrieval_gate.json --baseline eval/retrieval_eval_baseline.json --json eval/retrieval_eval_report.json
 
 eval-quality:
 	$(PYTHON) scripts/eval_quality.py

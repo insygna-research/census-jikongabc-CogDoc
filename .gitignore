@@ -40,6 +40,9 @@ eval/*.jsonl
 !eval/*.example.jsonl
 eval/eval_suite_report.json
 eval/eval_suite_baseline.json
+eval/retrieval_eval_report.json
+eval/retrieval_eval_baseline.json
+eval/retrieval_gate.json
 
 # Node / mermaid-cli 本地渲染依赖。
 node_modules/

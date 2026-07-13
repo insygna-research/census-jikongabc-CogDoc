@@ -57,6 +57,7 @@ def _write_retrieval_eval(path):
             "expected_sources": ["a.pdf", "b.pdf"],
             "layer": "multi-source",
         },
+        {"query": "困难问题", "expected_sources": ["a.pdf"], "layer": "hard"},
         {"query": "无答案", "expected_sources": [], "layer": "no-answer"},
     ]
     path.write_text(
@@ -431,6 +432,33 @@ def test_eval_suite_baseline_uses_gated_metric_intersection(tmp_path):
 
     assert result["regressed"] is False
     assert [row["metric"] for row in result["quality"]["rows"]] == ["old_metric"]
+
+
+# 验证组合基线把延迟上升识别为回退。
+def test_eval_suite_baseline_treats_higher_latency_as_regression(tmp_path):
+    baseline_path = tmp_path / "baseline.json"
+    report = {
+        "quality_report": {"aggregate": {}},
+        "retrieval_report": {
+            "aggregate": {"mrr": 1.0, "latency_p95_ms": 120.0},
+            "metric_directions": {"mrr": "higher", "latency_p95_ms": "lower"},
+        },
+    }
+    baseline = {
+        "quality_report": {"aggregate": {}},
+        "retrieval_report": {
+            "aggregate": {"mrr": 1.0, "latency_p95_ms": 100.0}
+        },
+    }
+    baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
+
+    result = eval_suite.compare_baseline(report, baseline_path)
+
+    assert result["regressed"] is True
+    latency = next(
+        row for row in result["retrieval"]["rows"] if row["metric"] == "latency_p95_ms"
+    )
+    assert latency["status"] == "regressed"
 
 
 # 验证组合入口基线回退返回非零。

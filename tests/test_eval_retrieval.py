@@ -6,9 +6,13 @@ import scripts.eval_retrieval as eval_retrieval
 from cogdoc.tools.eval.retrieval_metrics import (
     aggregate,
     audit_coverage,
+    coverage_minimums,
     evaluate_query,
+    evaluate_thresholds,
     hit_at_k,
     infer_retrieval_layer,
+    metric_direction,
+    percentile,
     recall_at_k,
     reciprocal_rank,
 )
@@ -51,6 +55,19 @@ def test_evaluate_query_emits_all_requested_cutoffs():
     assert metrics["mrr"] == 0.5
 
 
+# 验证无答案问题与可回答问题分开统计误命中。
+def test_evaluate_query_emits_no_answer_false_positive_metrics():
+    metrics = evaluate_query(["a.pdf"], [], k_values=[1, 5])
+
+    assert metrics == {
+        "no_answer_false_positive@1": 1.0,
+        "no_answer_false_positive@5": 1.0,
+    }
+    assert evaluate_query([], [], k_values=[5]) == {
+        "no_answer_false_positive@5": 0.0
+    }
+
+
 # 验证聚合逻辑对每个指标取均值。
 def test_aggregate_means_each_metric():
     agg = aggregate(
@@ -61,6 +78,30 @@ def test_aggregate_means_each_metric():
     )
     assert agg["recall@1"] == 0.5
     assert agg["mrr"] == 0.75
+
+
+# 验证聚合允许可回答与无答案行携带不同指标。
+def test_aggregate_uses_only_rows_that_define_metric():
+    agg = aggregate(
+        [
+            {"mrr": 1.0, "recall@5": 1.0},
+            {"no_answer_false_positive@5": 1.0},
+        ]
+    )
+
+    assert agg == {
+        "mrr": 1.0,
+        "no_answer_false_positive@5": 1.0,
+        "recall@5": 1.0,
+    }
+
+
+# 验证 nearest-rank P95 与指标方向。
+def test_percentile_and_metric_direction():
+    assert percentile([1, 2, 3, 4, 100], 95) == 100
+    assert metric_direction("mrr") == "higher"
+    assert metric_direction("latency_p95_ms") == "lower"
+    assert metric_direction("no_answer_false_positive@5") == "lower"
 
 
 # 验证空聚合结果为空字典。
@@ -87,8 +128,41 @@ def test_retrieval_coverage_audit_reports_missing_layers():
         ]
     )
 
-    assert coverage["missing_layers"] == ["no-answer"]
+    assert coverage["missing_layers"] == ["hard", "no-answer"]
+    assert coverage["layer_counts"] == {"multi-source": 1, "single-source": 1}
     assert coverage["is_coverage_complete"] is False
+
+
+# 验证真实基线配置执行 40/20/20/20 数量门禁。
+def test_retrieval_baseline_coverage_requires_layer_quotas():
+    items = (
+        [{"layer": "single-source"}] * 40
+        + [{"layer": "multi-source"}] * 20
+        + [{"layer": "hard"}] * 19
+        + [{"layer": "no-answer"}] * 20
+    )
+
+    coverage = audit_coverage(items, coverage_minimums("baseline"))
+
+    assert coverage["total_count"] == 99
+    assert coverage["insufficient_layers"] == {
+        "hard": {"actual": 19, "required": 20}
+    }
+    assert coverage["is_coverage_complete"] is False
+
+
+# 验证绝对门禁同时支持下限和上限指标。
+def test_retrieval_threshold_gate_handles_minimum_and_maximum():
+    gate = evaluate_thresholds(
+        {"mrr": 0.8, "latency_p95_ms": 900.0},
+        {
+            "minimum": {"mrr": 0.75},
+            "maximum": {"latency_p95_ms": 1000.0},
+        },
+    )
+
+    assert gate["passed"] is True
+    assert all(row["passed"] for row in gate["rows"])
 
 
 # 写入覆盖完整的检索评测集。
@@ -111,6 +185,12 @@ def _write_complete_retrieval_eval(path):
             "expected_sources": [],
             "doc_id": "demo",
             "layer": "no-answer",
+        },
+        {
+            "query": "细粒度困难问题",
+            "expected_sources": ["a.pdf"],
+            "doc_id": "demo",
+            "layer": "hard",
         },
     ]
     path.write_text(
@@ -182,3 +262,31 @@ def test_retrieval_cli_coverage_only_rejects_check_coverage(tmp_path, monkeypatc
     with pytest.raises(SystemExit) as exc:
         eval_retrieval.main()
     assert exc.value.code == 2
+
+
+# 验证真实检索报告包含分层指标和延迟。
+def test_retrieval_run_eval_reports_layers_and_latency(monkeypatch):
+    monkeypatch.setattr(
+        eval_retrieval,
+        "retrieve_sources",
+        lambda query, doc_id, top_k, rerank: [] if query == "none" else ["a.pdf"],
+    )
+
+    report = eval_retrieval.run_eval(
+        [
+            {
+                "query": "answerable",
+                "expected_sources": ["a.pdf"],
+                "layer": "single-source",
+            },
+            {"query": "none", "expected_sources": [], "layer": "no-answer"},
+        ],
+        [1, 5],
+        False,
+    )
+
+    assert report["aggregate"]["mrr"] == 1.0
+    assert report["aggregate"]["no_answer_false_positive@5"] == 0.0
+    assert report["aggregate"]["latency_p95_ms"] >= 0.0
+    assert report["by_layer"]["single-source"]["count"] == 1
+    assert report["by_layer"]["no-answer"]["count"] == 1

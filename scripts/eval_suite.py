@@ -19,6 +19,8 @@ from cogdoc.tools.eval.quality_metrics import (
 )
 from cogdoc.tools.eval.retrieval_metrics import (
     audit_coverage as audit_retrieval_coverage,
+    coverage_minimums as retrieval_coverage_minimums,
+    evaluate_thresholds as evaluate_retrieval_thresholds,
 )
 from scripts import eval_quality, eval_retrieval
 
@@ -38,12 +40,16 @@ QUALITY_LAYER_ORDER = (
 
 # 构建覆盖门禁结果。
 def build_gate(
-    quality_coverage: Dict[str, Any], retrieval_coverage: Dict[str, Any]
+    quality_coverage: Dict[str, Any],
+    retrieval_coverage: Dict[str, Any],
+    retrieval_threshold_gate: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     checks = {
         "quality_coverage": bool(quality_coverage["is_coverage_complete"]),
         "retrieval_coverage": bool(retrieval_coverage["is_coverage_complete"]),
     }
+    if retrieval_threshold_gate is not None:
+        checks["retrieval_thresholds"] = bool(retrieval_threshold_gate["passed"])
     return {"checks": checks, "passed": all(checks.values())}
 
 
@@ -70,6 +76,23 @@ def print_summary(report: Dict[str, Any]) -> None:
         print("\n检索指标:")
         for key, value in retrieval["aggregate"].items():
             print(f"  {key:<12} {value:.4f}")
+        print("\n检索分层:")
+        for layer, group in retrieval.get("by_layer", {}).items():
+            metrics = "  ".join(
+                f"{key}={value:.4f}"
+                for key, value in group.get("aggregate", {}).items()
+            )
+            print(f"  {layer:<14} count={group['count']}  {metrics}")
+        threshold_gate = retrieval.get("threshold_gate")
+        if threshold_gate:
+            print("\n检索绝对门禁:")
+            for row in threshold_gate["rows"]:
+                current = format_metric(row["current"])
+                status = "通过" if row["passed"] else "失败"
+                print(
+                    f"  {row['metric']:<34} {current} "
+                    f"{row['bound']}={row['limit']:.4f}  {status}"
+                )
     elif retrieval:
         print(f"\n检索指标: 已跳过（{retrieval['reason']}）")
     print()
@@ -110,6 +133,7 @@ def compare_metric_group(
     current: Dict[str, Any],
     baseline: Dict[str, Any],
     metric_names: List[str],
+    directions: Dict[str, str] | None = None,
 ) -> Dict[str, Any]:
     rows: List[Dict[str, Any]] = []
     regressed = False
@@ -130,10 +154,17 @@ def compare_metric_group(
             continue
         delta = cur - base
         status = "same"
-        if delta < -1e-9:
+        direction = (directions or {}).get(name, "higher")
+        regressed_metric = (
+            delta < -1e-9 if direction == "higher" else delta > 1e-9
+        )
+        improved_metric = (
+            delta > 1e-9 if direction == "higher" else delta < -1e-9
+        )
+        if regressed_metric:
             status = "regressed"
             regressed = True
-        elif delta > 1e-9:
+        elif improved_metric:
             status = "improved"
         rows.append(
             {
@@ -294,11 +325,14 @@ def compare_baseline(report: Dict[str, Any], baseline_path: Path) -> Dict[str, A
         retrieval_result = {"skipped": True, "regressed": False, "rows": []}
     else:
         base_retrieval = baseline.get("retrieval_report", {})
-        retrieval_metrics = sorted(retrieval.get("aggregate", {}).keys())
+        retrieval_metrics = retrieval.get("baseline_gated_metrics")
+        if retrieval_metrics is None:
+            retrieval_metrics = sorted(retrieval.get("aggregate", {}).keys())
         retrieval_result = compare_metric_group(
             retrieval.get("aggregate", {}),
             base_retrieval.get("aggregate", {}),
             retrieval_metrics,
+            retrieval.get("metric_directions", {}),
         )
         retrieval_result["skipped"] = False
 
@@ -368,6 +402,8 @@ def build_report(
     run_retrieval: bool,
     k_values: List[int],
     rerank: bool,
+    retrieval_coverage_profile: str = "smoke",
+    retrieval_gate_config: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     quality_items = eval_quality.load_eval_set(quality_eval_set)
     retrieval_items = eval_retrieval.load_eval_set(retrieval_eval_set)
@@ -377,7 +413,10 @@ def build_report(
         raise ValueError(f"检索评测集为空: {retrieval_eval_set}")
 
     quality_coverage = audit_quality_coverage(quality_items)
-    retrieval_coverage = audit_retrieval_coverage(retrieval_items)
+    retrieval_coverage = audit_retrieval_coverage(
+        retrieval_items,
+        retrieval_coverage_minimums(retrieval_coverage_profile),
+    )
     quality_report = run_quality_eval(quality_items)
     quality_report["coverage"] = quality_coverage
     quality_case_types = build_quality_case_type_summary(quality_report)
@@ -389,6 +428,10 @@ def build_report(
             retrieval_items, sorted(k_values), rerank
         )
         retrieval_report["coverage"] = retrieval_coverage
+        if retrieval_gate_config is not None:
+            retrieval_report["threshold_gate"] = evaluate_retrieval_thresholds(
+                retrieval_report["aggregate"], retrieval_gate_config
+            )
     else:
         retrieval_report = {
             "skipped": True,
@@ -403,8 +446,13 @@ def build_report(
             "run_retrieval": run_retrieval,
             "k_values": sorted(k_values),
             "rerank": rerank,
+            "retrieval_coverage_profile": retrieval_coverage_profile,
         },
-        "gate": build_gate(quality_coverage, retrieval_coverage),
+        "gate": build_gate(
+            quality_coverage,
+            retrieval_coverage,
+            retrieval_report.get("threshold_gate"),
+        ),
         "quality_report": quality_report,
         "quality_case_types": quality_case_types,
         "quality_layers": quality_layers,
@@ -445,20 +493,41 @@ def main() -> int:
         help="真实检索评测的 k 截断值",
     )
     parser.add_argument("--rerank", action="store_true", help="真实检索评测时启用精排")
+    parser.add_argument(
+        "--retrieval-coverage-profile",
+        choices=("smoke", "baseline"),
+        default="smoke",
+        help="baseline 要求检索集按 40/20/20/20 覆盖 100 条",
+    )
+    parser.add_argument(
+        "--retrieval-gate",
+        type=Path,
+        default=None,
+        help="真实检索的绝对指标门禁 JSON",
+    )
     args = parser.parse_args()
     if args.baseline and args.update_baseline:
         parser.error("--baseline 不能与 --update-baseline 同时使用")
+    if args.retrieval_gate and not args.run_retrieval:
+        parser.error("--retrieval-gate 必须与 --run-retrieval 同时使用")
 
     quality_eval_set = args.quality_eval_set or eval_quality.resolve_default_eval_set()
     retrieval_eval_set = (
         args.retrieval_eval_set or eval_retrieval.resolve_default_eval_set()
     )
+    retrieval_gate_config = None
+    if args.retrieval_gate:
+        retrieval_gate_config = json.loads(
+            args.retrieval_gate.read_text(encoding="utf-8")
+        )
     report = build_report(
         quality_eval_set=quality_eval_set,
         retrieval_eval_set=retrieval_eval_set,
         run_retrieval=args.run_retrieval,
         k_values=args.k,
         rerank=args.rerank,
+        retrieval_coverage_profile=args.retrieval_coverage_profile,
+        retrieval_gate_config=retrieval_gate_config,
     )
     print_summary(report)
     baseline_result = None

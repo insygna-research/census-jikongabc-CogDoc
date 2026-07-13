@@ -569,6 +569,9 @@ CogDoc/
 | `make backup` | 备份本地运行状态到 `backups/` |
 | `make eval` | 运行离线检索评测（`recall@k`、MRR） |
 | `make eval-coverage` | 不执行真实检索，只检查检索评测集覆盖面 |
+| `make eval-retrieval-report` | 按 100 条真实检索配置运行并写入报告 |
+| `make eval-retrieval-baseline` | 生成经复核的真实检索基线 |
+| `make eval-retrieval-gate` | 执行绝对阈值门禁并对比检索基线 |
 | `make eval-quality` | 运行离线质量评测（路由、引用、人工忠实性台账） |
 | `make eval-quality-coverage` | 运行质量指标并检查覆盖维度 |
 | `make eval-suite` | 运行组合评测门禁（覆盖审计 + 质量指标） |
@@ -585,7 +588,11 @@ CogDoc/
 
 测试分层：业务逻辑与 Python↔native API 契约用 Python 覆盖（`tests/`）；纯 Rust 逻辑用 `rust_core/src/` 里的 Rust `#[test]`。依赖 native 的 Python 测试在未构建时会 `importorskip` 跳过，完整回归前请先 `make native`。
 
-离线评测使用 `eval/` 下的本地 JSONL。`make eval-suite` 是默认门禁：它会审计检索和质量评测集覆盖，运行轻量质量指标，按用例类型和层级输出质量摘要，默认跳过真实检索。`make eval-suite-report` 写入 `eval/eval_suite_report.json`；`make eval-suite-baseline` 对比 `eval/eval_suite_baseline.json` 的聚合指标、类型指标和分层质量指标；`make eval-suite-update-baseline` 在复核后刷新这份基线。两个生成文件都被 Git 忽略。已有真实索引且需要对比检索指标时运行 `make eval-suite-run-retrieval`。`make eval` 会基于 `eval/retrieval_eval.jsonl` 统计检索的 `recall@k`、hit rate 和 MRR；干净 checkout 没有本地评测集时会回退到 `eval/retrieval_eval.example.jsonl`。用 `make eval-coverage` 可以只检查检索评测集是否覆盖单源、多源、无答案场景，不触碰真实索引。`make eval-quality` 会统计路由准确率、引用准确率和覆盖 QA、Summary、Compare、多轮、无答案、反馈层级的人工忠实性台账；用 `make eval-quality-coverage` 会运行这些质量指标，并在评测集缺少必需 case type 或推荐 layer 时失败。点踩/纠错会在 `bad_cases.jsonl` 写入 `eval_draft`，方便复核后提升到质量评测集。只想检查质量覆盖时运行 `python scripts/eval_quality.py --coverage-only`。`--coverage-only` 有意不允许与 `--check-coverage`、`--json`、`--baseline` 同时使用。
+离线评测使用 `eval/` 下的本地 JSONL。`make eval-suite` 是默认轻量门禁：它会审计检索和质量评测集覆盖，运行质量指标，按用例类型和层级输出摘要，默认跳过依赖模型的真实检索。`make eval-suite-report` 写入 `eval/eval_suite_report.json`；`make eval-suite-baseline` 对比 `eval/eval_suite_baseline.json` 的聚合指标、类型指标和分层质量指标；`make eval-suite-update-baseline` 在复核后刷新这份基线。生成的报告和基线文件都被 Git 忽略。
+
+真实检索配置要求 `eval/retrieval_eval.jsonl` 至少包含 100 条已复核问题：单源 40 条、多源 20 条、困难 20 条、无答案 20 条。`make eval-retrieval-baseline` 记录复核后的参考运行；`make eval-retrieval-gate` 对比相关性基线，并执行本地 `eval/retrieval_gate.json` 中的绝对阈值，文件结构参考 `eval/retrieval_gate.example.json`。报告会给出整体和分层的 MRR/Recall/Hit、平均延迟与 P95 延迟；模型加载和首轮初始化会单独记为 warmup，不计入稳态延迟。无答案样本使用独立的 `no_answer_false_positive@k`，它只诊断检索器是否仍返回候选，不能等同于生成答案已经产生事实错误。
+
+`make eval` 对本地检索集做临时评测；干净 checkout 没有本地集时会回退到 `eval/retrieval_eval.example.jsonl`。`make eval-coverage` 不触碰索引，只检查 smoke 覆盖配置。组合评测需要真实检索时运行 `make eval-suite-run-retrieval`。`make eval-quality` 会统计路由准确率、引用准确率和覆盖 QA、Summary、Compare、多轮、无答案、反馈层级的人工忠实性台账；`make eval-quality-coverage` 还会对必需 case type 和推荐 layer 执行覆盖门禁。点踩/纠错会在 `bad_cases.jsonl` 写入 `eval_draft`，方便复核后提升到质量评测集。只想检查质量覆盖时运行 `python scripts/eval_quality.py --coverage-only`。`--coverage-only` 有意不允许与 `--check-coverage`、`--json`、`--baseline` 同时使用。
 
 每次对话都会生成 `request_id` / `trace_id`。`COGDOC_TRACE_ENABLED=true` 时，服务会把 JSON trace 写入 `COGDOC_TRACE_DIR`（默认 `logs/traces`），同一份安全载荷也可通过 `GET /v1/traces/{trace_id}` 查询；`GET /v1/traces` 可按 `doc_id` 和 `session_id` 限定范围，Streamlit Trace 面板正是用它只展示当前对话。trace 文件包含 `schema_version`、`status`（`ok`、`degraded` 或 `failed`）、总 `duration_ms`、安全配置快照、步骤摘要、改写摘要、错误摘要，并且只保存截断后的 evidence preview，不写入完整文档正文。独立 Debug 控制台读取同一套 trace 格式。
 
