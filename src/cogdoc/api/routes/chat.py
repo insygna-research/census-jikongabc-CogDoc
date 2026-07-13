@@ -4,6 +4,7 @@ from typing import Callable
 from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from cogdoc.api.error_mapping import classify_error_code, status_for_code
+from cogdoc.api.offload import run_sync
 from cogdoc.api.runners import run_with_optional_session
 from cogdoc.api.schemas import (
     ChatRequest,
@@ -52,8 +53,7 @@ async def chat(request_body: ChatRequest, request: Request, response: Response):
 
     try:
         # 用 app 级有界线程池 offload 同步图：不阻塞事件循环、不无界起线程、不走 anyio。
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
+        result = await run_sync(
             request.app.state.offload_executor,
             run_with_optional_session,
             runner,
@@ -137,8 +137,7 @@ async def delete_session(
     # 删除一个对话的多轮历史（幂等，不存在也返回 204）。
     kb_id = doc_id or get_settings().cogdoc_default_doc_id
     request.app.state.session_store.clear(kb_id, session_id)
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(
+    await run_sync(
         request.app.state.offload_executor,
         delete_trace_files,
         kb_id,
@@ -151,6 +150,7 @@ async def delete_session(
 _SSE_PROGRESS_TYPES = {
     "router_decided",
     "rewrite_queries",
+    "retrieval_abstained",
     "citation_passed",
     "citation_rejected",
     "compare_citation_passed",

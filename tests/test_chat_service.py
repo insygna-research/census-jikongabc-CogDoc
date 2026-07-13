@@ -1,4 +1,5 @@
 import pytest
+from cogdoc.agents.answer_markers import NO_RELEVANT_CONTENT_ANSWER
 from cogdoc.service import chat_service
 from cogdoc.service.chat_service import ChatServiceError, run_chat_sync
 
@@ -131,6 +132,64 @@ def test_run_chat_emits_golden_event_sequence(monkeypatch):
         "citation_passed",
         "final",
     ]
+
+
+# 低置信度检索只发拒答进度并返回稳定无答案结果，不进入引用校验事件。
+class RetrievalAbstainApp:
+    def stream(self, initial_state, config, stream_mode, subgraphs):
+        yield (
+            (),
+            "updates",
+            {"intent_router": {"task_type": "qa", "router_reason": "文档问答"}},
+        )
+        yield (
+            ("qa_subgraph",),
+            "updates",
+            {
+                "rerank_node": {
+                    "retrieval_abstained": True,
+                    "retrieval_confidence": 0.91,
+                    "retrieval_abstain_reason": "below_threshold",
+                    "retrieval_signals": {"distance": 0.95, "bm25_score": 5.0},
+                    "reranked_docs": [_doc()],
+                }
+            },
+        )
+        yield (
+            (),
+            "updates",
+            {
+                "qa_subgraph": {
+                    "answer": NO_RELEVANT_CONTENT_ANSWER,
+                    "critique": "",
+                    "retrieval_abstained": True,
+                    "reranked_docs": [],
+                    "sources": [],
+                    "evidence": [],
+                }
+            },
+        )
+
+
+def test_run_chat_emits_retrieval_abstention_event(monkeypatch):
+    monkeypatch.setattr(chat_service, "app", RetrievalAbstainApp())
+    monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
+    monkeypatch.setattr(chat_service, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(chat_service, "export_trace", lambda **kwargs: None)
+
+    events = list(chat_service.run_chat("kb", "无关问题", is_local=False))
+
+    assert [event.type for event in events] == [
+        "request_started",
+        "router_decided",
+        "retrieval_abstained",
+        "final",
+    ]
+    assert events[2].payload == {"confidence": 0.91, "reason": "below_threshold"}
+    result = events[-1].payload["result"]
+    assert result.answer == NO_RELEVANT_CONTENT_ANSWER
+    assert result.citations == []
+    assert result.evidence == []
 
 
 # 路由后流式迭代中途崩溃，父子图始终未产出可信输出。

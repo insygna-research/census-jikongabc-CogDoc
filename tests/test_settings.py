@@ -20,6 +20,10 @@ def test_settings_defaults_match_current_runtime_contract():
     assert settings.ollama_model_name == "qwen2.5:7b"
     assert settings.qa_retrieval_top_k == 9
     assert settings.qa_rerank_top_n == 3
+    assert settings.qa_abstain_enabled is True
+    assert settings.qa_abstain_max_vector_distance == 0.86
+    assert settings.qa_abstain_min_bm25_score == 10.0
+    assert settings.qa_abstain_min_knowledge_score == 0.5
     assert settings.hybrid_rrf_k == 60
     assert settings.cogdoc_log_level == "INFO"
     assert settings.cogdoc_log_file == "logs/cogdoc.jsonl"
@@ -33,12 +37,14 @@ def test_settings_reads_environment_overrides(monkeypatch):
     monkeypatch.setenv("COGDOC_DOC_DIR", "papers")
     monkeypatch.setenv("LLM_MODEL_NAME", "custom-model")
     monkeypatch.setenv("QA_RETRIEVAL_TOP_K", "11")
+    monkeypatch.setenv("QA_ABSTAIN_MAX_VECTOR_DISTANCE", "0.75")
 
     settings = get_settings()
 
     assert settings.cogdoc_doc_dir == "papers"
     assert settings.llm_model_name == "custom-model"
     assert settings.qa_retrieval_top_k == 11
+    assert settings.qa_abstain_max_vector_distance == 0.75
 
 
 # 验证 cuda thresholds are exposed as bytes 场景。

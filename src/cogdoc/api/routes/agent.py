@@ -1,9 +1,9 @@
-import asyncio
 from collections.abc import Mapping
 from typing import Any
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 from cogdoc.api.error_mapping import classify_error_code, status_for_code
+from cogdoc.api.offload import run_sync
 from cogdoc.api.runners import run_with_optional_session
 from cogdoc.api.schemas import (
     ChatResponse,
@@ -99,8 +99,7 @@ async def _task_endpoint(
     session_store = request.app.state.session_store
     chat_history = session_store.get_history(body.doc_id, body.session_id)
     try:
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
+        result = await run_sync(
             request.app.state.offload_executor,
             run_with_optional_session,
             runner,
@@ -227,9 +226,8 @@ async def retrieve(body: RetrieveRequest, request: Request):
     kb_error = _ensure_kb_exists(request, body.doc_id)
     if kb_error is not None:
         return kb_error
-    loop = asyncio.get_running_loop()
     retrieve_runner = getattr(request.app.state, "retrieve_runner", _run_retrieve)
-    docs = await loop.run_in_executor(
+    docs = await run_sync(
         request.app.state.offload_executor,
         retrieve_runner,
         body,

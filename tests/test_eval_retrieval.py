@@ -266,10 +266,20 @@ def test_retrieval_cli_coverage_only_rejects_check_coverage(tmp_path, monkeypatc
 
 # 验证真实检索报告包含分层指标和延迟。
 def test_retrieval_run_eval_reports_layers_and_latency(monkeypatch):
+    def fake_retrieve(query, doc_id, top_k, rerank):
+        supported = query != "none"
+        return {
+            "sources": ["a.pdf"] if supported else [],
+            "supported": supported,
+            "confidence": 1.0 if supported else 0.0,
+            "reason": "supported" if supported else "no_candidates",
+            "signals": {},
+        }
+
     monkeypatch.setattr(
         eval_retrieval,
-        "retrieve_sources",
-        lambda query, doc_id, top_k, rerank: [] if query == "none" else ["a.pdf"],
+        "retrieve_result",
+        fake_retrieve,
     )
 
     report = eval_retrieval.run_eval(
@@ -287,6 +297,8 @@ def test_retrieval_run_eval_reports_layers_and_latency(monkeypatch):
 
     assert report["aggregate"]["mrr"] == 1.0
     assert report["aggregate"]["no_answer_false_positive@5"] == 0.0
+    assert report["aggregate"]["answerable_acceptance_rate"] == 1.0
+    assert report["aggregate"]["no_answer_abstention_rate"] == 1.0
     assert report["aggregate"]["latency_p95_ms"] >= 0.0
     assert report["by_layer"]["single-source"]["count"] == 1
     assert report["by_layer"]["no-answer"]["count"] == 1

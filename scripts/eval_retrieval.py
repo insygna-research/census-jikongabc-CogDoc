@@ -60,7 +60,13 @@ def load_eval_set(path: Path) -> List[dict]:
 
 # 检索来源。
 def retrieve_sources(query: str, doc_id: str, top_k: int, rerank: bool) -> List[str]:
+    return retrieve_result(query, doc_id, top_k, rerank)["sources"]
+
+
+# 执行检索并用线上同一套规则判断是否有足够证据。
+def retrieve_result(query: str, doc_id: str, top_k: int, rerank: bool) -> dict:
     from cogdoc.graph.subgraphs.qa import RetrieverFactory
+    from cogdoc.tools.retriever.confidence import assess_retrieval_support
 
     engine = RetrieverFactory.get_engine(doc_id)
     docs = engine.search(query=query, top_k=top_k)
@@ -68,7 +74,14 @@ def retrieve_sources(query: str, doc_id: str, top_k: int, rerank: bool) -> List[
         from cogdoc.tools.reranker import BGEReranker
 
         docs = BGEReranker.rerank(query=query, docs=docs, top_n=len(docs))
-    return [doc["meta"]["source"] for doc in docs]
+    support = assess_retrieval_support(docs)
+    return {
+        "sources": [doc["meta"]["source"] for doc in docs],
+        "supported": support.supported,
+        "confidence": support.score,
+        "reason": support.reason,
+        "signals": support.signals,
+    }
 
 
 # 运行评测。
@@ -78,18 +91,27 @@ def run_eval(items: List[dict], k_values: List[int], rerank: bool) -> dict:
 
     # 模型加载、设备选择和首轮内核初始化单独计时，不污染稳态请求 P95。
     warmup_started = time.perf_counter()
-    retrieve_sources(
+    retrieve_result(
         items[0]["query"], items[0].get("doc_id", "default"), top_k, rerank
     )
     warmup_latency_ms = (time.perf_counter() - warmup_started) * 1000.0
 
     for item in items:
         started = time.perf_counter()
-        retrieved = retrieve_sources(
+        retrieval_result = retrieve_result(
             item["query"], item.get("doc_id", "default"), top_k, rerank
         )
+        retrieved = retrieval_result["sources"]
         latency_ms = (time.perf_counter() - started) * 1000.0
         metrics = evaluate_query(retrieved, item["expected_sources"], k_values)
+        if item["expected_sources"]:
+            metrics["answerable_acceptance_rate"] = (
+                1.0 if retrieval_result["supported"] else 0.0
+            )
+        else:
+            metrics["no_answer_abstention_rate"] = (
+                0.0 if retrieval_result["supported"] else 1.0
+            )
         rows.append(
             {
                 "id": item.get("id"),
@@ -97,6 +119,10 @@ def run_eval(items: List[dict], k_values: List[int], rerank: bool) -> dict:
                 "query": item["query"],
                 "expected_sources": item["expected_sources"],
                 "retrieved_sources": retrieved,
+                "retrieval_supported": retrieval_result["supported"],
+                "retrieval_confidence": retrieval_result["confidence"],
+                "retrieval_abstain_reason": retrieval_result["reason"],
+                "retrieval_signals": retrieval_result["signals"],
                 "latency_ms": latency_ms,
                 "metrics": metrics,
             }
@@ -167,18 +193,29 @@ def print_report(report: dict) -> None:
                 for k in cfg["k_values"]
             )
             score = f"{row['metrics']['mrr']:.2f} MRR  {recalls}"
+            score += (
+                "  accepted"
+                if row["retrieval_supported"]
+                else "  false-abstain"
+            )
         else:
             flags = "  ".join(
                 f"fp@{k}={row['metrics'][f'no_answer_false_positive@{k}']:.0f}"
                 for k in cfg["k_values"]
             )
-            score = flags
+            decision = "accepted" if row["retrieval_supported"] else "abstained"
+            score = f"{flags}  {decision}"
         print(
             f"  [{row['layer']}] [{score}] {row['latency_ms']:.1f}ms"
             f"  | {row['query']}"
         )
         print(f"        expected={row['expected_sources']}")
         print(f"        top={row['retrieved_sources'][: max(cfg['k_values'])]}")
+        print(
+            f"        confidence={row['retrieval_confidence']:.4f} "
+            f"reason={row['retrieval_abstain_reason']} "
+            f"signals={row['retrieval_signals']}"
+        )
 
     print("\n聚合:")
     for key, value in report["aggregate"].items():

@@ -68,6 +68,25 @@ def test_build_trace_step_uses_explicit_retrieval_top_k():
     assert step["rewritten_queries"] == ["改写问题"]
 
 
+# 验证 trace 保留拒答决策及其安全评分信号。
+def test_build_trace_step_keeps_retrieval_abstention_decision():
+    step = build_trace_step(
+        "rerank_node",
+        {
+            "retrieval_abstained": True,
+            "retrieval_confidence": 0.91,
+            "retrieval_abstain_reason": "below_threshold",
+            "retrieval_signals": {"distance": 0.95, "bm25_score": 5.0},
+        },
+        1.0,
+    )
+
+    assert step["retrieval_abstained"] is True
+    assert step["retrieval_confidence"] == 0.91
+    assert step["retrieval_abstain_reason"] == "below_threshold"
+    assert step["retrieval_signals"] == {"distance": 0.95, "bm25_score": 5.0}
+
+
 # 验证跟踪载荷包含审计字段。
 def test_build_trace_payload_includes_audit_fields():
     step = build_trace_step("intent_router", {"task_type": "qa"}, 1.0)

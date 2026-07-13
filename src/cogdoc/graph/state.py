@@ -130,6 +130,10 @@ class GraphState(TypedDict):
     rewrite_similarity_threshold: NotRequired[float]
     retrieved_docs: NotRequired[List[RetrievedDoc]]
     reranked_docs: NotRequired[List[RetrievedDoc]]
+    retrieval_confidence: NotRequired[float]
+    retrieval_abstained: NotRequired[bool]
+    retrieval_abstain_reason: NotRequired[str]
+    retrieval_signals: NotRequired[Dict[str, float]]
     context: NotRequired[str]
 
     answer: NotRequired[str]

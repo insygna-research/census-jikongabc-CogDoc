@@ -84,6 +84,17 @@ def build_trace_step(
     if "critique" in output:
         critique = str(output.get("critique") or "")
         step["critique"] = _preview(critique, 300) if critique else ""
+    if "retrieval_abstained" in output:
+        step["retrieval_abstained"] = bool(output.get("retrieval_abstained"))
+        step["retrieval_confidence"] = output.get("retrieval_confidence")
+        step["retrieval_abstain_reason"] = _preview(
+            output.get("retrieval_abstain_reason"), 80
+        )
+        signals = output.get("retrieval_signals")
+        if isinstance(signals, Mapping):
+            step["retrieval_signals"] = {
+                str(key): value for key, value in signals.items()
+            }
     if output.get("rewritten_queries"):
         step["rewritten_queries"] = [
             _preview(query, 120)

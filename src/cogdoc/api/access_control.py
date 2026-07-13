@@ -3,7 +3,7 @@ from collections import OrderedDict
 from threading import Lock
 from fastapi import Request
 from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp, Receive, Scope, Send
 from cogdoc.api.error_mapping import status_for_code
 from cogdoc.api.schemas import ErrorCode, build_error_response
 
@@ -87,28 +87,42 @@ def _reject(code: ErrorCode, message: str) -> JSONResponse:
 
 
 # 统一入口的鉴权 + 限流：先校验 API key，再按身份限流，最后放行到路由。
-class AccessControlMiddleware(BaseHTTPMiddleware):
+class AccessControlMiddleware:
     # 统一入口的鉴权 + 限流：先校验 API key，再按身份限流，最后放行到路由。
     def __init__(
-        self, app, *, api_keys: set[str], rate_limiter: TokenBucketRateLimiter
+        self,
+        app: ASGIApp,
+        *,
+        api_keys: set[str],
+        rate_limiter: TokenBucketRateLimiter,
     ):
-        super().__init__(app)
+        self.app = app
         self._api_keys = api_keys
         self._limiter = rate_limiter
 
     # 分发结果。
-    async def dispatch(self, request: Request, call_next):
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope)
         path = request.url.path
         if path in _EXEMPT_PATHS:
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
 
         # 鉴权：仅当配置了 key 才开启；身份用于限流分桶。
         if self._api_keys:
             key = _extract_api_key(request)
             if key is None:
-                return _reject(ErrorCode.UNAUTHORIZED, "缺少 API key")
+                response = _reject(ErrorCode.UNAUTHORIZED, "缺少 API key")
+                await response(scope, receive, send)
+                return
             if key not in self._api_keys:
-                return _reject(ErrorCode.UNAUTHORIZED, "无效的 API key")
+                response = _reject(ErrorCode.UNAUTHORIZED, "无效的 API key")
+                await response(scope, receive, send)
+                return
             # 限流身份即 key：共享同一 key 的客户端共享额度（按调用方=租户限流，符合预期）。
             identity = key
         else:
@@ -118,9 +132,11 @@ class AccessControlMiddleware(BaseHTTPMiddleware):
         # 高频只读端点过鉴权但不过限流，避免 Streamlit rerun/轮询误杀正常使用。
         if not _is_rate_limit_exempt(request):
             if not self._limiter.allow(identity):
-                return _reject(ErrorCode.REQUEST_THROTTLED, "请求过于频繁，请稍后重试")
+                response = _reject(ErrorCode.REQUEST_THROTTLED, "请求过于频繁，请稍后重试")
+                await response(scope, receive, send)
+                return
 
-        return await call_next(request)
+        await self.app(scope, receive, send)
 
 
 # 构建 rate limiter。

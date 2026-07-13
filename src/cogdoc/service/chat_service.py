@@ -125,6 +125,12 @@ def _trace_config(
         "qa_retrieval_top_k": settings.qa_retrieval_top_k,
         "qa_rerank_top_n": settings.qa_rerank_top_n,
         "qa_rerank_max_candidates": settings.qa_rerank_max_candidates,
+        "qa_abstain_enabled": settings.qa_abstain_enabled,
+        "qa_abstain_max_vector_distance": (
+            settings.qa_abstain_max_vector_distance
+        ),
+        "qa_abstain_min_bm25_score": settings.qa_abstain_min_bm25_score,
+        "qa_abstain_min_knowledge_score": settings.qa_abstain_min_knowledge_score,
         "model": settings.ollama_model_name if is_local else settings.llm_model_name,
     }
 
@@ -293,6 +299,21 @@ def run_chat(
                         "rewrite_queries",
                         {"queries": list(rewrite_output.get("rewritten_queries", []))},
                     )
+                elif mode == "updates" and in_subgraph and "rerank_node" in data:
+                    rerank_output = data["rerank_node"]
+                    fallback_outputs["qa"].update(rerank_output)
+                    if rerank_output.get("retrieval_abstained"):
+                        yield ChatEvent(
+                            "retrieval_abstained",
+                            {
+                                "confidence": rerank_output.get(
+                                    "retrieval_confidence", 0.0
+                                ),
+                                "reason": rerank_output.get(
+                                    "retrieval_abstain_reason", ""
+                                ),
+                            },
+                        )
                 elif mode == "updates" and in_subgraph and "citation_node" in data:
                     citation_output = data["citation_node"]
                     fallback_outputs["qa"].update(citation_output)

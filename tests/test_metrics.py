@@ -54,23 +54,36 @@ def test_metrics_render_is_prometheus_text():
 # 验证 middleware records 500 when call next raises 场景。
 @pytest.mark.anyio
 async def test_middleware_records_500_when_call_next_raises():
-    # call_next 抛未兜底异常时：仍记一条 status=500、在途归零，且异常透传。
+    # 下游 ASGI app 抛未兜底异常时：仍记一条 status=500、在途归零，且异常透传。
     from cogdoc.api.metrics import MetricsMiddleware
 
     metrics = Metrics()
-    mw = MetricsMiddleware(app=None, metrics=metrics)
-
-    # 定义 _Req 数据结构。
-    class _Req:
-        method = "POST"
-        scope: dict = {}
 
     # 模拟失败结果。
-    async def boom(_request):
+    async def boom(_scope, _receive, _send):
         raise RuntimeError("kaboom")
 
+    mw = MetricsMiddleware(app=boom, metrics=metrics)
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/x",
+        "raw_path": b"/x",
+        "query_string": b"",
+        "headers": [],
+        "client": ("127.0.0.1", 1),
+        "server": ("test", 80),
+    }
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(_message):
+        return None
+
     with pytest.raises(RuntimeError):
-        await mw.dispatch(_Req(), boom)
+        await mw(scope, receive, send)
 
     body = metrics.render().decode()
     assert 'status="500"' in body

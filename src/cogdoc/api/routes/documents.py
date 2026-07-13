@@ -1,8 +1,8 @@
-import asyncio
 import os
 from fastapi import APIRouter, File, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from cogdoc.api.ingest import KBExistsError
+from cogdoc.api.offload import run_sync
 from cogdoc.api.schemas import (
     Document,
     ErrorCode,
@@ -139,10 +139,9 @@ def _kb_sources(kb_id: str) -> list[str]:
 # 创建 knowledge base。
 @router.post("/knowledge-bases", status_code=201, responses=_ERROR_RESPONSES)
 async def create_knowledge_base(body: KnowledgeBaseCreate, request: Request):
-    loop = asyncio.get_running_loop()
     index_jobs = request.app.state.index_jobs
     try:
-        record = await loop.run_in_executor(
+        record = await run_sync(
             request.app.state.offload_executor,
             index_jobs.run_blocking,
             body.kb_id,
@@ -180,11 +179,10 @@ async def delete_knowledge_base(kb_id: str, request: Request):
     registry = request.app.state.kb_registry
     if not registry.exists(kb_id):
         return _error(ErrorCode.KB_NOT_FOUND, f"知识库不存在: {kb_id}", 404)
-    loop = asyncio.get_running_loop()
     index_jobs = request.app.state.index_jobs
     # 排进该 KB 的序列化 executor，等待前序入库任务完成再执行。
     try:
-        await loop.run_in_executor(
+        await run_sync(
             request.app.state.offload_executor,
             index_jobs.run_blocking,
             kb_id,
@@ -223,9 +221,8 @@ async def list_documents(kb_id: str, request: Request):
 async def list_sources(kb_id: str, request: Request):
     if not request.app.state.kb_registry.exists(kb_id):
         return _error(ErrorCode.KB_NOT_FOUND, f"知识库不存在: {kb_id}", 404)
-    loop = asyncio.get_running_loop()
     source_reader = getattr(request.app.state, "source_list_reader", _kb_sources)
-    sources = await loop.run_in_executor(
+    sources = await run_sync(
         request.app.state.offload_executor, source_reader, kb_id
     )
     return SourceListResponse(kb_id=kb_id, sources=sources)
@@ -247,11 +244,10 @@ async def source_chunks(
 ):
     if not request.app.state.kb_registry.exists(kb_id):
         return _error(ErrorCode.KB_NOT_FOUND, f"知识库不存在: {kb_id}", 404)
-    loop = asyncio.get_running_loop()
     chunks_reader = getattr(
         request.app.state, "source_chunks_reader", read_source_chunks
     )
-    chunks = await loop.run_in_executor(
+    chunks = await run_sync(
         request.app.state.offload_executor, chunks_reader, kb_id, source
     )
     window = chunks[offset : offset + limit]
@@ -298,8 +294,7 @@ async def upload_document(kb_id: str, request: Request, file: UploadFile = File(
 
     source_dir = registry.source_dir(kb_id)
     # submit_upload 含同步 SQLite 写：放线程池执行，绝不阻塞事件循环（否则 SQLite 锁竞争会冻结整个 API）。
-    loop = asyncio.get_running_loop()
-    job = await loop.run_in_executor(
+    job = await run_sync(
         request.app.state.offload_executor,
         request.app.state.index_jobs.submit_upload,
         kb_id,
@@ -324,8 +319,7 @@ async def delete_document(kb_id: str, name: str, request: Request):
     safe_name = os.path.basename(name)
     path = os.path.join(registry.source_dir(kb_id), safe_name)
     # 同步 SQLite 写下放线程池，不阻塞事件循环；存在性检查仍在 executor command 内完成，路由始终 202。
-    loop = asyncio.get_running_loop()
-    job = await loop.run_in_executor(
+    job = await run_sync(
         request.app.state.offload_executor,
         request.app.state.index_jobs.submit_delete_doc,
         kb_id,

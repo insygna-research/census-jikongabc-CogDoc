@@ -2,7 +2,7 @@ import copy
 import logging
 from collections import OrderedDict
 from threading import RLock
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
 from cogdoc.config.settings import get_settings
 from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
@@ -20,7 +20,9 @@ from cogdoc.tools.retriever.bm25_retriever import BM25Retriever
 from cogdoc.tools.retriever.derived_knowledge import DerivedKnowledgeRetriever
 from cogdoc.tools.retriever.hybrid import HybridRetriever, IndexCorruptError
 from cogdoc.tools.retriever.metadata import safe_retrieval_metadata
+from cogdoc.tools.retriever.confidence import assess_retrieval_support
 from cogdoc.tools.reranker import BGEReranker, skipped_cpu_rerank_docs
+from cogdoc.agents.answer_markers import NO_RELEVANT_CONTENT_ANSWER
 from cogdoc.agents.qa_generator import Generator
 from cogdoc.agents.query_rewriter import QueryRewriteAgent
 from cogdoc.agents.rewrite_verifier import RewriteVerifyAgent
@@ -356,6 +358,7 @@ def rerank_node(state: GraphState) -> dict:
             top_n=settings.qa_rerank_top_n,
             device=target_device,
         )
+    support = assess_retrieval_support(reranked_docs, settings)
     # 下游沿用重排结果字段名，实际内容已包含相邻上下文扩展。
     expanded_docs = _expand_with_neighbor_chunks(doc_id, reranked_docs, state)
     log_event(
@@ -368,8 +371,42 @@ def rerank_node(state: GraphState) -> dict:
         expanded_count=len(expanded_docs),
         device=target_device,
         rerank_skipped_reason=rerank_skipped_reason,
+        retrieval_confidence=round(support.score, 6),
+        retrieval_abstained=not support.supported,
+        retrieval_abstain_reason=support.reason,
     )
-    return {"reranked_docs": expanded_docs}
+    return {
+        "reranked_docs": expanded_docs,
+        "retrieval_confidence": support.score,
+        "retrieval_abstained": not support.supported,
+        "retrieval_abstain_reason": support.reason,
+        "retrieval_signals": support.signals,
+    }
+
+
+# 证据不足时不调用 LLM，返回稳定拒答并清空候选，避免无关证据进入引用和会话记忆。
+def abstain_node(state: GraphState) -> dict:
+    log_event(
+        "qa",
+        "qa_retrieval_abstained",
+        state,
+        retrieval_confidence=round(state.get("retrieval_confidence", 0.0), 6),
+        retrieval_abstain_reason=state.get("retrieval_abstain_reason", ""),
+    )
+    return {
+        "messages": [AIMessage(content=NO_RELEVANT_CONTENT_ANSWER)],
+        "answer": NO_RELEVANT_CONTENT_ANSWER,
+        "sources": [],
+        "evidence": [],
+        "reranked_docs": [],
+        "critique": "",
+        "retrieval_abstained": True,
+    }
+
+
+# 根据检索置信度选择生成或确定性拒答。
+def retrieval_check(state: GraphState) -> str:
+    return "abstain_node" if state.get("retrieval_abstained", False) else "generate_node"
 
 
 # 生成节点。
@@ -480,6 +517,7 @@ sub_graph.add_node("rewrite_node", rewrite_node)
 sub_graph.add_node("verify_rewrite_node", verify_rewrite_node)
 sub_graph.add_node("retrieve_node", retrieve_node)
 sub_graph.add_node("rerank_node", rerank_node)
+sub_graph.add_node("abstain_node", abstain_node)
 sub_graph.add_node("generate_node", generate_node)
 sub_graph.add_node("citation_node", citation_node)
 
@@ -487,7 +525,12 @@ sub_graph.add_edge(START, "rewrite_node")
 sub_graph.add_edge("rewrite_node", "verify_rewrite_node")
 sub_graph.add_edge("verify_rewrite_node", "retrieve_node")
 sub_graph.add_edge("retrieve_node", "rerank_node")
-sub_graph.add_edge("rerank_node", "generate_node")
+sub_graph.add_conditional_edges(
+    "rerank_node",
+    retrieval_check,
+    {"abstain_node": "abstain_node", "generate_node": "generate_node"},
+)
+sub_graph.add_edge("abstain_node", END)
 sub_graph.add_edge("generate_node", "citation_node")
 
 sub_graph.add_conditional_edges(

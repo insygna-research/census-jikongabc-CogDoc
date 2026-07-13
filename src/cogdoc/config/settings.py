@@ -94,6 +94,24 @@ class Settings(BaseSettings):
         default=12, validation_alias="QA_RERANK_MAX_CANDIDATES"
     )
     qa_rerank_on_cpu: bool = Field(default=False, validation_alias="QA_RERANK_ON_CPU")
+    qa_abstain_enabled: bool = Field(
+        default=True, validation_alias="QA_ABSTAIN_ENABLED"
+    )
+    qa_abstain_max_vector_distance: float = Field(
+        default=0.86,
+        ge=0.0,
+        validation_alias="QA_ABSTAIN_MAX_VECTOR_DISTANCE",
+    )
+    qa_abstain_min_bm25_score: float = Field(
+        default=10.0,
+        ge=0.0,
+        validation_alias="QA_ABSTAIN_MIN_BM25_SCORE",
+    )
+    qa_abstain_min_knowledge_score: float = Field(
+        default=0.5,
+        ge=0.0,
+        validation_alias="QA_ABSTAIN_MIN_KNOWLEDGE_SCORE",
+    )
     hybrid_rrf_k: int = Field(default=60, validation_alias="HYBRID_RRF_K")
     cloud_section_max_workers: int = Field(
         default=6, validation_alias="CLOUD_SECTION_MAX_WORKERS"

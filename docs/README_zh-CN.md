@@ -547,6 +547,10 @@ CogDoc/
 | `RATE_LIMIT_PER_MINUTE` | `120` | 受保护 API 路由的令牌桶补充速率 |
 | `RATE_LIMIT_BURST` | `120` | 令牌桶突发容量；`<=0` 表示关闭限流 |
 | `COGDOC_MAX_UPLOAD_MB` | `50` | 网页/API 上传 PDF 的单文件大小上限 |
+| `QA_ABSTAIN_ENABLED` | `true` | 检索置信度不足时在调用 LLM 前确定性拒答 |
+| `QA_ABSTAIN_MAX_VECTOR_DISTANCE` | `0.86` | 可接受的归一化向量 L2 距离上限 |
+| `QA_ABSTAIN_MIN_BM25_SCORE` | `10.0` | 可独立证明检索支持度的 BM25 分数下限 |
+| `QA_ABSTAIN_MIN_KNOWLEDGE_SCORE` | `0.5` | 已审核派生知识的支持度下限 |
 | `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | 本地 OpenAI 兼容 Ollama endpoint |
 | `OLLAMA_MODEL_NAME` | `qwen2.5:7b` | 本地模型名 |
 | `OLLAMA_TIMEOUT_SECONDS` | `180` | 本地模型请求超时 |
@@ -590,7 +594,7 @@ CogDoc/
 
 离线评测使用 `eval/` 下的本地 JSONL。`make eval-suite` 是默认轻量门禁：它会审计检索和质量评测集覆盖，运行质量指标，按用例类型和层级输出摘要，默认跳过依赖模型的真实检索。`make eval-suite-report` 写入 `eval/eval_suite_report.json`；`make eval-suite-baseline` 对比 `eval/eval_suite_baseline.json` 的聚合指标、类型指标和分层质量指标；`make eval-suite-update-baseline` 在复核后刷新这份基线。生成的报告和基线文件都被 Git 忽略。
 
-真实检索配置要求 `eval/retrieval_eval.jsonl` 至少包含 100 条已复核问题：单源 40 条、多源 20 条、困难 20 条、无答案 20 条。`make eval-retrieval-baseline` 记录复核后的参考运行；`make eval-retrieval-gate` 对比相关性基线，并执行本地 `eval/retrieval_gate.json` 中的绝对阈值，文件结构参考 `eval/retrieval_gate.example.json`。报告会给出整体和分层的 MRR/Recall/Hit、平均延迟与 P95 延迟；模型加载和首轮初始化会单独记为 warmup，不计入稳态延迟。无答案样本使用独立的 `no_answer_false_positive@k`，它只诊断检索器是否仍返回候选，不能等同于生成答案已经产生事实错误。
+真实检索配置要求 `eval/retrieval_eval.jsonl` 至少包含 100 条已复核问题：单源 40 条、多源 20 条、困难 20 条、无答案 20 条。`make eval-retrieval-baseline` 记录复核后的参考运行；`make eval-retrieval-gate` 对比相关性基线，并执行本地 `eval/retrieval_gate.json` 中的绝对阈值，文件结构参考 `eval/retrieval_gate.example.json`。报告会给出整体和分层的 MRR/Recall/Hit、平均延迟与 P95 延迟；模型加载和首轮初始化会单独记为 warmup，不计入稳态延迟。`answerable_acceptance_rate` 和 `no_answer_abstention_rate` 直接衡量确定性证据门禁。无答案样本还会报告 `no_answer_false_positive@k`，该指标只表示检索器是否返回候选，不代表门禁已放行，也不能等同于生成答案已产生事实错误。默认的向量距离/BM25 阈值由本地已复核集标定，更换语料或嵌入模型后应重新标定。
 
 `make eval` 对本地检索集做临时评测；干净 checkout 没有本地集时会回退到 `eval/retrieval_eval.example.jsonl`。`make eval-coverage` 不触碰索引，只检查 smoke 覆盖配置。组合评测需要真实检索时运行 `make eval-suite-run-retrieval`。`make eval-quality` 会统计路由准确率、引用准确率和覆盖 QA、Summary、Compare、多轮、无答案、反馈层级的人工忠实性台账；`make eval-quality-coverage` 还会对必需 case type 和推荐 layer 执行覆盖门禁。点踩/纠错会在 `bad_cases.jsonl` 写入 `eval_draft`，方便复核后提升到质量评测集。只想检查质量覆盖时运行 `python scripts/eval_quality.py --coverage-only`。`--coverage-only` 有意不允许与 `--check-coverage`、`--json`、`--baseline` 同时使用。
 

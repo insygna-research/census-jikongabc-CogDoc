@@ -8,7 +8,7 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 
 # 每个 app 独立 CollectorRegistry：避免多次 create_app 在全局注册表重复注册、测试间互相串数。
@@ -54,22 +54,32 @@ def _route_label(request: Request) -> str:
 
 
 # 统计每个请求的计数、耗时与在途数；置于访问控制外层，故 401/429 也计入。
-class MetricsMiddleware(BaseHTTPMiddleware):
+class MetricsMiddleware:
     # 统计每个请求的计数、耗时与在途数；置于访问控制外层，故 401/429 也计入。
-    def __init__(self, app, metrics: Metrics):
-        super().__init__(app)
+    def __init__(self, app: ASGIApp, metrics: Metrics):
+        self.app = app
         self._metrics = metrics
 
     # 分发结果。
-    async def dispatch(self, request: Request, call_next):
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope)
         start = time.perf_counter()
         self._metrics.in_progress.inc()
         # 默认 500：call_next 抛出未被兜底的异常时也记一条并让异常透传，不静默丢指标。
         status = "500"
+
+        async def send_with_status(message: Message) -> None:
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = str(message["status"])
+            await send(message)
+
         try:
-            response = await call_next(request)
-            status = str(response.status_code)
-            return response
+            await self.app(scope, receive, send_with_status)
         finally:
             self._metrics.in_progress.dec()
             route = _route_label(request)
