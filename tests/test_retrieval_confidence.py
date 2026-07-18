@@ -32,9 +32,7 @@ def test_support_rejects_empty_and_low_confidence_candidates():
     settings = _settings()
 
     assert assess_retrieval_support([], settings).reason == "no_candidates"
-    result = assess_retrieval_support(
-        [_doc(distance=0.95, bm25_score=5.0)], settings
-    )
+    result = assess_retrieval_support([_doc(distance=0.95, bm25_score=5.0)], settings)
 
     assert result.supported is False
     assert result.reason == "below_threshold"
@@ -45,12 +43,8 @@ def test_support_rejects_empty_and_low_confidence_candidates():
 def test_support_accepts_semantic_or_lexical_signal():
     settings = _settings()
 
-    semantic = assess_retrieval_support(
-        [_doc(distance=0.8, bm25_score=1.0)], settings
-    )
-    lexical = assess_retrieval_support(
-        [_doc(distance=1.1, bm25_score=12.0)], settings
-    )
+    semantic = assess_retrieval_support([_doc(distance=0.8, bm25_score=1.0)], settings)
+    lexical = assess_retrieval_support([_doc(distance=1.1, bm25_score=12.0)], settings)
 
     assert semantic.supported is True
     assert lexical.supported is True

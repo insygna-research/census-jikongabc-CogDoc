@@ -126,9 +126,7 @@ def _trace_config(
         "qa_rerank_top_n": settings.qa_rerank_top_n,
         "qa_rerank_max_candidates": settings.qa_rerank_max_candidates,
         "qa_abstain_enabled": settings.qa_abstain_enabled,
-        "qa_abstain_max_vector_distance": (
-            settings.qa_abstain_max_vector_distance
-        ),
+        "qa_abstain_max_vector_distance": (settings.qa_abstain_max_vector_distance),
         "qa_abstain_min_bm25_score": settings.qa_abstain_min_bm25_score,
         "qa_abstain_min_knowledge_score": settings.qa_abstain_min_knowledge_score,
         "qa_evidence_verify_enabled": settings.qa_evidence_verify_enabled,
@@ -327,9 +325,7 @@ def run_chat(
                             },
                         )
                 elif (
-                    mode == "updates"
-                    and in_subgraph
-                    and "evidence_verify_node" in data
+                    mode == "updates" and in_subgraph and "evidence_verify_node" in data
                 ):
                     verify_output = data["evidence_verify_node"]
                     fallback_outputs["qa"].update(verify_output)

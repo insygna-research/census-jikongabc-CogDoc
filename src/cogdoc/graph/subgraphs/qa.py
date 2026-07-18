@@ -35,6 +35,13 @@ from cogdoc.agents.citation_validator import CitationValidatorAgent
 
 
 NEIGHBOR_CONTEXT_RADIUS = 1
+CITATION_CORRECTION_PROMPT_TEMPLATE = (
+    "\n\n【引用校验失败通知】\n"
+    "你上一轮的回答已被引用校验器拦截，错误详情如下：\n\n"
+    "{critique}\n\n"
+    "请严格按照上述修正要求重新生成答案，确保每处引用的文件名和页码与 "
+    "<Document> 标签属性完全吻合。"
+)
 _derived_knowledge_retriever = DerivedKnowledgeRetriever()
 _retrieval_feedback_store = RetrievalFeedbackStore()
 
@@ -413,8 +420,7 @@ def evidence_verify_node(state: GraphState) -> dict:
         verified_ids = set(output.get("evidence_verified_chunk_ids", []))
         generation_docs = list(state.get("reranked_docs", []))
         generation_ids = {
-            str(doc.get("meta", {}).get("chunk_id") or "")
-            for doc in generation_docs
+            str(doc.get("meta", {}).get("chunk_id") or "") for doc in generation_docs
         }
         for doc in state.get("verification_docs", []):
             chunk_id = str(doc.get("meta", {}).get("chunk_id") or "")
@@ -431,9 +437,7 @@ def evidence_verify_node(state: GraphState) -> dict:
             output.get("evidence_verified_chunk_ids", [])
         ),
         generation_evidence_count=len(output.get("reranked_docs", [])),
-        evidence_verification_reason=output.get(
-            "evidence_verification_reason", ""
-        ),
+        evidence_verification_reason=output.get("evidence_verification_reason", ""),
         evidence_verifier_error=output.get("evidence_verifier_error", ""),
     )
     return output
@@ -464,7 +468,9 @@ def abstain_node(state: GraphState) -> dict:
 def retrieval_check(state: GraphState) -> str:
     if should_verify_evidence(state, get_settings()):
         return "evidence_verify_node"
-    return "abstain_node" if state.get("retrieval_abstained", False) else "generate_node"
+    return (
+        "abstain_node" if state.get("retrieval_abstained", False) else "generate_node"
+    )
 
 
 # 根据二阶段证据结论选择生成或拒答。
@@ -482,19 +488,14 @@ def generate_node(state: GraphState) -> dict:
     critique = state.get("critique", "")
     iteration_count = state.get("iteration_count", 0)
 
-    llm = Generator._get_client(is_local=is_local)
+    llm = Generator._get_client_for_node("qa_generator", is_local=is_local)
     base_prompt = Generator.format_prompt(
         query=query, docs=final_docs, chat_history=chat_history
     )
 
     messages_payload = list(base_prompt)
     if critique and iteration_count > 0:
-        correction_note = (
-            f"\n\n【引用校验失败通知】\n"
-            f"你上一轮的回答已被引用校验器拦截，错误详情如下：\n\n"
-            f"{critique}\n\n"
-            f"请严格按照上述修正要求重新生成答案，确保每处引用的文件名和页码与 <Document> 标签属性完全吻合。"
-        )
+        correction_note = CITATION_CORRECTION_PROMPT_TEMPLATE.format(critique=critique)
         if messages_payload and isinstance(messages_payload[0], SystemMessage):
             messages_payload[0] = SystemMessage(
                 content=messages_payload[0].content + correction_note

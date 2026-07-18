@@ -562,7 +562,12 @@ CogDoc/
 | `LLM_MODEL_NAME` | `deepseek-chat` | Cloud model name |
 | `LLM_API_KEY` | `your-cloud-api-key-here` | Cloud API key |
 | `LLM_TIMEOUT_SECONDS` | `90` | Cloud model request timeout |
+| `LLM_<NODE>_BACKEND` | `default` | Per-node backend: `default`, `cloud`, or `local` |
+| `LLM_<NODE>_MODEL_NAME` | unset | Per-node cloud model override |
+| `OLLAMA_<NODE>_MODEL_NAME` | unset | Per-node local model override |
 | `HF_TOKEN` | unset | Optional Hugging Face Hub token |
+
+`<NODE>` can be `ROUTER`, `QUERY_REWRITER`, `SOURCE_RESOLVER`, `EVIDENCE_VERIFIER`, `QA_GENERATOR`, `SUMMARY_GENERATOR`, `COMPARE_PROFILE`, or `COMPARE_CONCLUSION`. For independent review, for example, set `LLM_EVIDENCE_VERIFIER_BACKEND=local` and `OLLAMA_EVIDENCE_VERIFIER_MODEL_NAME=<review-model>` while keeping answer generation on the cloud backend. Citation syntax and source/page membership remain deterministically validated by Rust rather than by an LLM.
 
 Requirements: Python 3.11+ (developed on 3.13; the extension targets 3.8+), a Rust toolchain with `cargo` (edition 2024, via [rustup](https://rustup.rs/)), and [maturin](https://www.maturin.rs/). Optional: [Ollama](https://ollama.com/) for local models. See `.env.example` for the full set of tunables (retrieval `top_k`, rerank `top_n`, RRF `k`, CUDA memory floors, eval set paths).
 

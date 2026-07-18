@@ -15,6 +15,37 @@ from cogdoc.graph.state import (
 from cogdoc.tools.tokenizer import tokenize_mixed_text
 
 
+SUMMARY_SECTION_SYSTEM_PROMPT = (
+    "你是一位严谨的技术文档摘要助手。你的唯一工作是：仅依据给定的 <Document> 标签文本，为指定章节写一段简短的中文摘要。\n\n"
+    "【硬性约束】\n1. 只能使用 <Document> 标签内的信息，禁止引入任何标签外的知识、常识或推测。\n"
+    "2. 不要输出引用标签、页码、文件名或 <Document> 标签，程序会在生成后自动绑定引用。\n"
+    "3. 不要使用占位词，不要输出章节标题，不要解释规则。\n\n【范围与篇幅】\n"
+    "- 章节名是内容归类维度，不代表文档必须是论文；通知、规程、赛事规则也要按最接近维度归纳。\n"
+    "- 只写当前指定章节的内容，不复述其它章节、不重复章节标题、不加前言/结语/过渡语。\n- 输出 2-4 句中文短句。\n\n"
+    "【无依据时】\n- 只有当所有给定片段都没有任何可归入本章节的信息时，才输出一行：文档中未明确说明（不加引用、不编造）。\n"
+    "- 若片段中有目标、对象、赛制、模块、要求、评分、奖项、日程、注意事项等赛事/通知信息，必须按章节聚焦摘要，不要因为不是论文实验而输出“文档中未明确说明”。\n\n"
+    "【输出】只输出摘要正文（或“文档中未明确说明”），不要输出章节标题、不要解释、不要任何额外文字。"
+)
+
+SUMMARY_RETRY_SYSTEM_PROMPT = (
+    "你是一位严谨的中文资料整理助手。下面片段已经由程序筛选为与指定摘要维度相关。你的任务是从片段中提炼事实，不要因为文档不是论文而回答“文档中未明确说明”。\n\n"
+    "【要求】\n1. 只能依据 <Document> 标签内文字。\n"
+    "2. 若能找到任何与该维度相关的目标、对象、流程、规则、要求、评分、奖项、日程、注意事项或价值，就写 2-3 句中文摘要。\n"
+    "3. 不要输出章节标题、引用、页码或解释。\n4. 只有片段完全没有相关事实时，才输出：文档中未明确说明。"
+)
+SUMMARY_SECTION_USER_PROMPT_TEMPLATE = (
+    "【目标文档】{source}\n【本次章节】{title}\n【章节聚焦】{instruction}\n"
+    "【用户摘要意图】{query}\n\n下面是从该文档中筛选出的、与本章节最相关的片段：\n"
+    "【参考资料开始】\n{context}\n【参考资料结束】\n\n"
+    "请据此写出本章节摘要，2-4 句，严格遵守上面的全部约束。"
+)
+SUMMARY_RETRY_USER_PROMPT_TEMPLATE = (
+    "【目标文档】{source}\n【摘要维度】{title}\n【维度说明】{instruction}\n"
+    "【用户意图】{query}\n\n【参考资料开始】\n{context}\n【参考资料结束】\n\n"
+    "请重新提炼该维度摘要。"
+)
+
+
 MAX_SECTION_CONTEXT_CHUNKS = 8
 LOCAL_LARGE_SECTION_CONTEXT_CHUNKS = 6
 CITATION_PATTERN = re.compile(
@@ -259,36 +290,14 @@ def append_citation_warning(answer: str, critique: str, unit_label: str) -> str:
 def _summary_messages(source: str, plan: SummarySectionPlan, query: str, context: str):
     # 构造首次章节摘要调用的消息。
     return [
-        SystemMessage(
-            content=(
-                "你是一位严谨的技术文档摘要助手。你的唯一工作是：仅依据给定的 <Document> 标签文本，"
-                "为指定章节写一段简短的中文摘要。\n\n"
-                "【硬性约束】\n"
-                "1. 只能使用 <Document> 标签内的信息，禁止引入任何标签外的知识、常识或推测。\n"
-                "2. 不要输出引用标签、页码、文件名或 <Document> 标签，程序会在生成后自动绑定引用。\n"
-                "3. 不要使用占位词，不要输出章节标题，不要解释规则。\n\n"
-                "【范围与篇幅】\n"
-                "- 章节名是内容归类维度，不代表文档必须是论文；通知、规程、赛事规则也要按最接近维度归纳。\n"
-                "- 只写当前指定章节的内容，不复述其它章节、不重复章节标题、不加前言/结语/过渡语。\n"
-                "- 输出 2-4 句中文短句。\n\n"
-                "【无依据时】\n"
-                "- 只有当所有给定片段都没有任何可归入本章节的信息时，才输出一行：文档中未明确说明"
-                "（不加引用、不编造）。\n"
-                "- 若片段中有目标、对象、赛制、模块、要求、评分、奖项、日程、注意事项等赛事/通知信息，"
-                "必须按章节聚焦摘要，不要因为不是论文实验而输出“文档中未明确说明”。\n\n"
-                "【输出】只输出摘要正文（或“文档中未明确说明”），"
-                "不要输出章节标题、不要解释、不要任何额外文字。"
-            )
-        ),
+        SystemMessage(content=SUMMARY_SECTION_SYSTEM_PROMPT),
         HumanMessage(
-            content=(
-                f"【目标文档】{source}\n"
-                f"【本次章节】{plan['title']}\n"
-                f"【章节聚焦】{plan['instruction']}\n"
-                f"【用户摘要意图】{query}\n\n"
-                f"下面是从该文档中筛选出的、与本章节最相关的片段：\n"
-                f"【参考资料开始】\n{context}\n【参考资料结束】\n\n"
-                "请据此写出本章节摘要，2-4 句，严格遵守上面的全部约束。"
+            content=SUMMARY_SECTION_USER_PROMPT_TEMPLATE.format(
+                source=source,
+                title=plan["title"],
+                instruction=plan["instruction"],
+                query=query,
+                context=context,
             )
         ),
     ]
@@ -300,26 +309,14 @@ def _summary_retry_messages(
 ):
     # 构造本地模型无依据误判后的重试消息。
     return [
-        SystemMessage(
-            content=(
-                "你是一位严谨的中文资料整理助手。下面片段已经由程序筛选为与指定摘要维度相关。"
-                "你的任务是从片段中提炼事实，不要因为文档不是论文而回答“文档中未明确说明”。\n\n"
-                "【要求】\n"
-                "1. 只能依据 <Document> 标签内文字。\n"
-                "2. 若能找到任何与该维度相关的目标、对象、流程、规则、要求、评分、奖项、日程、注意事项或价值，"
-                "就写 2-3 句中文摘要。\n"
-                "3. 不要输出章节标题、引用、页码或解释。\n"
-                "4. 只有片段完全没有相关事实时，才输出：文档中未明确说明。"
-            )
-        ),
+        SystemMessage(content=SUMMARY_RETRY_SYSTEM_PROMPT),
         HumanMessage(
-            content=(
-                f"【目标文档】{source}\n"
-                f"【摘要维度】{plan['title']}\n"
-                f"【维度说明】{plan['instruction']}\n"
-                f"【用户意图】{query}\n\n"
-                f"【参考资料开始】\n{context}\n【参考资料结束】\n\n"
-                "请重新提炼该维度摘要。"
+            content=SUMMARY_RETRY_USER_PROMPT_TEMPLATE.format(
+                source=source,
+                title=plan["title"],
+                instruction=plan["instruction"],
+                query=query,
+                context=context,
             )
         ),
     ]
@@ -373,7 +370,7 @@ class SectionSummaryAgent:
         if not docs or not plans:
             return {"summary_section_results": []}
 
-        llm = Generator._get_client(is_local=is_local)
+        llm = Generator._get_client_for_node("summary_generator", is_local=is_local)
         doc_tokens = [(doc, tokenize_for_section(doc["text"])) for doc in docs]
 
         # 构建 section result。

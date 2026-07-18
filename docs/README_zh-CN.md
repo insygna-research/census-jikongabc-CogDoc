@@ -562,7 +562,12 @@ CogDoc/
 | `LLM_MODEL_NAME` | `deepseek-chat` | 云端模型名 |
 | `LLM_API_KEY` | `your-cloud-api-key-here` | 云端 API key |
 | `LLM_TIMEOUT_SECONDS` | `90` | 云端模型请求超时 |
+| `LLM_<NODE>_BACKEND` | `default` | 节点级后端：`default`、`cloud` 或 `local` |
+| `LLM_<NODE>_MODEL_NAME` | 未设置 | 节点级云端模型覆盖 |
+| `OLLAMA_<NODE>_MODEL_NAME` | 未设置 | 节点级本地模型覆盖 |
 | `HF_TOKEN` | 未设置 | 可选 Hugging Face Hub token |
+
+`<NODE>` 可取 `ROUTER`、`QUERY_REWRITER`、`SOURCE_RESOLVER`、`EVIDENCE_VERIFIER`、`QA_GENERATOR`、`SUMMARY_GENERATOR`、`COMPARE_PROFILE` 或 `COMPARE_CONCLUSION`。例如，可设置 `LLM_EVIDENCE_VERIFIER_BACKEND=local` 和 `OLLAMA_EVIDENCE_VERIFIER_MODEL_NAME=<校验模型>`，让证据校验与云端答案生成使用不同模型。引用格式及来源/页码合法性仍由 Rust 确定性校验，不交给 LLM。
 
 环境要求：Python 3.11+（在 3.13 上开发；扩展目标 3.8+）、带 `cargo` 的 Rust 工具链（edition 2024，经 [rustup](https://rustup.rs/)）、[maturin](https://www.maturin.rs/)。可选：[Ollama](https://ollama.com/) 用于本地模型。完整可调项见 `.env.example`（检索 `top_k`、重排 `top_n`、RRF `k`、CUDA 显存下限、评测集路径等）。
 

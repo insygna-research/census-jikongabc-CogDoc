@@ -73,6 +73,56 @@ class Settings(BaseSettings):
     )
     llm_max_retries: int = Field(default=2, validation_alias="LLM_MAX_RETRIES")
 
+    # 云端节点级模型覆盖；留空时回退到 LLM_MODEL_NAME。
+    llm_router_model_name: str = Field(
+        default="", validation_alias="LLM_ROUTER_MODEL_NAME"
+    )
+    llm_query_rewriter_model_name: str = Field(
+        default="", validation_alias="LLM_QUERY_REWRITER_MODEL_NAME"
+    )
+    llm_source_resolver_model_name: str = Field(
+        default="", validation_alias="LLM_SOURCE_RESOLVER_MODEL_NAME"
+    )
+    llm_evidence_verifier_model_name: str = Field(
+        default="", validation_alias="LLM_EVIDENCE_VERIFIER_MODEL_NAME"
+    )
+    llm_qa_generator_model_name: str = Field(
+        default="", validation_alias="LLM_QA_GENERATOR_MODEL_NAME"
+    )
+    llm_summary_generator_model_name: str = Field(
+        default="", validation_alias="LLM_SUMMARY_GENERATOR_MODEL_NAME"
+    )
+    llm_compare_profile_model_name: str = Field(
+        default="", validation_alias="LLM_COMPARE_PROFILE_MODEL_NAME"
+    )
+    llm_compare_conclusion_model_name: str = Field(
+        default="", validation_alias="LLM_COMPARE_CONCLUSION_MODEL_NAME"
+    )
+    llm_router_backend: str = Field(
+        default="default", validation_alias="LLM_ROUTER_BACKEND"
+    )
+    llm_query_rewriter_backend: str = Field(
+        default="default", validation_alias="LLM_QUERY_REWRITER_BACKEND"
+    )
+    llm_source_resolver_backend: str = Field(
+        default="default", validation_alias="LLM_SOURCE_RESOLVER_BACKEND"
+    )
+    llm_evidence_verifier_backend: str = Field(
+        default="default", validation_alias="LLM_EVIDENCE_VERIFIER_BACKEND"
+    )
+    llm_qa_generator_backend: str = Field(
+        default="default", validation_alias="LLM_QA_GENERATOR_BACKEND"
+    )
+    llm_summary_generator_backend: str = Field(
+        default="default", validation_alias="LLM_SUMMARY_GENERATOR_BACKEND"
+    )
+    llm_compare_profile_backend: str = Field(
+        default="default", validation_alias="LLM_COMPARE_PROFILE_BACKEND"
+    )
+    llm_compare_conclusion_backend: str = Field(
+        default="default", validation_alias="LLM_COMPARE_CONCLUSION_BACKEND"
+    )
+
     # 本地模型兼容后端。
     ollama_model_name: str = Field(
         default="qwen2.5:7b", validation_alias="OLLAMA_MODEL_NAME"
@@ -86,6 +136,32 @@ class Settings(BaseSettings):
         default=180.0, validation_alias="OLLAMA_TIMEOUT_SECONDS"
     )
     ollama_max_retries: int = Field(default=1, validation_alias="OLLAMA_MAX_RETRIES")
+
+    # 本地节点级模型覆盖；留空时回退到 OLLAMA_MODEL_NAME。
+    ollama_router_model_name: str = Field(
+        default="", validation_alias="OLLAMA_ROUTER_MODEL_NAME"
+    )
+    ollama_query_rewriter_model_name: str = Field(
+        default="", validation_alias="OLLAMA_QUERY_REWRITER_MODEL_NAME"
+    )
+    ollama_source_resolver_model_name: str = Field(
+        default="", validation_alias="OLLAMA_SOURCE_RESOLVER_MODEL_NAME"
+    )
+    ollama_evidence_verifier_model_name: str = Field(
+        default="", validation_alias="OLLAMA_EVIDENCE_VERIFIER_MODEL_NAME"
+    )
+    ollama_qa_generator_model_name: str = Field(
+        default="", validation_alias="OLLAMA_QA_GENERATOR_MODEL_NAME"
+    )
+    ollama_summary_generator_model_name: str = Field(
+        default="", validation_alias="OLLAMA_SUMMARY_GENERATOR_MODEL_NAME"
+    )
+    ollama_compare_profile_model_name: str = Field(
+        default="", validation_alias="OLLAMA_COMPARE_PROFILE_MODEL_NAME"
+    )
+    ollama_compare_conclusion_model_name: str = Field(
+        default="", validation_alias="OLLAMA_COMPARE_CONCLUSION_MODEL_NAME"
+    )
 
     # 检索与生成控制。
     qa_retrieval_top_k: int = Field(default=9, validation_alias="QA_RETRIEVAL_TOP_K")
@@ -288,6 +364,29 @@ class Settings(BaseSettings):
         if setting_name not in mb_by_name:
             raise ValueError(f"未知 CUDA 显存阈值配置: {setting_name}")
         return int(mb_by_name[setting_name]) * 1024 * 1024
+
+    # 返回节点配置的模型名，节点未覆盖时使用对应后端的全局模型。
+    def model_name_for_node(self, node_name: str | None, *, is_local: bool) -> str:
+        default = self.ollama_model_name if is_local else self.llm_model_name
+        if not node_name:
+            return default
+        prefix = "ollama" if is_local else "llm"
+        value = getattr(self, f"{prefix}_{node_name}_model_name", "")
+        return str(value or default).strip()
+
+    # 节点可显式选择云端或本地后端；default 跟随本次请求模式。
+    def is_local_for_node(self, node_name: str, *, request_is_local: bool) -> bool:
+        backend = str(getattr(self, f"llm_{node_name}_backend", "default")).lower()
+        if backend == "default":
+            return request_is_local
+        if backend in {"local", "ollama"}:
+            return True
+        if backend == "cloud":
+            return False
+        raise ValueError(
+            f"无效节点后端 LLM_{node_name.upper()}_BACKEND={backend!r}; "
+            "可选值为 default、cloud、local"
+        )
 
 
 # 返回设置。

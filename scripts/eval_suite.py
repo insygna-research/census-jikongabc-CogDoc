@@ -155,12 +155,8 @@ def compare_metric_group(
         delta = cur - base
         status = "same"
         direction = (directions or {}).get(name, "higher")
-        regressed_metric = (
-            delta < -1e-9 if direction == "higher" else delta > 1e-9
-        )
-        improved_metric = (
-            delta > 1e-9 if direction == "higher" else delta < -1e-9
-        )
+        regressed_metric = delta < -1e-9 if direction == "higher" else delta > 1e-9
+        improved_metric = delta > 1e-9 if direction == "higher" else delta < -1e-9
         if regressed_metric:
             status = "regressed"
             regressed = True

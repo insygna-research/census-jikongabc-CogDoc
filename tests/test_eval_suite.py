@@ -446,9 +446,7 @@ def test_eval_suite_baseline_treats_higher_latency_as_regression(tmp_path):
     }
     baseline = {
         "quality_report": {"aggregate": {}},
-        "retrieval_report": {
-            "aggregate": {"mrr": 1.0, "latency_p95_ms": 100.0}
-        },
+        "retrieval_report": {"aggregate": {"mrr": 1.0, "latency_p95_ms": 100.0}},
     }
     baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
 

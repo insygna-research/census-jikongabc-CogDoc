@@ -302,15 +302,10 @@ def print_report(report: dict) -> None:
     for row in report["rows"]:
         if row["expected_sources"]:
             recalls = "  ".join(
-                f"r@{k}={row['metrics'][f'recall@{k}']:.2f}"
-                for k in cfg["k_values"]
+                f"r@{k}={row['metrics'][f'recall@{k}']:.2f}" for k in cfg["k_values"]
             )
             score = f"{row['metrics']['mrr']:.2f} MRR  {recalls}"
-            score += (
-                "  accepted"
-                if row["retrieval_supported"]
-                else "  false-abstain"
-            )
+            score += "  accepted" if row["retrieval_supported"] else "  false-abstain"
         else:
             flags = "  ".join(
                 f"fp@{k}={row['metrics'][f'no_answer_false_positive@{k}']:.0f}"
@@ -319,8 +314,7 @@ def print_report(report: dict) -> None:
             decision = "accepted" if row["retrieval_supported"] else "abstained"
             score = f"{flags}  {decision}"
         print(
-            f"  [{row['layer']}] [{score}] {row['latency_ms']:.1f}ms"
-            f"  | {row['query']}"
+            f"  [{row['layer']}] [{score}] {row['latency_ms']:.1f}ms  | {row['query']}"
         )
         print(f"        expected={row['expected_sources']}")
         print(f"        top={row['retrieved_sources'][: max(cfg['k_values'])]}")
@@ -344,8 +338,7 @@ def print_report(report: dict) -> None:
     print("\n按检索层:")
     for layer, summary in report["by_layer"].items():
         metrics = "  ".join(
-            f"{key}={value:.4f}"
-            for key, value in summary["aggregate"].items()
+            f"{key}={value:.4f}" for key, value in summary["aggregate"].items()
         )
         print(f"  {layer:<14} count={summary['count']}  {metrics}")
     print()
@@ -383,9 +376,7 @@ def compare_baseline(report: dict, baseline_path: Path) -> int:
             print(f"  {key:<12} {cur:.4f}  (基线缺该指标)")
             continue
         delta = cur - base
-        direction = report.get("metric_directions", {}).get(
-            key, metric_direction(key)
-        )
+        direction = report.get("metric_directions", {}).get(key, metric_direction(key))
         flag = ""
         regressed_metric = delta < -1e-9 if direction == "higher" else delta > 1e-9
         improved_metric = delta > 1e-9 if direction == "higher" else delta < -1e-9

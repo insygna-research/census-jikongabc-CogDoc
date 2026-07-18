@@ -222,9 +222,7 @@ async def list_sources(kb_id: str, request: Request):
     if not request.app.state.kb_registry.exists(kb_id):
         return _error(ErrorCode.KB_NOT_FOUND, f"知识库不存在: {kb_id}", 404)
     source_reader = getattr(request.app.state, "source_list_reader", _kb_sources)
-    sources = await run_sync(
-        request.app.state.offload_executor, source_reader, kb_id
-    )
+    sources = await run_sync(request.app.state.offload_executor, source_reader, kb_id)
     return SourceListResponse(kb_id=kb_id, sources=sources)
 
 

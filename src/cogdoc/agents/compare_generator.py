@@ -10,6 +10,18 @@ from cogdoc.agents.summary_generator import (
 from cogdoc.graph.state import CompareDimensionPlan, DocumentProfile, RetrievedDoc
 
 
+COMPARE_CONCLUSION_SYSTEM_PROMPT = (
+    "你是一位严谨的技术方案对比助手。只能依据用户提供的 Markdown 对比内容写结论。\n\n"
+    "【硬性约束】\n1. 只能复用对比条目中已经出现的事实，禁止引入新事实、新指标、新评价。\n"
+    "2. 每一句结论都必须带有对比条目中已出现的引用标签，引用格式保持原样。\n"
+    "3. 输出 2-3 句中文短句，不要输出标题、列表、解释或额外文字。"
+)
+COMPARE_CONCLUSION_USER_PROMPT_TEMPLATE = (
+    "【用户对比意图】{query}\n\n【对比内容开始】\n{table_answer}\n"
+    "【对比内容结束】\n\n请基于上述内容写简短结论。"
+)
+
+
 # 完成 画像查询表 处理。
 def _profile_lookup(profiles: List[DocumentProfile]) -> Dict[Tuple[str, str], str]:
     # 展平成 (文档, 维度) 索引，输出阶段按用户点名顺序取值。
@@ -137,22 +149,12 @@ class CompareGeneratorAgent:
         is_local = state.get("is_local", False)
         query = state.get("query", "")
 
-        llm = Generator._get_client(is_local=is_local)
+        llm = Generator._get_client_for_node("compare_conclusion", is_local=is_local)
         messages = [
-            SystemMessage(
-                content=(
-                    "你是一位严谨的技术方案对比助手。只能依据用户提供的 Markdown 对比内容写结论。\n\n"
-                    "【硬性约束】\n"
-                    "1. 只能复用对比条目中已经出现的事实，禁止引入新事实、新指标、新评价。\n"
-                    "2. 每一句结论都必须带有对比条目中已出现的引用标签，引用格式保持原样。\n"
-                    "3. 输出 2-3 句中文短句，不要输出标题、列表、解释或额外文字。"
-                )
-            ),
+            SystemMessage(content=COMPARE_CONCLUSION_SYSTEM_PROMPT),
             HumanMessage(
-                content=(
-                    f"【用户对比意图】{query}\n\n"
-                    f"【对比内容开始】\n{table_answer}\n【对比内容结束】\n\n"
-                    "请基于上述内容写简短结论。"
+                content=COMPARE_CONCLUSION_USER_PROMPT_TEMPLATE.format(
+                    query=query, table_answer=table_answer
                 )
             ),
         ]

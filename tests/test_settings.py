@@ -51,6 +51,35 @@ def test_settings_reads_environment_overrides(monkeypatch):
     assert settings.qa_abstain_max_vector_distance == 0.75
 
 
+# 验证节点可以独立选择后端和模型。
+def test_settings_resolves_node_backend_and_model(monkeypatch):
+    monkeypatch.setenv("LLM_EVIDENCE_VERIFIER_BACKEND", "local")
+    monkeypatch.setenv("OLLAMA_EVIDENCE_VERIFIER_MODEL_NAME", "qwen-review:7b")
+
+    settings = get_settings()
+
+    is_local = settings.is_local_for_node("evidence_verifier", request_is_local=False)
+    assert is_local is True
+    assert (
+        settings.model_name_for_node("evidence_verifier", is_local=is_local)
+        == "qwen-review:7b"
+    )
+    assert settings.is_local_for_node("qa_generator", request_is_local=False) is False
+    assert (
+        settings.model_name_for_node("qa_generator", is_local=False)
+        == settings.llm_model_name
+    )
+
+
+# 验证非法节点后端不会被静默解释为云端或本地。
+def test_settings_rejects_invalid_node_backend(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_BACKEND", "somewhere")
+    settings = get_settings()
+
+    with pytest.raises(ValueError, match="无效节点后端"):
+        settings.is_local_for_node("router", request_is_local=False)
+
+
 # 验证 cuda thresholds are exposed as bytes 场景。
 def test_cuda_thresholds_are_exposed_as_bytes(monkeypatch):
     monkeypatch.setenv("EMBEDDER_MIN_CUDA_FREE_MB", "123")

@@ -8,6 +8,29 @@ from cogdoc.observability.logger import log_event
 from typing import Literal
 
 
+ROUTER_SYSTEM_PROMPT = (
+    "你是一位任务路由专家，负责将用户提问分配至对应的处理子图。\n"
+    "知识库中存放了多种领域的文档，用户提问的范围可能很广。\n\n"
+    "【分配规则】\n"
+    "1. qa      — 默认选项。用户想了解某项知识、技能、准备方法、注意事项、技术细节，或就某一主题寻求信息，一律分配至 qa。\n"
+    "2. summary — 用户明确要求'总结'、'摘要'、'概括'某篇或某段文档的全文内容。\n"
+    "3. compare — 用户明确要求'对比'、'比较'两个或多个方案、论文、技术之间的异同。\n"
+    "4. unknown — 极窄兜底。仅当提问是纯闲聊（如'你好'、'今天天气怎么样'）、与本地知识库问答无关的闲谈，或完全无法理解的乱码输入时才使用。\n\n"
+    "【决策要点】\n"
+    "- 只要提问中含有实质性的信息诉求，无论措辞是'需要什么'、'如何准备'、'怎么学'、'是什么'，均选 qa。\n"
+    "- 若用户用'那总结一下呢'、'再对比一下'这类省略追问，结合近期对话判断 summary 或 compare。\n"
+    "- 不确定时，选 qa，让检索系统判断能否找到相关内容。\n"
+    "- reason 字段用一句话简要说明分配依据，不超过 30 字。\n\n"
+    "【输出格式】\n只输出 JSON 对象，不要 Markdown，不要解释。JSON 示例：\n"
+    '{"task_type":"qa","reason":"用户询问信息"}'
+)
+ROUTER_WITH_HISTORY_USER_PROMPT_TEMPLATE = (
+    "请结合近期对话分析以下用户提问的路由意图。\n\n"
+    "【近期对话】\n{history_text}\n\n【当前提问】\n{query}"
+)
+ROUTER_USER_PROMPT_TEMPLATE = "请分析以下用户提问的路由意图：\n{query}"
+
+
 FORCED_TASK_TYPES = ("qa", "summary", "compare")
 FORCED_TASK_TYPE_SET = frozenset(FORCED_TASK_TYPES)
 
@@ -87,41 +110,21 @@ class RouterAgent:
             )
             return result
 
-        system_prompt = (
-            "你是一位任务路由专家，负责将用户提问分配至对应的处理子图。\n"
-            "知识库中存放了多种领域的文档，用户提问的范围可能很广。\n\n"
-            "【分配规则】\n"
-            "1. qa      — 默认选项。用户想了解某项知识、技能、准备方法、注意事项、技术细节，或就某一主题寻求信息，一律分配至 qa。\n"
-            "2. summary — 用户明确要求'总结'、'摘要'、'概括'某篇或某段文档的全文内容。\n"
-            "3. compare — 用户明确要求'对比'、'比较'两个或多个方案、论文、技术之间的异同。\n"
-            "4. unknown — 极窄兜底。仅当提问是纯闲聊（如'你好'、'今天天气怎么样'）、与本地知识库问答无关的闲谈，或完全无法理解的乱码输入时才使用。\n\n"
-            "【决策要点】\n"
-            "- 只要提问中含有实质性的信息诉求，无论措辞是'需要什么'、'如何准备'、'怎么学'、'是什么'，均选 qa。\n"
-            "- 若用户用'那总结一下呢'、'再对比一下'这类省略追问，结合近期对话判断 summary 或 compare。\n"
-            "- 不确定时，选 qa，让检索系统判断能否找到相关内容。\n"
-            "- reason 字段用一句话简要说明分配依据，不超过 30 字。\n\n"
-            "【输出格式】\n"
-            "只输出 JSON 对象，不要 Markdown，不要解释。JSON 示例：\n"
-            '{"task_type":"qa","reason":"用户询问信息"}'
-        )
-
         history_text = format_recent_chat_history(state.get("chat_history"))
         if history_text:
-            user_content = (
-                "请结合近期对话分析以下用户提问的路由意图。\n\n"
-                f"【近期对话】\n{history_text}\n\n"
-                f"【当前提问】\n{query}"
+            user_content = ROUTER_WITH_HISTORY_USER_PROMPT_TEMPLATE.format(
+                history_text=history_text, query=query
             )
         else:
-            user_content = f"请分析以下用户提问的路由意图：\n{query}"
+            user_content = ROUTER_USER_PROMPT_TEMPLATE.format(query=query)
 
         try:
-            llm = Generator._get_client(is_local=is_local)
+            llm = Generator._get_client_for_node("router", is_local=is_local)
             decision = invoke_structured(
                 llm,
                 RouteDecision,
                 [
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
                     {"role": "user", "content": user_content},
                 ],
             )

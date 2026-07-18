@@ -15,6 +15,34 @@ from cogdoc.graph.state import (
 )
 
 
+COMPARE_PROFILE_SYSTEM_PROMPT = (
+    "你是一位严谨的技术方案对比助手。你的任务是：仅依据给定的 <Document> 标签文本，为当前文档的指定对比维度写一段中文短描述。\n\n"
+    "【硬性约束】\n1. 只能描述当前文档在当前维度下的信息，禁止跨文档综合或下结论。\n"
+    "2. 只能使用 <Document> 标签内的信息，禁止引入标签外知识、常识或推测。\n"
+    "3. 不要输出引用标签、页码、文件名或 <Document> 标签，程序会在生成后自动绑定引用。\n"
+    "4. 不要输出维度标题、列表编号、规则解释或额外说明。\n\n【无依据时】\n"
+    "- 只有当所有给定片段都没有任何可归入该维度的信息时，才输出：文档中未明确说明。\n"
+    "- 若片段中有目标、流程、规则、指标、对象、收益、限制或适用条件，必须据实归纳。\n\n"
+    "【输出】只输出 1-2 句中文短描述，尽量不超过 120 个中文字符；或输出“文档中未明确说明”。"
+)
+
+COMPARE_PROFILE_RETRY_SYSTEM_PROMPT = (
+    "你是一位严谨的中文资料整理助手。下面片段已经由程序筛选为与指定对比维度相关。"
+    "请从片段中提炼事实，不要因为文档类型不是论文而回答“文档中未明确说明”。\n\n"
+    "【要求】只能依据 <Document> 标签内文字；能找到相关事实就写 1-2 句；不要输出标题、引用、页码或解释。"
+)
+COMPARE_PROFILE_USER_PROMPT_TEMPLATE = (
+    "【目标文档】{source}\n【对比维度】{title}\n【维度聚焦】{instruction}\n"
+    "【用户对比意图】{query}\n\n【参考资料开始】\n{context}\n【参考资料结束】\n\n"
+    "请只描述该文档在该维度下的信息。"
+)
+COMPARE_PROFILE_RETRY_USER_PROMPT_TEMPLATE = (
+    "【目标文档】{source}\n【对比维度】{title}\n【维度说明】{instruction}\n"
+    "【用户意图】{query}\n\n【参考资料开始】\n{context}\n【参考资料结束】\n\n"
+    "请重新提炼该维度描述。"
+)
+
+
 COMPARE_CELL_CONTEXT_CHUNKS = 4
 # 本地模式缩小维度和上下文，避免 Ollama 多轮生成时触发内存不足。
 LOCAL_COMPARE_CELL_CONTEXT_CHUNKS = 2
@@ -89,30 +117,14 @@ def _dimension_as_section_plan(dimension: CompareDimensionPlan) -> SummarySectio
 def _compare_messages(source: str, plan: SummarySectionPlan, query: str, context: str):
     # 首轮提示禁止模型自造引用，引用由共享 helper 统一绑定。
     return [
-        SystemMessage(
-            content=(
-                "你是一位严谨的技术方案对比助手。你的任务是：仅依据给定的 <Document> 标签文本，"
-                "为当前文档的指定对比维度写一段中文短描述。\n\n"
-                "【硬性约束】\n"
-                "1. 只能描述当前文档在当前维度下的信息，禁止跨文档综合或下结论。\n"
-                "2. 只能使用 <Document> 标签内的信息，禁止引入标签外知识、常识或推测。\n"
-                "3. 不要输出引用标签、页码、文件名或 <Document> 标签，程序会在生成后自动绑定引用。\n"
-                "4. 不要输出维度标题、列表编号、规则解释或额外说明。\n\n"
-                "【无依据时】\n"
-                "- 只有当所有给定片段都没有任何可归入该维度的信息时，才输出：文档中未明确说明。\n"
-                "- 若片段中有目标、流程、规则、指标、对象、收益、限制或适用条件，必须据实归纳。\n\n"
-                "【输出】只输出 1-2 句中文短描述，尽量不超过 120 个中文字符；"
-                "或输出“文档中未明确说明”。"
-            )
-        ),
+        SystemMessage(content=COMPARE_PROFILE_SYSTEM_PROMPT),
         HumanMessage(
-            content=(
-                f"【目标文档】{source}\n"
-                f"【对比维度】{plan['title']}\n"
-                f"【维度聚焦】{plan['instruction']}\n"
-                f"【用户对比意图】{query}\n\n"
-                f"【参考资料开始】\n{context}\n【参考资料结束】\n\n"
-                "请只描述该文档在该维度下的信息。"
+            content=COMPARE_PROFILE_USER_PROMPT_TEMPLATE.format(
+                source=source,
+                title=plan["title"],
+                instruction=plan["instruction"],
+                query=query,
+                context=context,
             )
         ),
     ]
@@ -124,22 +136,14 @@ def _compare_retry_messages(
 ):
     # 本地模型误判无依据时，用更直接的事实提炼提示重试一次。
     return [
-        SystemMessage(
-            content=(
-                "你是一位严谨的中文资料整理助手。下面片段已经由程序筛选为与指定对比维度相关。"
-                "请从片段中提炼事实，不要因为文档类型不是论文而回答“文档中未明确说明”。\n\n"
-                "【要求】只能依据 <Document> 标签内文字；能找到相关事实就写 1-2 句；"
-                "不要输出标题、引用、页码或解释。"
-            )
-        ),
+        SystemMessage(content=COMPARE_PROFILE_RETRY_SYSTEM_PROMPT),
         HumanMessage(
-            content=(
-                f"【目标文档】{source}\n"
-                f"【对比维度】{plan['title']}\n"
-                f"【维度说明】{plan['instruction']}\n"
-                f"【用户意图】{query}\n\n"
-                f"【参考资料开始】\n{context}\n【参考资料结束】\n\n"
-                "请重新提炼该维度描述。"
+            content=COMPARE_PROFILE_RETRY_USER_PROMPT_TEMPLATE.format(
+                source=source,
+                title=plan["title"],
+                instruction=plan["instruction"],
+                query=query,
+                context=context,
             )
         ),
     ]
@@ -164,7 +168,7 @@ class DocumentProfileAgent:
         if len(docs_by_source) < 2 or not dimensions:
             return {"document_profiles": [], "compare_dimensions": dimensions}
 
-        llm = Generator._get_client(is_local=is_local)
+        llm = Generator._get_client_for_node("compare_profile", is_local=is_local)
 
         # 按 source-major / dimension-minor 拍平任务，依赖保序返回回填矩阵。
         tasks: List[Tuple[str, CompareDimensionPlan, List[RetrievedDoc], List]] = []

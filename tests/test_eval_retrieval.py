@@ -63,9 +63,7 @@ def test_evaluate_query_emits_no_answer_false_positive_metrics():
         "no_answer_false_positive@1": 1.0,
         "no_answer_false_positive@5": 1.0,
     }
-    assert evaluate_query([], [], k_values=[5]) == {
-        "no_answer_false_positive@5": 0.0
-    }
+    assert evaluate_query([], [], k_values=[5]) == {"no_answer_false_positive@5": 0.0}
 
 
 # 验证聚合逻辑对每个指标取均值。
@@ -145,9 +143,7 @@ def test_retrieval_baseline_coverage_requires_layer_quotas():
     coverage = audit_coverage(items, coverage_minimums("baseline"))
 
     assert coverage["total_count"] == 99
-    assert coverage["insufficient_layers"] == {
-        "hard": {"actual": 19, "required": 20}
-    }
+    assert coverage["insufficient_layers"] == {"hard": {"actual": 19, "required": 20}}
     assert coverage["is_coverage_complete"] is False
 
 

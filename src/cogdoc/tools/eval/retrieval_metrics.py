@@ -60,9 +60,7 @@ def evaluate_query(
 ) -> Dict[str, float]:
     if not expected_sources:
         return {
-            f"no_answer_false_positive@{k}": (
-                1.0 if retrieved_sources[:k] else 0.0
-            )
+            f"no_answer_false_positive@{k}": (1.0 if retrieved_sources[:k] else 0.0)
             for k in k_values
         }
 

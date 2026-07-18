@@ -67,9 +67,7 @@ def assess_retrieval_support(
         supported = knowledge_score >= settings.qa_abstain_min_knowledge_score
         return RetrievalSupport(
             supported,
-            _threshold_ratio(
-                knowledge_score, settings.qa_abstain_min_knowledge_score
-            ),
+            _threshold_ratio(knowledge_score, settings.qa_abstain_min_knowledge_score),
             "supported" if supported else "below_threshold",
             {"knowledge_score": knowledge_score},
         )
@@ -88,12 +86,10 @@ def assess_retrieval_support(
         return RetrievalSupport(True, 1.0, "signals_unavailable", {})
 
     semantic_supported = (
-        distance is not None
-        and distance <= settings.qa_abstain_max_vector_distance
+        distance is not None and distance <= settings.qa_abstain_max_vector_distance
     )
     lexical_supported = (
-        bm25_score is not None
-        and bm25_score >= settings.qa_abstain_min_bm25_score
+        bm25_score is not None and bm25_score >= settings.qa_abstain_min_bm25_score
     )
     supported = semantic_supported or lexical_supported
     score = max(

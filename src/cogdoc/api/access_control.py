@@ -132,7 +132,9 @@ class AccessControlMiddleware:
         # 高频只读端点过鉴权但不过限流，避免 Streamlit rerun/轮询误杀正常使用。
         if not _is_rate_limit_exempt(request):
             if not self._limiter.allow(identity):
-                response = _reject(ErrorCode.REQUEST_THROTTLED, "请求过于频繁，请稍后重试")
+                response = _reject(
+                    ErrorCode.REQUEST_THROTTLED, "请求过于频繁，请稍后重试"
+                )
                 await response(scope, receive, send)
                 return
 
