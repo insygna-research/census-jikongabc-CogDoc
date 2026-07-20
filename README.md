@@ -164,6 +164,8 @@ If `COGDOC_API_KEYS` is configured, `/v1` requests are authenticated and rate-li
 
 Full UI history remains separate from Agent memory. The default budgets are 12 short-term messages, 6,000 short-term characters, a 4,000-character mid-term summary, 64 stored long-term facts, and 8 long-term facts injected per request. Configure them with the `COGDOC_MEMORY_*` variables in `.env.example`.
 
+Memory recall is query-aware. CogDoc runs short-term recency, mixed-language lexical recall, long-term importance/recency, and optional BGE-M3 semantic recall as independent channels; weighted RRF merges their ranks before per-layer context packing. A configurable recent-message prefix is pinned for continuity. Short-term semantic recall is disabled by default because recency and lexical channels already cover the small working set, but it can be enabled independently. If embedding fails, recall degrades to the remaining channels without failing the chat request. All channel weights and limits are configurable through `COGDOC_MEMORY_*` variables.
+
 ## Tech Stack
 
 - **Deterministic core** — a custom [Rust](https://www.rust-lang.org/) extension ([PyO3](https://pyo3.rs/) + [maturin](https://www.maturin.rs/)) carries `jieba-rs` CN/EN tokenization, BM25, RRF fusion, SHA-256 manifest, and citation validation — all native, independently unit-tested, stable across agent/prompt churn.

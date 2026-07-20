@@ -5,6 +5,7 @@ from cogdoc.api.app import create_app
 from cogdoc.api.persistence import SqliteSessionStore
 from cogdoc.api.routes.chat import _event_to_frame
 from cogdoc.api.session_store import SessionStore
+from cogdoc.memory.manager import MemoryPolicy
 from cogdoc.service.chat_service import ChatEvent, ChatResult, ChatServiceError
 
 
@@ -156,6 +157,46 @@ async def test_chat_endpoint_reuses_session_history(monkeypatch):
     assert second.status_code == 200
     assert history_lengths == [0, 2]
     assert second.json()["answer"] == "history=2"
+
+
+# 验证聊天入口把当前问题传给记忆召回器。
+@pytest.mark.anyio
+async def test_chat_endpoint_uses_query_aware_memory_retrieval(monkeypatch):
+    import cogdoc.api.app as app_module
+
+    monkeypatch.setattr(app_module, "configure_logging", lambda: None)
+    captured_history = []
+
+    # 捕获送入运行器的记忆上下文。
+    def fake_runner(doc_id, query, is_local, chat_history, forced_task):
+        captured_history.extend(chat_history)
+        return _result("完成", "trace-memory")
+
+    policy = MemoryPolicy(
+        context_long_term_limit=1,
+        memory_semantic_enabled=False,
+        memory_retrieval_mid_limit=0,
+    )
+    store = SessionStore(memory_policy=policy)
+    store.record(
+        "kb", "source", [], [{"role": "user", "content": "请记住：默认使用中文"}]
+    )
+    store.record(
+        "kb",
+        "source",
+        [],
+        [{"role": "user", "content": "我偏好 PostgreSQL 数据库"}],
+    )
+    app = create_app(chat_runner=fake_runner, session_store=store)
+
+    response = await _post_chat(
+        app,
+        {"query": "PostgreSQL 怎么配置", "doc_id": "kb", "session_id": "target"},
+    )
+
+    assert response.status_code == 200
+    assert "PostgreSQL" in captured_history[0]["content"]
+    assert "默认使用中文" not in captured_history[0]["content"]
 
 
 # 验证 session history endpoint returns stored turns 场景。

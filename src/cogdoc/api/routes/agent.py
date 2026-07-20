@@ -97,7 +97,7 @@ async def _task_endpoint(
 
     runner = getattr(request.app.state, "chat_runner", run_chat_sync)
     session_store = request.app.state.session_store
-    chat_history = session_store.get_history(body.doc_id, body.session_id)
+    chat_history = session_store.get_history(body.doc_id, body.session_id, body.query)
     try:
         result = await run_sync(
             request.app.state.offload_executor,

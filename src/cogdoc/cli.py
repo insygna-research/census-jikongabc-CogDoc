@@ -1604,7 +1604,7 @@ class Console:
             self.active_session_id = uuid4().hex
             print(f"🆕 （已自动开启新对话 {self.active_session_id[:8]}）")
         kb, sid = self.active_kb, self.active_session_id
-        chat_history = self.sessions.get_history(kb, sid)
+        chat_history = self.sessions.get_history(kb, sid, query)
         final_result = None
         try:
             for event in run_chat(

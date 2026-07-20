@@ -5,7 +5,8 @@ import time
 from datetime import datetime, timezone
 from threading import RLock
 from typing import Any
-from cogdoc.memory.manager import MemoryPolicy, build_memory_context, update_memory
+from cogdoc.memory.manager import MemoryPolicy, update_memory
+from cogdoc.memory.retriever import EmbeddingFunction, MemoryRetriever
 
 
 # 建立连接结果。
@@ -47,10 +48,14 @@ class SqliteSessionStore:
         max_sessions: int = 1024,
         ttl_seconds: int = 604800,
         memory_policy: MemoryPolicy | None = None,
+        memory_embedding_fn: EmbeddingFunction | None = None,
     ):
         self.max_sessions = max_sessions
         self.ttl_seconds = ttl_seconds
         self.memory_policy = memory_policy or MemoryPolicy()
+        self.memory_retriever = MemoryRetriever(
+            self.memory_policy, embedding_fn=memory_embedding_fn
+        )
         self._lock = RLock()
         self._conn = _connect(db_path)
         self._conn.execute(
@@ -135,7 +140,9 @@ class SqliteSessionStore:
             _execute_write_with_retry(_do)
 
     # 构造分层历史上下文。
-    def get_history(self, doc_id: str, session_id: str | None) -> list[dict[str, Any]]:
+    def get_history(
+        self, doc_id: str, session_id: str | None, query: str = ""
+    ) -> list[dict[str, Any]]:
         if not session_id:
             return []
         with self._lock:
@@ -145,17 +152,15 @@ class SqliteSessionStore:
                 "WHERE doc_id=? AND session_id=?",
                 (doc_id, session_id),
             ).fetchone()
-            facts = self._read_long_memories_locked(
-                doc_id, self.memory_policy.context_long_term_limit
-            )
+            facts = self._read_long_memories_locked(doc_id)
             if row is None:
-                return build_memory_context([], {}, facts, self.memory_policy)
+                return self.memory_retriever.retrieve(query, [], {}, facts)
             self._touch_session_locked(doc_id, session_id)
-            return build_memory_context(
+            return self.memory_retriever.retrieve(
+                query,
                 json.loads(row[0]),
                 json.loads(row[1]) if row[1] else {},
                 facts,
-                self.memory_policy,
             )
 
     # 刷新会话活跃时间。

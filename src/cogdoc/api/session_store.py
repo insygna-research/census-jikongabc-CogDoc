@@ -4,10 +4,10 @@ from threading import RLock
 from typing import Any
 from cogdoc.memory.manager import (
     MemoryPolicy,
-    build_memory_context,
     rank_long_term_facts,
     update_memory,
 )
+from cogdoc.memory.retriever import EmbeddingFunction, MemoryRetriever
 
 
 # 定义内存会话记录。
@@ -27,10 +27,14 @@ class SessionStore:
         max_sessions: int = 1024,
         ttl_seconds: int = 604800,
         memory_policy: MemoryPolicy | None = None,
+        memory_embedding_fn: EmbeddingFunction | None = None,
     ):
         self.max_sessions = max_sessions
         self.ttl_seconds = ttl_seconds
         self.memory_policy = memory_policy or MemoryPolicy()
+        self.memory_retriever = MemoryRetriever(
+            self.memory_policy, embedding_fn=memory_embedding_fn
+        )
         self._lock = RLock()
         self._entries: dict[tuple[str, str], SessionEntry] = {}
         self._long_memory: dict[str, list[dict[str, Any]]] = {}
@@ -62,22 +66,24 @@ class SessionStore:
             self._evict_overflow_locked()
 
     # 构造分层历史上下文。
-    def get_history(self, doc_id: str, session_id: str | None) -> list[dict[str, Any]]:
+    def get_history(
+        self, doc_id: str, session_id: str | None, query: str = ""
+    ) -> list[dict[str, Any]]:
         if not session_id:
             return []
         with self._lock:
             self._purge_expired_locked()
             entry = self._entries.get((doc_id, session_id))
             if entry is None:
-                return build_memory_context(
-                    [], {}, self._long_memory.get(doc_id, []), self.memory_policy
+                return self.memory_retriever.retrieve(
+                    query, [], {}, self._long_memory.get(doc_id, [])
                 )
             entry.updated_at = time.monotonic()
-            return build_memory_context(
+            return self.memory_retriever.retrieve(
+                query,
                 entry.memory,
                 entry.mid_memory,
                 self._long_memory.get(doc_id, []),
-                self.memory_policy,
             )
 
     # 返回三层记忆快照。

@@ -50,6 +50,7 @@ async def chat(request_body: ChatRequest, request: Request, response: Response):
     chat_history = session_store.get_history(
         request_body.doc_id,
         request_body.session_id,
+        request_body.query,
     )
 
     try:
@@ -239,7 +240,7 @@ async def chat_stream(request_body: ChatRequest, request: Request):
     session_store = request.app.state.session_store
     doc_id = request_body.doc_id
     session_id = request_body.session_id
-    chat_history = session_store.get_history(doc_id, session_id)
+    chat_history = session_store.get_history(doc_id, session_id, request_body.query)
 
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()

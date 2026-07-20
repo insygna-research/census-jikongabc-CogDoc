@@ -29,6 +29,18 @@ def test_settings_defaults_match_current_runtime_contract():
     assert settings.qa_evidence_verify_max_chars_per_doc == 1600
     assert settings.qa_evidence_verify_borderline_min_score == 0.75
     assert settings.hybrid_rrf_k == 60
+    assert settings.memory_retrieval_enabled is True
+    assert settings.memory_semantic_enabled is True
+    assert settings.memory_retrieval_short_limit == 8
+    assert settings.memory_retrieval_mid_limit == 4
+    assert settings.memory_retrieval_recent_pin == 4
+    assert settings.memory_semantic_include_short is False
+    assert settings.memory_rrf_k == 60.0
+    assert settings.memory_recency_weight == 1.0
+    assert settings.memory_lexical_weight == 1.4
+    assert settings.memory_semantic_weight == 1.6
+    assert settings.memory_importance_weight == 0.8
+    assert settings.memory_mid_priority_weight == 0.8
     assert settings.cogdoc_log_level == "INFO"
     assert settings.cogdoc_log_file == "logs/cogdoc.jsonl"
     assert settings.cogdoc_log_to_console is False
@@ -42,6 +54,10 @@ def test_settings_reads_environment_overrides(monkeypatch):
     monkeypatch.setenv("LLM_MODEL_NAME", "custom-model")
     monkeypatch.setenv("QA_RETRIEVAL_TOP_K", "11")
     monkeypatch.setenv("QA_ABSTAIN_MAX_VECTOR_DISTANCE", "0.75")
+    monkeypatch.setenv("COGDOC_MEMORY_SEMANTIC_ENABLED", "false")
+    monkeypatch.setenv("COGDOC_MEMORY_RETRIEVAL_SHORT_LIMIT", "6")
+    monkeypatch.setenv("COGDOC_MEMORY_RETRIEVAL_RECENT_PIN", "2")
+    monkeypatch.setenv("COGDOC_MEMORY_SEMANTIC_WEIGHT", "2.5")
 
     settings = get_settings()
 
@@ -49,6 +65,10 @@ def test_settings_reads_environment_overrides(monkeypatch):
     assert settings.llm_model_name == "custom-model"
     assert settings.qa_retrieval_top_k == 11
     assert settings.qa_abstain_max_vector_distance == 0.75
+    assert settings.memory_semantic_enabled is False
+    assert settings.memory_retrieval_short_limit == 6
+    assert settings.memory_retrieval_recent_pin == 2
+    assert settings.memory_semantic_weight == 2.5
 
 
 # 验证节点可以独立选择后端和模型。

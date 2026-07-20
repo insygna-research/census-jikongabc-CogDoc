@@ -75,6 +75,54 @@ class Settings(BaseSettings):
     memory_context_long_limit: int = Field(
         default=8, ge=0, le=100, validation_alias="COGDOC_MEMORY_CONTEXT_LONG_LIMIT"
     )
+    memory_retrieval_enabled: bool = Field(
+        default=True, validation_alias="COGDOC_MEMORY_RETRIEVAL_ENABLED"
+    )
+    memory_semantic_enabled: bool = Field(
+        default=True, validation_alias="COGDOC_MEMORY_SEMANTIC_ENABLED"
+    )
+    memory_retrieval_short_limit: int = Field(
+        default=8,
+        ge=0,
+        le=100,
+        validation_alias="COGDOC_MEMORY_RETRIEVAL_SHORT_LIMIT",
+    )
+    memory_retrieval_mid_limit: int = Field(
+        default=4,
+        ge=0,
+        le=100,
+        validation_alias="COGDOC_MEMORY_RETRIEVAL_MID_LIMIT",
+    )
+    memory_retrieval_recent_pin: int = Field(
+        default=4,
+        ge=0,
+        le=100,
+        validation_alias="COGDOC_MEMORY_RETRIEVAL_RECENT_PIN",
+    )
+    memory_semantic_include_short: bool = Field(
+        default=False,
+        validation_alias="COGDOC_MEMORY_SEMANTIC_INCLUDE_SHORT",
+    )
+    memory_rrf_k: float = Field(
+        default=60.0, gt=0.0, validation_alias="COGDOC_MEMORY_RRF_K"
+    )
+    memory_recency_weight: float = Field(
+        default=1.0, ge=0.0, validation_alias="COGDOC_MEMORY_RECENCY_WEIGHT"
+    )
+    memory_lexical_weight: float = Field(
+        default=1.4, ge=0.0, validation_alias="COGDOC_MEMORY_LEXICAL_WEIGHT"
+    )
+    memory_semantic_weight: float = Field(
+        default=1.6, ge=0.0, validation_alias="COGDOC_MEMORY_SEMANTIC_WEIGHT"
+    )
+    memory_importance_weight: float = Field(
+        default=0.8, ge=0.0, validation_alias="COGDOC_MEMORY_IMPORTANCE_WEIGHT"
+    )
+    memory_mid_priority_weight: float = Field(
+        default=0.8,
+        ge=0.0,
+        validation_alias="COGDOC_MEMORY_MID_PRIORITY_WEIGHT",
+    )
 
     # 云端模型兼容后端。
     llm_model_name: str = Field(
@@ -291,6 +339,18 @@ class Settings(BaseSettings):
             mid_term_char_limit=self.memory_mid_char_limit,
             long_term_fact_limit=self.memory_long_fact_limit,
             context_long_term_limit=self.memory_context_long_limit,
+            memory_retrieval_enabled=self.memory_retrieval_enabled,
+            memory_semantic_enabled=self.memory_semantic_enabled,
+            memory_retrieval_short_limit=self.memory_retrieval_short_limit,
+            memory_retrieval_mid_limit=self.memory_retrieval_mid_limit,
+            memory_retrieval_recent_pin=self.memory_retrieval_recent_pin,
+            memory_semantic_include_short=self.memory_semantic_include_short,
+            memory_rrf_k=self.memory_rrf_k,
+            memory_recency_weight=self.memory_recency_weight,
+            memory_lexical_weight=self.memory_lexical_weight,
+            memory_semantic_weight=self.memory_semantic_weight,
+            memory_importance_weight=self.memory_importance_weight,
+            memory_mid_priority_weight=self.memory_mid_priority_weight,
         )
 
     # 处理向量持久化目录。

@@ -15,6 +15,18 @@ class MemoryPolicy:
     long_term_fact_limit: int = 64
     context_long_term_limit: int = 8
     message_preview_chars: int = 300
+    memory_retrieval_enabled: bool = True
+    memory_semantic_enabled: bool = True
+    memory_retrieval_short_limit: int = 8
+    memory_retrieval_mid_limit: int = 4
+    memory_retrieval_recent_pin: int = 4
+    memory_semantic_include_short: bool = False
+    memory_rrf_k: float = 60.0
+    memory_recency_weight: float = 1.0
+    memory_lexical_weight: float = 1.4
+    memory_semantic_weight: float = 1.6
+    memory_importance_weight: float = 0.8
+    memory_mid_priority_weight: float = 0.8
 
 
 # 压缩单段记忆文本。
@@ -255,22 +267,33 @@ def _long_term_message(facts: Sequence[Mapping[str, Any]]) -> dict[str, Any] | N
 
 
 # 合成分层记忆上下文。
+def assemble_memory_context(
+    short_term: Sequence[Mapping[str, Any]],
+    mid_term: Mapping[str, Any] | None,
+    long_term_facts: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    context: list[dict[str, Any]] = []
+    long_message = _long_term_message(long_term_facts)
+    mid_message = _mid_term_message(mid_term)
+    if long_message:
+        context.append(long_message)
+    if mid_message:
+        context.append(mid_message)
+    context.extend(dict(message) for message in short_term)
+    return context
+
+
+# 选择静态记忆并组装上下文。
 def build_memory_context(
     short_term: Sequence[Mapping[str, Any]],
     mid_term: Mapping[str, Any] | None,
     long_term_facts: Sequence[Mapping[str, Any]],
     policy: MemoryPolicy,
 ) -> list[dict[str, Any]]:
-    memory_messages: list[dict[str, Any]] = []
     selected_facts = rank_long_term_facts(
         long_term_facts, policy.context_long_term_limit
     )
-    long_message = _long_term_message(selected_facts)
-    mid_message = _mid_term_message(mid_term)
-    if long_message:
-        memory_messages.append(long_message)
-    if mid_message:
-        memory_messages.append(mid_message)
-    short_limit = max(0, policy.short_term_message_limit - len(memory_messages))
+    memory_count = int(bool(selected_facts)) + int(bool(_mid_term_message(mid_term)))
+    short_limit = max(0, policy.short_term_message_limit - memory_count)
     recent_messages = short_term[-short_limit:] if short_limit else []
-    return [*memory_messages, *(dict(message) for message in recent_messages)]
+    return assemble_memory_context(recent_messages, mid_term, selected_facts)

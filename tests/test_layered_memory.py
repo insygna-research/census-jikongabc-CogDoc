@@ -164,3 +164,27 @@ def test_sqlite_long_term_memory_uses_order_index(tmp_path):
 
     assert [fact["content"] for fact in facts] == ["高优先级事实", "新方案"]
     assert "idx_long_memories_order" in {row[1] for row in indexes}
+
+
+# 验证 SQLite 使用当前问题执行长期记忆召回。
+def test_sqlite_query_aware_long_term_retrieval(tmp_path):
+    policy = MemoryPolicy(
+        context_long_term_limit=1,
+        memory_semantic_enabled=False,
+        memory_retrieval_mid_limit=0,
+    )
+    store = SqliteSessionStore(str(tmp_path / "state.db"), memory_policy=policy)
+    store.record(
+        "kb", "source", [], [{"role": "user", "content": "请记住：默认使用中文"}]
+    )
+    store.record(
+        "kb",
+        "source",
+        [],
+        [{"role": "user", "content": "我偏好 PostgreSQL 数据库"}],
+    )
+
+    context = store.get_history("kb", "target", "PostgreSQL 怎么配置")
+
+    assert "PostgreSQL" in context[0]["content"]
+    assert "默认使用中文" not in context[0]["content"]
