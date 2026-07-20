@@ -20,7 +20,7 @@ A local RAG knowledge-base console for individuals and teams, built on **LangGra
 
 - **Content-addressed incremental cache** — a per-file SHA-256 manifest plus a versioned chunk-identity contract: unchanged files reuse the existing index, and only a changed PDF or chunking scheme triggers an incremental rebuild.
 
-- **Multiple knowledge bases · multiple conversations · persistent memory** — each KB runs many parallel conversations; the selected KB and session are persisted in the URL, so refresh returns to the same conversation. History is persisted to SQLite (long-term memory) and survives restart for replay. Every question carries a recent dialogue window (short-term memory, last 12 messages by default) for multi-turn coreference, and only citation-validated answers enter memory so wrong answers never poison later turns.
+- **Multiple knowledge bases · multiple conversations · layered memory** — full display history is persisted for replay; validated recent turns form bounded short-term memory, evicted turns become session-level summaries and decisions, and only explicit stable facts enter cross-session long-term memory. Wrong answers never enter Agent memory.
 
 - **Web, CLI, and Debug entry points** — a slash-command CLI console, a Streamlit web UI over FastAPI, and a focused `make debug` console for trace inspection.
 
@@ -137,6 +137,8 @@ The Streamlit app is a thin client over the FastAPI service — you can hit it d
 | `POST /v1/summary`, `POST /v1/compare` | Run explicit Summary / Compare tasks without router ambiguity |
 | `POST /v1/retrieve` | Return structured retrieval hits with chunk/source/page previews |
 | `GET /v1/sessions`, `GET /v1/sessions/{id}/history` | List / replay conversation history |
+| `GET /v1/sessions/{id}/memory` | Inspect short-, mid-, and long-term memory |
+| `DELETE /v1/memory/long-term?doc_id=...` | Forget long-term memory for one knowledge base |
 | `GET /v1/traces?doc_id=...&session_id=...` | List recent traces, optionally scoped to one KB/session |
 | `GET /v1/traces/{trace_id}` | Fetch an exported request trace |
 | `POST /v1/feedback` | Submit thumbs-up/down on a `trace_id` |
@@ -151,6 +153,16 @@ The Streamlit app is a thin client over the FastAPI service — you can hit it d
 | `GET /healthz`, `GET /readyz`, `GET /metrics` | Health, readiness, Prometheus metrics |
 
 If `COGDOC_API_KEYS` is configured, `/v1` requests are authenticated and rate-limited; with no keys set, `/v1` is open (the server logs a warning at startup).
+
+### Layered memory
+
+| Layer | Scope | Content | Storage and forgetting |
+| --- | --- | --- | --- |
+| Working / short-term | One graph run and the current session | Current goal, task status, tool state, and the latest citation-validated turns | Graph state plus a bounded SQLite session window; dual message/character budgets evict the oldest turns |
+| Mid-term | One session | Extractive summaries of evicted turns, explicit goals, and decisions | `sessions.mid_memory`; removed with the session |
+| Long-term | One knowledge base across sessions | Only explicit memories, stable preferences, policies, and project facts | Deduplicated `long_memories` rows with an importance/capacity limit; removable through the API |
+
+Full UI history remains separate from Agent memory. The default budgets are 12 short-term messages, 6,000 short-term characters, a 4,000-character mid-term summary, 64 stored long-term facts, and 8 long-term facts injected per request. Configure them with the `COGDOC_MEMORY_*` variables in `.env.example`.
 
 ## Tech Stack
 

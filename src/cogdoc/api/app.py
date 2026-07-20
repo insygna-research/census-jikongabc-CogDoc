@@ -264,10 +264,11 @@ def create_app(
 
 
 # 生产入口会话与入库任务落盘，进程重启不丢，默认创建仍便于测试隔离。
-_db_path = get_settings().state_db_path
+_settings = get_settings()
+_db_path = _settings.state_db_path
 _kb_registry = KnowledgeBaseRegistry()
 app = create_app(
-    session_store=SqliteSessionStore(_db_path),
+    session_store=SqliteSessionStore(_db_path, memory_policy=_settings.memory_policy),
     kb_registry=_kb_registry,
     index_jobs=IndexJobManager(
         job_store=SqliteJobStore(_db_path, reconcile_on_init=False),

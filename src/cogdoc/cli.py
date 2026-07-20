@@ -219,7 +219,9 @@ class Console:
     def __init__(self):
         settings = get_settings()
         self.registry = KnowledgeBaseRegistry()
-        self.sessions = SqliteSessionStore(settings.state_db_path)
+        self.sessions = SqliteSessionStore(
+            settings.state_db_path, memory_policy=settings.memory_policy
+        )
         self.knowledge_store = DerivedKnowledgeStore()
         self.knowledge_index = DerivedKnowledgeIndex(self.knowledge_store)
         self.feedback_store = FeedbackStore()

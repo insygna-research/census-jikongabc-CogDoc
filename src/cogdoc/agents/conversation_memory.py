@@ -12,6 +12,7 @@ CHAT_HISTORY_MESSAGE_LIMIT = 12
 ROLE_LABELS = {
     "user": "用户",
     "assistant": "助手",
+    "memory": "记忆",
 }
 
 

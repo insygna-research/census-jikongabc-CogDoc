@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timezone
 from threading import RLock
 from typing import Any
+from cogdoc.memory.manager import MemoryPolicy, build_memory_context, update_memory
 
 
 # 建立连接结果。
@@ -37,23 +38,44 @@ def _execute_write_with_retry(fn, attempts: int = 3) -> None:
             delay = min(delay * 2, 0.5)
 
 
-# SessionStore 的落盘版：接口与内存版一致，但 updated_at 用墙钟，重启后 TTL 仍有效。
+# 管理 SQLite 版分层记忆。
 class SqliteSessionStore:
-    # SessionStore 的落盘版：接口与内存版一致，但 updated_at 用墙钟，重启后 TTL 仍有效。
+    # 初始化 SQLite 版分层记忆。
     def __init__(
         self,
         db_path: str,
         max_sessions: int = 1024,
         ttl_seconds: int = 604800,
+        memory_policy: MemoryPolicy | None = None,
     ):
         self.max_sessions = max_sessions
         self.ttl_seconds = ttl_seconds
+        self.memory_policy = memory_policy or MemoryPolicy()
         self._lock = RLock()
         self._conn = _connect(db_path)
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS sessions ("
             "doc_id TEXT, session_id TEXT, memory TEXT, display TEXT, "
+            "mid_memory TEXT NOT NULL DEFAULT '{}', "
             "updated_at REAL, PRIMARY KEY (doc_id, session_id))"
+        )
+        columns = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        if "mid_memory" not in columns:
+            self._conn.execute(
+                "ALTER TABLE sessions ADD COLUMN mid_memory TEXT NOT NULL DEFAULT '{}'"
+            )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS long_memories ("
+            "doc_id TEXT, memory_id TEXT, type TEXT, content TEXT, "
+            "importance REAL, updated_at REAL, "
+            "PRIMARY KEY (doc_id, memory_id))"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_long_memories_order "
+            "ON long_memories(doc_id, importance DESC, updated_at DESC)"
         )
         self._conn.commit()
 
@@ -71,39 +93,99 @@ class SqliteSessionStore:
         with self._lock:
             self._purge_expired_locked()
             row = self._conn.execute(
-                "SELECT memory, display FROM sessions WHERE doc_id=? AND session_id=?",
+                "SELECT memory, display, mid_memory FROM sessions "
+                "WHERE doc_id=? AND session_id=?",
                 (doc_id, session_id),
             ).fetchone()
             memory = json.loads(row[0]) if row else []
             display = json.loads(row[1]) if row else []
-            memory.extend(memory_messages or [])
+            mid_memory = json.loads(row[2]) if row and row[2] else {}
+            memory, mid_memory, facts = update_memory(
+                memory,
+                mid_memory,
+                memory_messages or [],
+                display_messages or [],
+                self.memory_policy,
+            )
             display.extend(display_messages or [])
 
             # 执行内部回调。
             def _do():
                 self._conn.execute(
-                    "INSERT INTO sessions (doc_id, session_id, memory, display, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?) "
+                    "INSERT INTO sessions "
+                    "(doc_id, session_id, memory, display, mid_memory, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(doc_id, session_id) DO UPDATE SET "
                     "memory=excluded.memory, display=excluded.display, "
+                    "mid_memory=excluded.mid_memory, "
                     "updated_at=excluded.updated_at",
                     (
                         doc_id,
                         session_id,
                         json.dumps(memory, ensure_ascii=False),
                         json.dumps(display, ensure_ascii=False),
+                        json.dumps(mid_memory, ensure_ascii=False),
                         time.time(),
                     ),
                 )
+                self._upsert_long_memories_locked(doc_id, facts)
                 self._evict_overflow_locked()
                 self._conn.commit()
 
             _execute_write_with_retry(_do)
 
-    # 返回历史记录。
+    # 构造分层历史上下文。
     def get_history(self, doc_id: str, session_id: str | None) -> list[dict[str, Any]]:
-        # 图输入：只取门控后的记忆回合。
-        return self._read(doc_id, session_id, "memory")
+        if not session_id:
+            return []
+        with self._lock:
+            self._purge_expired_locked()
+            row = self._conn.execute(
+                "SELECT memory, mid_memory FROM sessions "
+                "WHERE doc_id=? AND session_id=?",
+                (doc_id, session_id),
+            ).fetchone()
+            facts = self._read_long_memories_locked(
+                doc_id, self.memory_policy.context_long_term_limit
+            )
+            if row is None:
+                return build_memory_context([], {}, facts, self.memory_policy)
+            self._touch_session_locked(doc_id, session_id)
+            return build_memory_context(
+                json.loads(row[0]),
+                json.loads(row[1]) if row[1] else {},
+                facts,
+                self.memory_policy,
+            )
+
+    # 刷新会话活跃时间。
+    def _touch_session_locked(self, doc_id: str, session_id: str) -> None:
+        try:
+            self._conn.execute(
+                "UPDATE sessions SET updated_at=? WHERE doc_id=? AND session_id=?",
+                (time.time(), doc_id, session_id),
+            )
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    # 返回三层记忆快照。
+    def get_memory_snapshot(
+        self, doc_id: str, session_id: str | None
+    ) -> dict[str, Any]:
+        if not session_id:
+            return {"short_term": [], "mid_term": {}, "long_term": []}
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT memory, mid_memory FROM sessions "
+                "WHERE doc_id=? AND session_id=?",
+                (doc_id, session_id),
+            ).fetchone()
+            return {
+                "short_term": json.loads(row[0]) if row else [],
+                "mid_term": json.loads(row[1]) if row and row[1] else {},
+                "long_term": self._read_long_memories_locked(doc_id),
+            }
 
     # 返回展示记录。
     def get_display(self, doc_id: str, session_id: str | None) -> list[dict[str, Any]]:
@@ -155,9 +237,80 @@ class SqliteSessionStore:
             # 执行内部回调。
             def _do():
                 self._conn.execute("DELETE FROM sessions WHERE doc_id=?", (doc_id,))
+                self._conn.execute(
+                    "DELETE FROM long_memories WHERE doc_id=?", (doc_id,)
+                )
                 self._conn.commit()
 
             _execute_write_with_retry(_do)
+
+    # 清除知识库长期记忆。
+    def clear_long_term(self, doc_id: str) -> None:
+        with self._lock:
+            # 执行长期记忆清理。
+            def _do():
+                self._conn.execute(
+                    "DELETE FROM long_memories WHERE doc_id=?", (doc_id,)
+                )
+                self._conn.commit()
+
+            _execute_write_with_retry(_do)
+
+    # 写入长期记忆并限制容量。
+    def _upsert_long_memories_locked(
+        self, doc_id: str, facts: list[dict[str, Any]]
+    ) -> None:
+        now = time.time()
+        for fact in facts:
+            self._conn.execute(
+                "INSERT INTO long_memories "
+                "(doc_id, memory_id, type, content, importance, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(doc_id, memory_id) DO UPDATE SET "
+                "content=excluded.content, importance=excluded.importance, "
+                "updated_at=excluded.updated_at",
+                (
+                    doc_id,
+                    fact["id"],
+                    fact["type"],
+                    fact["content"],
+                    fact["importance"],
+                    now,
+                ),
+            )
+        self._conn.execute(
+            "DELETE FROM long_memories WHERE rowid IN ("
+            "SELECT rowid FROM long_memories WHERE doc_id=? "
+            "ORDER BY importance DESC, updated_at DESC LIMIT -1 OFFSET ?)",
+            (doc_id, self.memory_policy.long_term_fact_limit),
+        )
+
+    # 读取知识库长期记忆。
+    def _read_long_memories_locked(
+        self, doc_id: str, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        query = (
+            "SELECT memory_id, type, content, importance, updated_at "
+            "FROM long_memories WHERE doc_id=? "
+            "ORDER BY importance DESC, updated_at DESC"
+        )
+        params: tuple[Any, ...] = (doc_id,)
+        if limit is not None:
+            if limit <= 0:
+                return []
+            query += " LIMIT ?"
+            params = (doc_id, limit)
+        rows = self._conn.execute(query, params).fetchall()
+        return [
+            {
+                "id": row[0],
+                "type": row[1],
+                "content": row[2],
+                "importance": row[3],
+                "updated_at": row[4],
+            }
+            for row in rows
+        ]
 
     # 列出 sessions。
     def list_sessions(self, doc_id: str) -> list[dict[str, Any]]:

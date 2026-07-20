@@ -10,6 +10,7 @@ from cogdoc.api.schemas import (
     ChatRequest,
     ChatResponse,
     ErrorResponse,
+    MemorySnapshotResponse,
     SessionHistoryResponse,
     SessionListResponse,
     build_error_response,
@@ -127,6 +128,28 @@ async def session_history(
     return SessionHistoryResponse(
         session_id=session_id, doc_id=kb_id, messages=messages
     )
+
+
+# 返回会话三层记忆快照。
+@router.get("/sessions/{session_id}/memory", response_model=MemorySnapshotResponse)
+async def session_memory(
+    session_id: str, request: Request, doc_id: str = Query(default="")
+):
+    kb_id = doc_id or get_settings().cogdoc_default_doc_id
+    snapshot = request.app.state.session_store.get_memory_snapshot(kb_id, session_id)
+    return MemorySnapshotResponse(
+        session_id=session_id,
+        doc_id=kb_id,
+        **snapshot,
+    )
+
+
+# 清除知识库长期记忆。
+@router.delete("/memory/long-term", status_code=204)
+async def delete_long_term_memory(request: Request, doc_id: str = Query(default="")):
+    kb_id = doc_id or get_settings().cogdoc_default_doc_id
+    request.app.state.session_store.clear_long_term(kb_id)
+    return Response(status_code=204)
 
 
 # 删除 session。

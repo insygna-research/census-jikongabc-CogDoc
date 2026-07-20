@@ -559,6 +559,16 @@ class SessionHistoryResponse(ApiModel):
     messages: list[dict[str, Any]] = Field(default_factory=list)
 
 
+# 三层记忆调试响应。
+class MemorySnapshotResponse(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    session_id: str
+    doc_id: str
+    short_term: list[dict[str, Any]] = Field(default_factory=list)
+    mid_term: dict[str, Any] = Field(default_factory=dict)
+    long_term: list[dict[str, Any]] = Field(default_factory=list)
+
+
 # 会话列表里的一条，标题取首条用户消息。
 class SessionSummary(ApiModel):
     session_id: str

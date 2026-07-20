@@ -2,6 +2,7 @@ import pytest
 import threading
 from httpx import ASGITransport, AsyncClient
 from cogdoc.api.app import create_app
+from cogdoc.api.persistence import SqliteSessionStore
 from cogdoc.api.routes.chat import _event_to_frame
 from cogdoc.api.session_store import SessionStore
 from cogdoc.service.chat_service import ChatEvent, ChatResult, ChatServiceError
@@ -373,6 +374,39 @@ def test_session_store_counts_assistant_answers():
     store.record("other", "s1", [], [{"role": "assistant", "content": "d"}])
 
     assert store.answer_count("kb") == 2
+
+
+# 验证记忆快照接口与长期记忆清理接口。
+@pytest.mark.anyio
+async def test_memory_snapshot_and_long_term_delete_endpoints(monkeypatch, tmp_path):
+    import cogdoc.api.app as app_module
+
+    monkeypatch.setattr(app_module, "configure_logging", lambda: None)
+    store = SqliteSessionStore(str(tmp_path / "state.db"))
+    store.record(
+        "kb",
+        "s1",
+        [],
+        [{"role": "user", "content": "请记住：默认使用中文"}],
+    )
+    app = create_app(session_store=store)
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            snapshot = await client.get(
+                "/v1/sessions/s1/memory", params={"doc_id": "kb"}
+            )
+            deleted = await client.delete(
+                "/v1/memory/long-term", params={"doc_id": "kb"}
+            )
+
+    assert snapshot.status_code == 200
+    assert snapshot.json()["long_term"][0]["content"] == "默认使用中文"
+    assert deleted.status_code == 204
+    assert store.get_memory_snapshot("kb", "s1")["long_term"] == []
 
 
 # 验证 session store purges expired history 场景。

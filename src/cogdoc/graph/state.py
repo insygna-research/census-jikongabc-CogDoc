@@ -161,6 +161,8 @@ class GraphState(TypedDict):
     compare_conclusion_warning: NotRequired[str]
 
     chat_history: NotRequired[Annotated[List[ChatMessage], merge_lists]]
+    # 单次图运行的易失性工作记忆；不落盘，任务结束后由会话分层记忆接管。
+    working_memory: NotRequired[Dict[str, Any]]
 
     route: NotRequired[str]
     iteration_count: NotRequired[int]

@@ -5,6 +5,7 @@ from cogdoc.agents.conversation_memory import (
     extract_final_answer,
     format_recent_chat_history,
 )
+from cogdoc.memory.manager import MemoryPolicy, build_memory_context
 
 
 # 验证 extract chat turn skips qa fallback answer 场景。
@@ -195,3 +196,24 @@ def test_format_recent_chat_history_uses_recent_messages_only():
     assert "msg-01" not in rendered
     assert "msg-02" in rendered
     assert "msg-13" in rendered
+
+
+# 验证已组装的分层记忆不会被再次裁剪。
+def test_format_recent_chat_history_serializes_built_context():
+    history = build_memory_context(
+        [{"role": "user", "content": f"msg-{idx:02d}"} for idx in range(14)],
+        {"decisions": ["历史决策"]},
+        [{"content": "长期偏好", "importance": 1.0}],
+        MemoryPolicy(short_term_message_limit=12),
+    )
+
+    rendered = format_recent_chat_history(history, limit=12)
+
+    assert "记忆: 【长期记忆】" in rendered
+    assert "记忆: 【中期记忆】" in rendered
+    assert "长期偏好" in rendered
+    assert "历史决策" in rendered
+    assert "长期记忆: " not in rendered
+    assert "中期记忆: " not in rendered
+    assert "msg-00" not in rendered
+    assert "msg-04" in rendered

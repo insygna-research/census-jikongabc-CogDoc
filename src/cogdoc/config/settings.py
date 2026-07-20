@@ -56,6 +56,26 @@ class Settings(BaseSettings):
         default=2, validation_alias="COGDOC_OFFLOAD_WORKERS"
     )
 
+    # 分层记忆预算：展示历史不受这些限制，只有送入模型的工作上下文会被裁剪。
+    memory_short_message_limit: int = Field(
+        default=12, ge=2, le=100, validation_alias="COGDOC_MEMORY_SHORT_MESSAGE_LIMIT"
+    )
+    memory_short_char_limit: int = Field(
+        default=6000,
+        ge=500,
+        le=100000,
+        validation_alias="COGDOC_MEMORY_SHORT_CHAR_LIMIT",
+    )
+    memory_mid_char_limit: int = Field(
+        default=4000, ge=500, le=50000, validation_alias="COGDOC_MEMORY_MID_CHAR_LIMIT"
+    )
+    memory_long_fact_limit: int = Field(
+        default=64, ge=1, le=1000, validation_alias="COGDOC_MEMORY_LONG_FACT_LIMIT"
+    )
+    memory_context_long_limit: int = Field(
+        default=8, ge=0, le=100, validation_alias="COGDOC_MEMORY_CONTEXT_LONG_LIMIT"
+    )
+
     # 云端模型兼容后端。
     llm_model_name: str = Field(
         default="deepseek-chat", validation_alias="LLM_MODEL_NAME"
@@ -259,6 +279,19 @@ class Settings(BaseSettings):
     @property
     def data_dir(self) -> Path:
         return Path(self.cogdoc_data_dir)
+
+    # 构造分层记忆策略。
+    @property
+    def memory_policy(self):
+        from cogdoc.memory.manager import MemoryPolicy
+
+        return MemoryPolicy(
+            short_term_message_limit=self.memory_short_message_limit,
+            short_term_char_limit=self.memory_short_char_limit,
+            mid_term_char_limit=self.memory_mid_char_limit,
+            long_term_fact_limit=self.memory_long_fact_limit,
+            context_long_term_limit=self.memory_context_long_limit,
+        )
 
     # 处理向量持久化目录。
     @property

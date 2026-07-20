@@ -178,6 +178,12 @@ def run_chat(
     initial_state = {
         "messages": [],
         "chat_history": list(chat_history or []),
+        "working_memory": {
+            "goal": query,
+            "status": "running",
+            "task_type": forced_task or "auto",
+            "tool_results": [],
+        },
         "iteration_count": 0,
         "max_iteration_count": 2,
         "request_id": trace_id,

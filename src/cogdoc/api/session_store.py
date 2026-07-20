@@ -2,24 +2,38 @@ import time
 from dataclasses import dataclass, field
 from threading import RLock
 from typing import Any
+from cogdoc.memory.manager import (
+    MemoryPolicy,
+    build_memory_context,
+    rank_long_term_facts,
+    update_memory,
+)
 
 
-# memory：门控后的好回合，喂回图做多轮上下文；display：完整对话，给前端展示。
+# 定义内存会话记录。
 @dataclass
 class SessionEntry:
     memory: list[dict[str, Any]] = field(default_factory=list)
+    mid_memory: dict[str, Any] = field(default_factory=dict)
     display: list[dict[str, Any]] = field(default_factory=list)
     updated_at: float = field(default_factory=time.monotonic)
 
 
-# TTL 默认 7 天：多对话场景下别让会话一小时就被淘汰；仍是内存，重启会丢。
+# 管理内存版分层记忆。
 class SessionStore:
-    # TTL 默认 7 天：多对话场景下别让会话一小时就被淘汰；仍是内存，重启会丢。
-    def __init__(self, max_sessions: int = 1024, ttl_seconds: int = 604800):
+    # 初始化内存版分层记忆。
+    def __init__(
+        self,
+        max_sessions: int = 1024,
+        ttl_seconds: int = 604800,
+        memory_policy: MemoryPolicy | None = None,
+    ):
         self.max_sessions = max_sessions
         self.ttl_seconds = ttl_seconds
+        self.memory_policy = memory_policy or MemoryPolicy()
         self._lock = RLock()
         self._entries: dict[tuple[str, str], SessionEntry] = {}
+        self._long_memory: dict[str, list[dict[str, Any]]] = {}
 
     # 记录结果。
     def record(
@@ -35,15 +49,51 @@ class SessionStore:
         with self._lock:
             self._purge_expired_locked()
             entry = self._entries.setdefault((doc_id, session_id), SessionEntry())
-            entry.memory.extend(memory_messages or [])
+            entry.memory, entry.mid_memory, facts = update_memory(
+                entry.memory,
+                entry.mid_memory,
+                memory_messages or [],
+                display_messages or [],
+                self.memory_policy,
+            )
             entry.display.extend(display_messages or [])
+            self._merge_long_memory_locked(doc_id, facts)
             entry.updated_at = time.monotonic()
             self._evict_overflow_locked()
 
-    # 获取 history。
+    # 构造分层历史上下文。
     def get_history(self, doc_id: str, session_id: str | None) -> list[dict[str, Any]]:
-        # 图输入：只取门控后的记忆回合。
-        return self._read(doc_id, session_id, "memory")
+        if not session_id:
+            return []
+        with self._lock:
+            self._purge_expired_locked()
+            entry = self._entries.get((doc_id, session_id))
+            if entry is None:
+                return build_memory_context(
+                    [], {}, self._long_memory.get(doc_id, []), self.memory_policy
+                )
+            entry.updated_at = time.monotonic()
+            return build_memory_context(
+                entry.memory,
+                entry.mid_memory,
+                self._long_memory.get(doc_id, []),
+                self.memory_policy,
+            )
+
+    # 返回三层记忆快照。
+    def get_memory_snapshot(
+        self, doc_id: str, session_id: str | None
+    ) -> dict[str, Any]:
+        if not session_id:
+            return {"short_term": [], "mid_term": {}, "long_term": []}
+        with self._lock:
+            self._purge_expired_locked()
+            entry = self._entries.get((doc_id, session_id))
+            return {
+                "short_term": list(entry.memory) if entry else [],
+                "mid_term": dict(entry.mid_memory) if entry else {},
+                "long_term": list(self._long_memory.get(doc_id, [])),
+            }
 
     # 获取 display。
     def get_display(self, doc_id: str, session_id: str | None) -> list[dict[str, Any]]:
@@ -76,6 +126,27 @@ class SessionStore:
         with self._lock:
             for key in [k for k in self._entries if k[0] == doc_id]:
                 self._entries.pop(key, None)
+            self._long_memory.pop(doc_id, None)
+
+    # 清除知识库长期记忆。
+    def clear_long_term(self, doc_id: str) -> None:
+        with self._lock:
+            self._long_memory.pop(doc_id, None)
+
+    # 合并长期记忆并限制容量。
+    def _merge_long_memory_locked(
+        self, doc_id: str, facts: list[dict[str, Any]]
+    ) -> None:
+        if not facts:
+            return
+        current = self._long_memory.setdefault(doc_id, [])
+        by_id = {fact.get("id"): fact for fact in current}
+        now = time.time()
+        for fact in facts:
+            by_id[fact.get("id")] = dict(fact, updated_at=now)
+        current[:] = rank_long_term_facts(
+            list(by_id.values()), self.memory_policy.long_term_fact_limit
+        )
 
     # 列出 sessions。
     def list_sessions(self, doc_id: str) -> list[dict[str, Any]]:
