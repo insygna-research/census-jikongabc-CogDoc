@@ -71,6 +71,61 @@ async def test_readyz_returns_503_when_native_missing(monkeypatch):
     assert resp.status_code == 503
     assert resp.json()["status"] == "not_ready"
     assert resp.json()["rust_core"] is False
+    assert "rust_core 未安装" not in resp.text
+
+
+@pytest.mark.anyio
+async def test_structured_liveness_is_independent_of_startup(monkeypatch):
+    import cogdoc.api.app as app_module
+
+    monkeypatch.setattr(app_module, "configure_logging", lambda: None)
+    app = create_app(session_store=SessionStore())
+
+    async with await _client(app) as client:
+        resp = await client.get("/health/live")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "alive"
+    assert resp.json()["timestamp"]
+
+
+@pytest.mark.anyio
+async def test_structured_readiness_reports_components(monkeypatch):
+    import cogdoc.api.app as app_module
+
+    monkeypatch.setattr(app_module, "configure_logging", lambda: None)
+    app = create_app(session_store=SessionStore())
+
+    async with app.router.lifespan_context(app):
+        async with await _client(app) as client:
+            resp = await client.get("/health/ready")
+
+    payload = resp.json()
+    assert resp.status_code == 200
+    assert payload["status"] == "ready"
+    assert payload["components"]["lifecycle"]["status"] == "ready"
+    assert payload["components"]["state"]["status"] == "ready"
+    assert payload["components"]["rust_core"]["status"] == "ready"
+    assert payload["components"]["authentication"] == {
+        "status": "degraded",
+        "required": False,
+    }
+
+
+@pytest.mark.anyio
+async def test_structured_readiness_rejects_service_before_startup(monkeypatch):
+    import cogdoc.api.app as app_module
+
+    monkeypatch.setattr(app_module, "configure_logging", lambda: None)
+    app = create_app(session_store=SessionStore())
+
+    async with await _client(app) as client:
+        resp = await client.get("/health/ready")
+
+    payload = resp.json()
+    assert resp.status_code == 503
+    assert payload["status"] == "not_ready"
+    assert payload["components"]["lifecycle"]["status"] == "not_ready"
 
 
 # 验证 unhandled error response maps shutdown to 503 场景。

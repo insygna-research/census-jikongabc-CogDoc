@@ -140,6 +140,16 @@ class Settings(BaseSettings):
         default=90.0, validation_alias="LLM_TIMEOUT_SECONDS"
     )
     llm_max_retries: int = Field(default=2, validation_alias="LLM_MAX_RETRIES")
+    # 独立阅卷模型配置；留空时回退到云端主模型，但角色仍保持 Judge。
+    llm_judge_model_name: str = Field(
+        default="", validation_alias="LLM_JUDGE_MODEL_NAME"
+    )
+    llm_judge_enabled: bool = Field(
+        default=True, validation_alias="LLM_JUDGE_ENABLED"
+    )
+    llm_judge_temperature: float = Field(
+        default=0.0, ge=0.0, le=1.0, validation_alias="LLM_JUDGE_TEMPERATURE"
+    )
 
     # 云端节点级模型覆盖；留空时回退到 LLM_MODEL_NAME。
     llm_router_model_name: str = Field(

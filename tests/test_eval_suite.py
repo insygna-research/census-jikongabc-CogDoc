@@ -66,6 +66,26 @@ def _write_retrieval_eval(path):
     )
 
 
+# 用确定性结果替代入口测试中的真实检索后端。
+def _stub_retrieval_run(monkeypatch):
+    calls = []
+
+    def run_eval(items, k_values, rerank):
+        calls.append(
+            {"count": len(items), "k_values": k_values, "rerank": rerank}
+        )
+        return {
+            "aggregate": {"mrr": 1.0},
+            "baseline_gated_metrics": ["mrr"],
+            "metric_directions": {"mrr": "higher"},
+            "by_layer": {},
+            "rows": [],
+        }
+
+    monkeypatch.setattr(eval_suite.eval_retrieval, "run_eval", run_eval)
+    return calls
+
+
 # 验证组合评测不跑检索也能生成门禁结果。
 def test_eval_suite_builds_gate_without_retrieval(tmp_path):
     quality_path = tmp_path / "quality.jsonl"
@@ -466,6 +486,7 @@ def test_eval_suite_main_returns_nonzero_on_baseline_regression(tmp_path, monkey
     baseline_path = tmp_path / "baseline.json"
     _write_quality_eval(quality_path)
     _write_retrieval_eval(retrieval_path)
+    calls = _stub_retrieval_run(monkeypatch)
     baseline = {
         "quality_report": {
             "aggregate": {
@@ -490,6 +511,7 @@ def test_eval_suite_main_returns_nonzero_on_baseline_regression(tmp_path, monkey
     )
 
     assert eval_suite.main() == 1
+    assert len(calls) == 1
 
 
 # 验证组合入口缺失基线返回稳定错误码。
@@ -499,6 +521,7 @@ def test_eval_suite_main_returns_two_when_baseline_missing(tmp_path, monkeypatch
     baseline_path = tmp_path / "missing.json"
     _write_quality_eval(quality_path)
     _write_retrieval_eval(retrieval_path)
+    calls = _stub_retrieval_run(monkeypatch)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -514,6 +537,7 @@ def test_eval_suite_main_returns_two_when_baseline_missing(tmp_path, monkeypatch
     )
 
     assert eval_suite.main() == 2
+    assert len(calls) == 1
 
 
 # 验证组合报告写入会创建文件。
@@ -534,6 +558,7 @@ def test_eval_suite_main_updates_baseline(tmp_path, monkeypatch, capsys):
     baseline_path = tmp_path / "baseline.json"
     _write_quality_eval(quality_path)
     _write_retrieval_eval(retrieval_path)
+    calls = _stub_retrieval_run(monkeypatch)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -553,6 +578,8 @@ def test_eval_suite_main_updates_baseline(tmp_path, monkeypatch, capsys):
     payload = json.loads(baseline_path.read_text(encoding="utf-8"))
     assert "组合基线已更新" in out
     assert payload["gate"]["passed"] is True
+    assert payload["config"]["run_retrieval"] is True
+    assert len(calls) == 1
 
 
 # 验证组合入口使用默认路径更新基线。
@@ -562,6 +589,7 @@ def test_eval_suite_main_updates_default_baseline(tmp_path, monkeypatch):
     baseline_path = tmp_path / "default_baseline.json"
     _write_quality_eval(quality_path)
     _write_retrieval_eval(retrieval_path)
+    calls = _stub_retrieval_run(monkeypatch)
     monkeypatch.setattr(eval_suite, "DEFAULT_BASELINE_PATH", baseline_path)
     monkeypatch.setattr(
         sys,
@@ -579,6 +607,29 @@ def test_eval_suite_main_updates_default_baseline(tmp_path, monkeypatch):
     assert eval_suite.main() == 0
     payload = json.loads(baseline_path.read_text(encoding="utf-8"))
     assert payload["gate"]["passed"] is True
+    assert payload["config"]["run_retrieval"] is True
+    assert len(calls) == 1
+
+
+# 验证检索被跳过时绝不写入组合基线。
+def test_eval_suite_main_refuses_skipped_retrieval_baseline_update(
+    tmp_path, monkeypatch, capsys
+):
+    baseline_path = tmp_path / "baseline.json"
+    report = {
+        "gate": {"checks": {}, "passed": True},
+        "retrieval_report": {"skipped": True, "reason": "测试跳过"},
+    }
+    monkeypatch.setattr(eval_suite, "build_report", lambda **kwargs: report)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["eval_suite.py", "--update-baseline", str(baseline_path)],
+    )
+
+    assert eval_suite.main() == 2
+    assert "必须执行真实检索" in capsys.readouterr().err
+    assert not baseline_path.exists()
 
 
 # 验证组合入口拒绝同时对比并更新基线。

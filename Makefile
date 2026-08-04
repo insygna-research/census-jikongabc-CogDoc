@@ -3,11 +3,27 @@
 PYTHON  ?= python
 MATURIN ?= maturin
 SHELL   := /bin/bash
+EVAL_SUITE_RELEASE_ARGS := --run-retrieval --retrieval-coverage-profile baseline --rerank --retrieval-gate eval/retrieval_gate.json
+RELIABILITY_DIR ?= artifacts/reliability
+RELIABILITY_GRACE ?= 10
+RELIABILITY_NATIVE_TIMEOUT ?= 900
+RELIABILITY_SMOKE_TIMEOUT ?= 120
+RELIABILITY_TEST_TIMEOUT ?= 1200
+RELIABILITY_EVAL_TIMEOUT ?= 1800
+RELIABILITY_SOAK_TIMEOUT ?= 240
+RELIABILITY_API_HOST ?= 127.0.0.1
+RELIABILITY_API_PORT ?= 8000
+RELIABILITY_API_URL ?= http://$(RELIABILITY_API_HOST):$(RELIABILITY_API_PORT)/healthz
+RELIABILITY_SOAK_REQUESTS ?= 100
+RELIABILITY_SOAK_CONCURRENCY ?= 10
+RELIABILITY_REQUEST_TIMEOUT ?= 3
+RELIABILITY_MIN_SUCCESS_RATE ?= 0.99
+RELIABILITY_MAX_P95_MS ?= 750
 
 # src-layout：包源码在 src/，入口经 PYTHONPATH 注入，无需先安装即可 run/serve/test。
 export PYTHONPATH := src
 
-.PHONY: help install native check test smoke-api run debug backup eval eval-coverage eval-retrieval-report eval-retrieval-baseline eval-retrieval-gate eval-quality eval-quality-coverage eval-suite eval-suite-run-retrieval eval-suite-report eval-suite-baseline eval-suite-update-baseline serve frontend
+.PHONY: help install native check test smoke-api reliability-gate run debug backup eval eval-coverage eval-retrieval-report eval-retrieval-baseline eval-retrieval-gate eval-quality eval-quality-coverage eval-suite eval-suite-run-retrieval eval-suite-report eval-suite-baseline eval-suite-update-baseline serve frontend
 
 help:
 	@echo "make install - 可编辑安装含开发依赖 (pip install -e '.[dev]')"
@@ -15,6 +31,7 @@ help:
 	@echo "make check   - 校验原生扩展是否就绪 (scripts/check_native.py)"
 	@echo "make test    - 运行 pytest 全量测试"
 	@echo "make smoke-api - 运行不依赖真实模型/索引的 API E2E smoke"
+	@echo "make reliability-gate - 运行有界 native/smoke/test/eval 与真实 API soak 门禁"
 	@echo "make backup  - 备份 data/ 与 logs/traces/ 到 backups/"
 	@echo "make eval    - 离线检索评测 recall@k/MRR (scripts/eval_retrieval.py)"
 	@echo "make eval-coverage - 只检查检索评测集覆盖面，不执行真实检索"
@@ -25,9 +42,9 @@ help:
 	@echo "make eval-quality-coverage - 检查质量评测集覆盖面"
 	@echo "make eval-suite - 运行组合评测门禁（覆盖审计 + 质量评测）"
 	@echo "make eval-suite-run-retrieval - 运行组合评测并执行真实检索"
-	@echo "make eval-suite-report - 写入 eval/eval_suite_report.json"
-	@echo "make eval-suite-baseline - 对比 eval/eval_suite_baseline.json"
-	@echo "make eval-suite-update-baseline - 更新 eval/eval_suite_baseline.json"
+	@echo "make eval-suite-report - 执行真实检索发布门禁并写入 eval/eval_suite_report.json"
+	@echo "make eval-suite-baseline - 执行真实检索并对比 eval/eval_suite_baseline.json"
+	@echo "make eval-suite-update-baseline - 执行真实检索并更新 eval/eval_suite_baseline.json"
 	@echo "make run     - 启动多库多对话控制台 (python -m cogdoc.cli)"
 	@echo "make debug   - 启动独立 Debug 控制台 (python -m cogdoc.debug)"
 	@echo "make serve   - 启动 FastAPI 服务 (uvicorn cogdoc.api.app:app)"
@@ -48,6 +65,20 @@ test:
 
 smoke-api:
 	$(PYTHON) scripts/smoke_api.py
+
+RELIABILITY_EVAL_DATA_DIR ?= $(abspath $(RELIABILITY_DIR)/eval-data)
+RELIABILITY_EVAL_KB_ID ?= arch_blueprint_2026
+RELIABILITY_EVAL_SOURCE_DIR ?= $(abspath your_documents)
+
+# 发布可靠性门禁。普通开发目标保持原行为，只有该目标施加 hard timeout。
+reliability-gate:
+	$(PYTHON) scripts/run_guarded.py --timeout $(RELIABILITY_NATIVE_TIMEOUT) --grace $(RELIABILITY_GRACE) --diagnostic $(RELIABILITY_DIR)/native-timeout.json --cwd rust_core -- $(MATURIN) develop --release
+	$(PYTHON) scripts/run_guarded.py --timeout 60 --grace $(RELIABILITY_GRACE) --diagnostic $(RELIABILITY_DIR)/check-timeout.json -- $(PYTHON) scripts/check_native.py
+	$(PYTHON) scripts/run_guarded.py --timeout $(RELIABILITY_SMOKE_TIMEOUT) --grace $(RELIABILITY_GRACE) --diagnostic $(RELIABILITY_DIR)/smoke-timeout.json -- $(PYTHON) scripts/smoke_api.py
+	$(PYTHON) scripts/run_guarded.py --timeout $(RELIABILITY_TEST_TIMEOUT) --grace $(RELIABILITY_GRACE) --diagnostic $(RELIABILITY_DIR)/test-timeout.json -- $(PYTHON) -m pytest
+	$(PYTHON) scripts/run_guarded.py --timeout $(RELIABILITY_EVAL_TIMEOUT) --grace $(RELIABILITY_GRACE) --diagnostic $(RELIABILITY_DIR)/eval-index-timeout.json -- env COGDOC_DATA_DIR=$(RELIABILITY_EVAL_DATA_DIR) $(PYTHON) scripts/prepare_eval_index.py --kb-id $(RELIABILITY_EVAL_KB_ID) --source-dir $(RELIABILITY_EVAL_SOURCE_DIR) --eval-set eval/retrieval_eval.jsonl --json $(RELIABILITY_DIR)/eval-index.json
+	$(PYTHON) scripts/run_guarded.py --timeout $(RELIABILITY_EVAL_TIMEOUT) --grace $(RELIABILITY_GRACE) --diagnostic $(RELIABILITY_DIR)/eval-timeout.json -- env COGDOC_DATA_DIR=$(RELIABILITY_EVAL_DATA_DIR) $(PYTHON) scripts/eval_suite.py $(EVAL_SUITE_RELEASE_ARGS) --json $(RELIABILITY_DIR)/eval-suite.json
+	$(PYTHON) scripts/run_guarded.py --timeout $(RELIABILITY_SOAK_TIMEOUT) --grace $(RELIABILITY_GRACE) --diagnostic $(RELIABILITY_DIR)/soak-timeout.json -- $(SHELL) -c 'set -euo pipefail; $(PYTHON) -m uvicorn cogdoc.api.app:app --host $(RELIABILITY_API_HOST) --port $(RELIABILITY_API_PORT) & pid=$$!; cleanup() { kill -TERM $$pid 2>/dev/null || true; wait $$pid 2>/dev/null || true; }; trap cleanup EXIT INT TERM; $(PYTHON) scripts/soak_api.py --url $(RELIABILITY_API_URL) --requests $(RELIABILITY_SOAK_REQUESTS) --concurrency $(RELIABILITY_SOAK_CONCURRENCY) --timeout $(RELIABILITY_REQUEST_TIMEOUT) --startup-timeout 30 --min-success-rate $(RELIABILITY_MIN_SUCCESS_RATE) --max-p95-ms $(RELIABILITY_MAX_P95_MS) --json $(RELIABILITY_DIR)/soak.json'
 
 backup:
 	$(PYTHON) scripts/backup_state.py
@@ -80,13 +111,13 @@ eval-suite-run-retrieval:
 	$(PYTHON) scripts/eval_suite.py --run-retrieval
 
 eval-suite-report:
-	$(PYTHON) scripts/eval_suite.py --json eval/eval_suite_report.json
+	$(PYTHON) scripts/eval_suite.py $(EVAL_SUITE_RELEASE_ARGS) --json eval/eval_suite_report.json
 
 eval-suite-baseline:
-	$(PYTHON) scripts/eval_suite.py --baseline eval/eval_suite_baseline.json
+	$(PYTHON) scripts/eval_suite.py $(EVAL_SUITE_RELEASE_ARGS) --baseline eval/eval_suite_baseline.json
 
 eval-suite-update-baseline:
-	$(PYTHON) scripts/eval_suite.py --update-baseline eval/eval_suite_baseline.json
+	$(PYTHON) scripts/eval_suite.py $(EVAL_SUITE_RELEASE_ARGS) --update-baseline eval/eval_suite_baseline.json
 
 run:
 	$(PYTHON) -m cogdoc.cli

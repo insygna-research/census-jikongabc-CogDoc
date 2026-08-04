@@ -448,6 +448,14 @@ def run_chat(
             duration_ms=monotonic_ms() - request_start_ms,
             error=stream_error,
             config=trace_config,
+            input_payload={
+                "query": query,
+                "doc_id": doc_id,
+                "session_id": session_id,
+                "chat_history": list(chat_history or []),
+            },
+            output_payload=task_output,
+            execution_status=("TRACE_INCOMPLETE" if trace_status == "degraded" else "SUCCESS"),
         )
         trace_path = str(exported) if exported else None
         result = _build_result(
@@ -481,6 +489,13 @@ def run_chat(
             duration_ms=monotonic_ms() - request_start_ms,
             error=trace_error,
             config=trace_config,
+            input_payload={
+                "query": query,
+                "doc_id": doc_id,
+                "session_id": session_id,
+                "chat_history": list(chat_history or []),
+            },
+            execution_status="TARGET_ERROR",
         )
         log_event(
             "runtime",

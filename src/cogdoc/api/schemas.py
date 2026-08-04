@@ -599,6 +599,10 @@ class TraceResponse(ApiModel):
     task_type: str
     status: str
     duration_ms: float | None = None
+    execution_status: str = "SUCCESS"
+    input: dict[str, Any] = Field(default_factory=dict)
+    output: dict[str, Any] = Field(default_factory=dict)
+    evidence_completeness: float | None = None
     config: dict[str, Any] = Field(default_factory=dict)
     summary: TraceSummary = Field(default_factory=TraceSummary)
     error: dict[str, Any] | None = None

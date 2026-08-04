@@ -128,6 +128,13 @@ def write_report(report: Dict[str, Any], path: Path) -> None:
     os.replace(tmp_path, path)
 
 
+# 基线动作不得接受跳过真实检索的组合报告。
+def require_retrieval_executed(report: Dict[str, Any], action: str) -> None:
+    retrieval = report.get("retrieval_report")
+    if not retrieval or retrieval.get("skipped"):
+        raise ValueError(f"{action}必须执行真实检索，不能使用已跳过检索的报告")
+
+
 # 比较单组指标。
 def compare_metric_group(
     current: Dict[str, Any],
@@ -504,7 +511,9 @@ def main() -> int:
     args = parser.parse_args()
     if args.baseline and args.update_baseline:
         parser.error("--baseline 不能与 --update-baseline 同时使用")
-    if args.retrieval_gate and not args.run_retrieval:
+    baseline_action = bool(args.baseline or args.update_baseline)
+    run_retrieval = args.run_retrieval or baseline_action
+    if args.retrieval_gate and not run_retrieval:
         parser.error("--retrieval-gate 必须与 --run-retrieval 同时使用")
 
     quality_eval_set = args.quality_eval_set or eval_quality.resolve_default_eval_set()
@@ -519,7 +528,7 @@ def main() -> int:
     report = build_report(
         quality_eval_set=quality_eval_set,
         retrieval_eval_set=retrieval_eval_set,
-        run_retrieval=args.run_retrieval,
+        run_retrieval=run_retrieval,
         k_values=args.k,
         rerank=args.rerank,
         retrieval_coverage_profile=args.retrieval_coverage_profile,
@@ -529,6 +538,7 @@ def main() -> int:
     baseline_result = None
     if args.baseline:
         try:
+            require_retrieval_executed(report, "组合基线对比")
             baseline_result = compare_baseline(report, args.baseline)
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
@@ -545,6 +555,11 @@ def main() -> int:
     if baseline_result and baseline_result["regressed"]:
         return 1
     if args.update_baseline:
+        try:
+            require_retrieval_executed(report, "组合基线更新")
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
         write_report(report, args.update_baseline)
         print(f"组合基线已更新 {args.update_baseline}")
     return 0

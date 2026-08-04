@@ -1,11 +1,14 @@
 import argparse
 import hashlib
+import io
 import json
+import os
+import shutil
 import sys
 import tarfile
 import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,38 +21,39 @@ from cogdoc.config.settings import get_settings
 
 DEFAULT_BACKUP_DIR = ROOT / "backups"
 MANIFEST_NAME = "backup_manifest.json"
+MANIFEST_VERSION = "v2"
 
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
 
 
+def _created_at() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _arcname(path: Path) -> str:
     try:
-        return path.resolve().relative_to(ROOT).as_posix()
+        relative = path.resolve().relative_to(ROOT)
+        value = relative.as_posix()
     except ValueError:
-        return path.name
-
-
-def _path_size(path: Path) -> int:
-    if path.is_file():
-        return path.stat().st_size
-    return sum(child.stat().st_size for child in path.rglob("*") if child.is_file())
+        value = path.name
+    pure = PurePosixPath(value)
+    if not value or pure.is_absolute() or ".." in pure.parts or pure.as_posix() != value:
+        raise ValueError(f"无法生成安全的归档路径: {path}")
+    return value
 
 
 def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for block in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(block)
-    return h.hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def collect_paths(
-    *,
-    include_traces: bool,
-    include_env: bool,
-    extra_paths: Iterable[Path],
+    *, include_traces: bool, include_env: bool, extra_paths: Iterable[Path]
 ) -> list[Path]:
     settings = get_settings()
     paths = [Path(settings.cogdoc_data_dir)]
@@ -61,9 +65,12 @@ def collect_paths(
 
     resolved: list[Path] = []
     seen: set[Path] = set()
+    env_path = (ROOT / ".env").resolve()
     for path in paths:
         candidate = path if path.is_absolute() else ROOT / path
         candidate = candidate.resolve()
+        if candidate == env_path and not include_env:
+            continue
         if candidate in seen or not candidate.exists():
             continue
         seen.add(candidate)
@@ -71,33 +78,105 @@ def collect_paths(
     return resolved
 
 
-def build_manifest(paths: list[Path], archive_name: str, include_env: bool) -> dict:
-    settings = get_settings()
-    items = []
-    for path in paths:
-        item = {
-            "path": _arcname(path),
-            "type": "dir" if path.is_dir() else "file",
-            "size_bytes": _path_size(path),
-        }
-        if path.is_file():
-            item["sha256"] = _sha256(path)
-        items.append(item)
+def _payload_entries(
+    paths: list[Path], *, include_env: bool
+) -> tuple[dict[str, Path], set[str]]:
+    files: dict[str, Path] = {}
+    directories: set[str] = set()
+    env_path = (ROOT / ".env").resolve()
+    for root in paths:
+        root_name = _arcname(root)
+        candidates = [root] if root.is_file() else [root, *sorted(root.rglob("*"))]
+        for source in candidates:
+            if source.is_symlink():
+                raise ValueError(f"备份不允许符号链接: {source}")
+            if source.resolve() == env_path and not include_env:
+                continue
+            relative = source.relative_to(root).as_posix()
+            archive_name = root_name if relative == "." else f"{root_name}/{relative}"
+            if source.is_dir():
+                if archive_name in files:
+                    raise ValueError(f"归档路径冲突: {archive_name}")
+                directories.add(archive_name)
+            elif source.is_file():
+                if archive_name in directories:
+                    raise ValueError(f"归档路径冲突: {archive_name}")
+                previous = files.setdefault(archive_name, source)
+                if previous != source:
+                    raise ValueError(f"归档路径冲突: {archive_name}")
+            else:
+                raise ValueError(f"不支持的状态文件类型: {source}")
+    return files, directories
 
+
+def _build_manifest(
+    paths: list[Path],
+    archive_name: str,
+    include_env: bool,
+    include_traces: bool,
+    files: dict[str, Path],
+    directories: set[str],
+    created_at: str,
+) -> dict:
+    settings = get_settings()
+    file_items = [
+        {
+            "path": name,
+            "size_bytes": source.stat().st_size,
+            "sha256": _sha256(source),
+            "created_at": created_at,
+        }
+        for name, source in sorted(files.items())
+    ]
     return {
-        "schema_version": "v1",
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "schema_version": MANIFEST_VERSION,
+        "created_at": created_at,
         "archive": archive_name,
-        "project_root": str(ROOT),
-        "data_dir": str(Path(settings.cogdoc_data_dir)),
-        "trace_dir": str(Path(settings.cogdoc_trace_dir)),
-        "includes_env": include_env,
-        "items": items,
-        "restore_hint": (
-            "Stop CogDoc processes, extract this archive at the project root, "
-            "then run make check and make smoke-api."
-        ),
+        "source": {
+            "project_root": str(ROOT.resolve()),
+            "configuration": {
+                "data_dir": str(Path(settings.cogdoc_data_dir)),
+                "trace_dir": str(Path(settings.cogdoc_trace_dir)),
+            },
+            "roots": [
+                {
+                    "archive_path": _arcname(path),
+                    "source_path": str(path),
+                    "type": "directory" if path.is_dir() else "file",
+                }
+                for path in paths
+            ],
+        },
+        "options": {
+            "includes_env": include_env and any(name == ".env" for name in files),
+            "includes_traces": include_traces,
+        },
+        "file_count": len(file_items),
+        "total_size_bytes": sum(item["size_bytes"] for item in file_items),
+        "files": file_items,
+        "directories": sorted(directories),
     }
+
+
+def build_manifest(paths: list[Path], archive_name: str, include_env: bool) -> dict:
+    files, directories = _payload_entries(paths, include_env=include_env)
+    return _build_manifest(
+        paths,
+        archive_name,
+        include_env,
+        False,
+        files,
+        directories,
+        _created_at(),
+    )
+
+
+def _add_bytes(archive: tarfile.TarFile, name: str, data: bytes, mtime: int) -> None:
+    info = tarfile.TarInfo(name)
+    info.size = len(data)
+    info.mode = 0o640
+    info.mtime = mtime
+    archive.addfile(info, io.BytesIO(data))
 
 
 def create_backup(
@@ -123,22 +202,72 @@ def create_backup(
     )
     if not paths:
         raise FileNotFoundError("没有找到可备份的路径")
+    source_files, directories = _payload_entries(paths, include_env=include_env)
+    created_at = _created_at()
+    mtime = int(datetime.now(timezone.utc).timestamp())
 
-    manifest = build_manifest(paths, archive_path.name, include_env)
-    with tempfile.TemporaryDirectory(prefix="cogdoc-backup-") as tmp:
-        manifest_path = Path(tmp) / MANIFEST_NAME
-        manifest_path.write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+    with tempfile.TemporaryDirectory(prefix=".cogdoc-backup-", dir=output_dir) as tmp:
+        temporary = Path(tmp)
+        payload = temporary / "payload"
+        for directory in sorted(directories):
+            (payload / directory).mkdir(parents=True, exist_ok=True)
+        snapshot_files: dict[str, Path] = {}
+        for archive_name_in_payload, source in sorted(source_files.items()):
+            destination = payload / archive_name_in_payload
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+            snapshot_files[archive_name_in_payload] = destination
+
+        manifest = _build_manifest(
+            paths,
+            archive_path.name,
+            include_env,
+            include_traces,
+            snapshot_files,
+            directories,
+            created_at,
         )
-        with tarfile.open(archive_path, "w:gz") as archive:
-            archive.add(manifest_path, arcname=MANIFEST_NAME)
-            for path in paths:
-                archive.add(path, arcname=_arcname(path), recursive=True)
+        partial = temporary / archive_path.name
+        with tarfile.open(partial, "w:gz") as archive:
+            _add_bytes(
+                archive,
+                MANIFEST_NAME,
+                json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"),
+                mtime,
+            )
+            for directory in sorted(directories):
+                info = tarfile.TarInfo(directory)
+                info.type = tarfile.DIRTYPE
+                info.mode = 0o750
+                info.mtime = mtime
+                archive.addfile(info)
+            for archive_name_in_payload, source in sorted(snapshot_files.items()):
+                with source.open("rb") as stream:
+                    info = tarfile.TarInfo(archive_name_in_payload)
+                    info.size = source.stat().st_size
+                    info.mode = 0o640
+                    info.mtime = mtime
+                    archive.addfile(info, stream)
+        os.replace(partial, archive_path)
     return archive_path
 
 
-def print_summary(archive_path: Path) -> None:
+def print_summary(archive_path: Path, *, json_output: bool = False) -> None:
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "operation": "backup",
+                    "archive": str(archive_path),
+                    "size_bytes": archive_path.stat().st_size,
+                    "schema_version": MANIFEST_VERSION,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return
     size_mb = archive_path.stat().st_size / 1024 / 1024
     print(f"备份完成: {archive_path}")
     print(f"大小: {size_mb:.2f} MB")
@@ -147,48 +276,41 @@ def print_summary(archive_path: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="备份 CogDoc 本地运行状态")
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=DEFAULT_BACKUP_DIR,
-        help="备份输出目录，默认 backups/",
-    )
-    parser.add_argument("--name", default=None, help="备份文件名，可省略 .tar.gz")
-    parser.add_argument(
-        "--include-traces",
-        action="store_true",
-        default=True,
-        help="包含 logs/traces（默认包含）",
-    )
-    parser.add_argument(
-        "--no-traces",
-        action="store_false",
-        dest="include_traces",
-        help="不包含 logs/traces",
-    )
-    parser.add_argument(
-        "--include-env",
-        action="store_true",
-        help="包含 .env；注意其中可能有 API key",
-    )
-    parser.add_argument(
-        "--extra",
-        type=Path,
-        action="append",
-        default=[],
-        help="额外加入备份的文件或目录，可重复传入",
-    )
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_BACKUP_DIR)
+    parser.add_argument("--name", default=None)
+    parser.add_argument("--include-traces", action="store_true", default=True)
+    parser.add_argument("--no-traces", action="store_false", dest="include_traces")
+    parser.add_argument("--include-env", action="store_true")
+    parser.add_argument("--extra", type=Path, action="append", default=[])
+    parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     args = parser.parse_args()
-
-    archive_path = create_backup(
-        args.output_dir,
-        name=args.name,
-        include_traces=args.include_traces,
-        include_env=args.include_env,
-        extra_paths=args.extra,
-    )
-    print_summary(archive_path)
-    return 0
+    try:
+        archive_path = create_backup(
+            args.output_dir,
+            name=args.name,
+            include_traces=args.include_traces,
+            include_env=args.include_env,
+            extra_paths=args.extra,
+        )
+        print_summary(archive_path, json_output=args.json)
+        return 0
+    except Exception as exc:
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "operation": "backup",
+                        "error": {"code": "BACKUP_FAILED", "message": str(exc)},
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+            )
+        else:
+            print(f"备份失败: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

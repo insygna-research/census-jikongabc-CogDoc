@@ -22,6 +22,33 @@ def _preview(text: Any, limit: int = TRACE_PREVIEW_CHARS) -> str:
     return compact[:limit]
 
 
+# 将 LangChain / Pydantic 等运行期对象转成可写入 trace JSON 的结构。
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list | tuple | set):
+        return [_json_safe(item) for item in value]
+    if hasattr(value, "model_dump"):
+        try:
+            return _json_safe(value.model_dump())
+        except Exception:
+            pass
+    if hasattr(value, "dict"):
+        try:
+            return _json_safe(value.dict())
+        except Exception:
+            pass
+    if hasattr(value, "content"):
+        payload = {
+            "type": getattr(value, "type", value.__class__.__name__),
+            "content": getattr(value, "content", ""),
+        }
+        return _json_safe(payload)
+    return str(value)
+
+
 # 构建文档引用摘要。
 def _doc_ref(doc: Mapping[str, Any]) -> dict:
     meta = doc.get("meta", {})
@@ -73,6 +100,8 @@ def build_trace_step(
         "error_class": None,
         "counts": {},
         "evidence": [],
+        # 评分和 Bad Case 回灌需要原始节点结果；展示层仍使用下方的摘要字段。
+        "output_snapshot": _json_safe(dict(output)),
     }
 
     if "task_type" in output:
@@ -231,7 +260,22 @@ def build_trace_payload(
     duration_ms: float | None = None,
     error: Mapping[str, Any] | None = None,
     config: Mapping[str, Any] | None = None,
+    input_payload: Mapping[str, Any] | None = None,
+    output_payload: Mapping[str, Any] | None = None,
+    execution_status: str | None = None,
 ) -> dict:
+    resolved_status = execution_status or (
+        "SUCCESS" if status == "ok" else "TRACE_INCOMPLETE" if status == "degraded" else "TARGET_ERROR"
+    )
+    required_evidence = {"input", "output", "steps"}
+    available_evidence = {
+        name for name, value in {
+            "input": input_payload,
+            "output": output_payload,
+            "steps": steps,
+        }.items() if value is not None and (value or name == "steps")
+    }
+    evidence_completeness = len(required_evidence & available_evidence) / len(required_evidence)
     return {
         "schema_version": TRACE_SCHEMA_VERSION,
         "trace_id": trace_id,
@@ -239,10 +283,14 @@ def build_trace_payload(
         "task_type": task_type,
         "status": status,
         "duration_ms": None if duration_ms is None else round(max(duration_ms, 0.0), 3),
-        "config": dict(config or {}),
+        "execution_status": resolved_status,
+        "input": _json_safe(dict(input_payload or {})),
+        "output": _json_safe(dict(output_payload or {})),
+        "evidence_completeness": evidence_completeness,
+        "config": _json_safe(dict(config or {})),
         "summary": summarize_trace_steps(steps),
-        "error": dict(error or {}) or None,
-        "steps": steps,
+        "error": _json_safe(dict(error or {})) or None,
+        "steps": _json_safe(steps),
     }
 
 
@@ -257,6 +305,9 @@ def export_trace(
     duration_ms: float | None = None,
     error: Mapping[str, Any] | None = None,
     config: Mapping[str, Any] | None = None,
+    input_payload: Mapping[str, Any] | None = None,
+    output_payload: Mapping[str, Any] | None = None,
+    execution_status: str | None = None,
 ) -> Path | None:
     settings = settings or get_settings()
     if not settings.cogdoc_trace_enabled:
@@ -273,6 +324,9 @@ def export_trace(
         duration_ms=duration_ms,
         error=error,
         config=config,
+        input_payload=input_payload,
+        output_payload=output_payload,
+        execution_status=execution_status,
     )
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path

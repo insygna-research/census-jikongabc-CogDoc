@@ -1,4 +1,6 @@
 import json
+from langchain_core.messages import AIMessage
+
 from cogdoc.config.settings import Settings
 from cogdoc.observability.trace import (
     build_trace_payload,
@@ -172,6 +174,31 @@ def test_export_trace_writes_json_file(tmp_path):
     assert payload["summary"]["error_count"] == 0
     assert payload["error"]["error_class"] == "TimeoutError"
     assert payload["steps"][0]["node_name"] == "intent_router"
+
+
+# 验证 trace 导出能处理 LangChain Message 等非原生 JSON 对象。
+def test_export_trace_serializes_runtime_message_objects(tmp_path):
+    settings = Settings(cogdoc_trace_dir=str(tmp_path), cogdoc_trace_enabled=True)
+    step = build_trace_step(
+        "qa_node",
+        {"messages": [AIMessage(content="回答内容")], "answer": "回答内容"},
+        1.0,
+    )
+
+    path = export_trace(
+        "trace-message",
+        "req-message",
+        "qa",
+        [step],
+        settings,
+        input_payload={"chat_history": [AIMessage(content="历史回答")]},
+        output_payload={"messages": [AIMessage(content="最终回答")]},
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["input"]["chat_history"][0]["content"] == "历史回答"
+    assert payload["output"]["messages"][0]["content"] == "最终回答"
+    assert payload["steps"][0]["output_snapshot"]["messages"][0]["content"] == "回答内容"
 
 
 # 验证跟踪导出尊重关闭开关。

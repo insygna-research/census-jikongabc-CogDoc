@@ -89,6 +89,7 @@ def create_app(
     # 管理结果。
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        app.state.lifecycle_status = "starting"
         # 非命令行入口也要在启动时配置日志，否则节点日志会静默丢失。
         configure_logging()
         # 单进程独占锁，严格模式下拿不到锁就拒绝启动。
@@ -137,8 +138,10 @@ def create_app(
                     {},
                     level=logging.WARNING,
                 )
+            app.state.lifecycle_status = "ready"
             yield
         finally:
+            app.state.lifecycle_status = "stopping"
             # 每步独立容错，进程锁放最外层，避免某个关闭异常跳过后续清理。
             try:
                 sweeper = getattr(app.state, "sweeper", None)
@@ -196,12 +199,14 @@ def create_app(
                     {},
                     level=logging.WARNING,
                 )
+            app.state.lifecycle_status = "stopped"
 
     app = FastAPI(
         title="CogDoc API",
         version="0.2.0",
         lifespan=lifespan,
     )
+    app.state.lifecycle_status = "created"
     # 运行器和存储可注入，便于脱离真实图与持久态测试交付层。
     app.state.chat_runner = chat_runner or run_chat_sync
     app.state.chat_stream_runner = chat_stream_runner or run_chat
