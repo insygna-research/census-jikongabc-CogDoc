@@ -77,6 +77,9 @@ def _doc_ref(doc: Mapping[str, Any]) -> dict:
     retrieval = doc.get("retrieval") or {}
     return {
         "chunk_id": meta.get("chunk_id", ""),
+        "parent_chunk_id": meta.get("parent_chunk_id", ""),
+        "section_title": meta.get("section_title", ""),
+        "section_path": meta.get("section_path", ""),
         "source_type": meta.get("source_type", "document"),
         "knowledge_id": meta.get("knowledge_id", ""),
         "source": meta.get("source", ""),
@@ -93,6 +96,9 @@ def _doc_ref(doc: Mapping[str, Any]) -> dict:
 def _evidence_ref(item: Mapping[str, Any]) -> dict:
     return {
         "chunk_id": item.get("chunk_id", ""),
+        "parent_chunk_id": item.get("parent_chunk_id", ""),
+        "section_title": item.get("section_title", ""),
+        "section_path": item.get("section_path", ""),
         "source_type": item.get("source_type", "document"),
         "knowledge_id": item.get("knowledge_id", ""),
         "source": item.get("source", ""),
@@ -217,6 +223,36 @@ def build_trace_step(
     if "retrieval_carryover_count" in output:
         step["retrieval_carryover_count"] = _nonnegative_int(
             output.get("retrieval_carryover_count")
+        )
+    if "parent_context_expanded_count" in output:
+        step["parent_context_expanded_count"] = _nonnegative_int(
+            output.get("parent_context_expanded_count")
+        )
+    if "neighbor_context_expanded_count" in output:
+        step["neighbor_context_expanded_count"] = _nonnegative_int(
+            output.get("neighbor_context_expanded_count")
+        )
+    for field in (
+        "evidence_pack_input_count",
+        "evidence_pack_kept_count",
+        "evidence_pack_dropped_count",
+        "evidence_pack_input_chars",
+        "evidence_pack_kept_chars",
+        "evidence_pack_overlap_removed_chars",
+        "evidence_pack_anchor_count",
+        "evidence_pack_pinned_count",
+    ):
+        if field in output:
+            step[field] = _nonnegative_int(output.get(field))
+    drop_reason_counts = output.get("evidence_pack_drop_reason_counts")
+    if isinstance(drop_reason_counts, Mapping):
+        step["evidence_pack_drop_reason_counts"] = {
+            _preview(reason, 80): _nonnegative_int(count)
+            for reason, count in drop_reason_counts.items()
+        }
+    if "evidence_pack_over_budget" in output:
+        step["evidence_pack_over_budget"] = bool(
+            output.get("evidence_pack_over_budget")
         )
     if "adaptive_retrieval_retry_pending" in output:
         step["adaptive_retrieval_retry_pending"] = bool(

@@ -31,6 +31,9 @@ def test_build_trace_step_keeps_only_safe_document_preview():
                     "matched_terms": ["报名"],
                     "match_coverage": 1.0,
                     "query_term_count": 1,
+                    "evidence_text_start": 60,
+                    "evidence_text_end": 240,
+                    "evidence_trimmed_overlap_chars": 60,
                     "unsafe": "不应保留",
                 },
             }
@@ -51,6 +54,9 @@ def test_build_trace_step_keeps_only_safe_document_preview():
     assert step["evidence"][0]["retrieval"]["search_channel"] == "derived_knowledge"
     assert step["evidence"][0]["retrieval"]["matched_terms"] == ["报名"]
     assert step["evidence"][0]["retrieval"]["query_term_count"] == 1
+    assert step["evidence"][0]["retrieval"]["evidence_text_start"] == 60
+    assert step["evidence"][0]["retrieval"]["evidence_text_end"] == 240
+    assert step["evidence"][0]["retrieval"]["evidence_trimmed_overlap_chars"] == 60
     assert "unsafe" not in step["evidence"][0]["retrieval"]
     assert len(step["evidence"][0]["text_preview"]) <= 120
     assert "answer" not in step
@@ -136,6 +142,8 @@ def test_build_trace_step_keeps_adaptive_retrieval_round_metadata():
             "retrieval_ranking_count": 6,
             "retrieval_channel_counts": {"hybrid": 12, "derived_knowledge": 2},
             "retrieval_carryover_count": 1,
+            "parent_context_expanded_count": 3,
+            "neighbor_context_expanded_count": 1,
         },
         1.0,
         retrieval_top_k=18,
@@ -152,6 +160,47 @@ def test_build_trace_step_keeps_adaptive_retrieval_round_metadata():
         "derived_knowledge": 2,
     }
     assert step["retrieval_carryover_count"] == 1
+    assert step["parent_context_expanded_count"] == 3
+    assert step["neighbor_context_expanded_count"] == 1
+
+
+# 验证 trace 完整保留 Evidence Pack 预算决策，并清洗计数与原因键。
+def test_build_trace_step_keeps_evidence_pack_budget_metadata():
+    step = build_trace_step(
+        "rerank_node",
+        {
+            "evidence_pack_input_count": 11,
+            "evidence_pack_kept_count": 8,
+            "evidence_pack_dropped_count": 3,
+            "evidence_pack_input_chars": 9100,
+            "evidence_pack_kept_chars": 7180,
+            "evidence_pack_overlap_removed_chars": 420,
+            "evidence_pack_drop_reason_counts": {
+                "max_docs": 2,
+                "max_chars": 1,
+                "negative-is-clamped": -3,
+            },
+            "evidence_pack_anchor_count": 3,
+            "evidence_pack_pinned_count": 1,
+            "evidence_pack_over_budget": True,
+        },
+        1.0,
+    )
+
+    assert step["evidence_pack_input_count"] == 11
+    assert step["evidence_pack_kept_count"] == 8
+    assert step["evidence_pack_dropped_count"] == 3
+    assert step["evidence_pack_input_chars"] == 9100
+    assert step["evidence_pack_kept_chars"] == 7180
+    assert step["evidence_pack_overlap_removed_chars"] == 420
+    assert step["evidence_pack_drop_reason_counts"] == {
+        "max_docs": 2,
+        "max_chars": 1,
+        "negative-is-clamped": 0,
+    }
+    assert step["evidence_pack_anchor_count"] == 3
+    assert step["evidence_pack_pinned_count"] == 1
+    assert step["evidence_pack_over_budget"] is True
 
 
 # 验证跟踪载荷包含审计字段。

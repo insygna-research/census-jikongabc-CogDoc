@@ -269,6 +269,35 @@ class Settings(BaseSettings):
         default=12, validation_alias="QA_RERANK_MAX_CANDIDATES"
     )
     qa_rerank_on_cpu: bool = Field(default=False, validation_alias="QA_RERANK_ON_CPU")
+    # 重排命中保持 child citation identity，同时从同一结构父块补充有界上下文。
+    qa_parent_context_enabled: bool = Field(
+        default=True, validation_alias="QA_PARENT_CONTEXT_ENABLED"
+    )
+    qa_parent_context_max_chunks: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        validation_alias="QA_PARENT_CONTEXT_MAX_CHUNKS",
+    )
+    qa_parent_context_max_chars: int = Field(
+        default=3600,
+        ge=200,
+        le=30000,
+        validation_alias="QA_PARENT_CONTEXT_MAX_CHARS",
+    )
+    # Parent hydration 后再施加一次请求级证据预算；anchor/pinned 是不可丢硬约束。
+    qa_evidence_pack_max_docs: int = Field(
+        default=8,
+        ge=1,
+        le=50,
+        validation_alias="QA_EVIDENCE_PACK_MAX_DOCS",
+    )
+    qa_evidence_pack_max_chars: int = Field(
+        default=7200,
+        ge=500,
+        le=100000,
+        validation_alias="QA_EVIDENCE_PACK_MAX_CHARS",
+    )
     qa_abstain_enabled: bool = Field(
         default=True, validation_alias="QA_ABSTAIN_ENABLED"
     )

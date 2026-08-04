@@ -1,10 +1,12 @@
 import os
 import chromadb
-from typing import List
+from collections.abc import Mapping
+from typing import Any, List, cast
 from cogdoc.config.settings import get_settings
-from cogdoc.graph.state import RetrievedDoc
+from cogdoc.graph.state import DocMeta, RetrievedDoc
 from cogdoc.tools.embedder import Embedder
 from cogdoc.tools.retriever.base_retriever import BaseRetriever
+from cogdoc.tools.retriever.metadata import copy_optional_structure_metadata
 from cogdoc.tools.retriever.retrieval_text import retrieval_text
 
 
@@ -16,7 +18,7 @@ class EmbeddingModelMismatchError(RuntimeError):
 # 初始化实例状态。
 class VectorRetriever(BaseRetriever):
     # 初始化实例状态。
-    def __init__(self, collection_id: str, persist_directory: str = None):
+    def __init__(self, collection_id: str, persist_directory: str | None = None):
         persist_directory = persist_directory or get_settings().chroma_persist_dir
         os.makedirs(persist_directory, exist_ok=True)
         self.client = chromadb.PersistentClient(path=persist_directory)
@@ -90,18 +92,22 @@ class VectorRetriever(BaseRetriever):
         names = [s for s in {str(s) for s in sources} if s]
         if not names:
             return
-        self.collection.delete(where={"source": {"$in": names}})
+        self.collection.delete(where=cast(Any, {"source": {"$in": names}}))
 
     # 展开结果。
-    def _materialize(self, chunks: List[RetrievedDoc]):
+    def _materialize(
+        self, chunks: List[RetrievedDoc]
+    ) -> tuple[list[str], list[dict[str, Any]], list[str]]:
         # 把 chunk 列表展开成 Chroma upsert 所需的 (ids, metadatas, texts)；主键直接用稳定 chunk_id。
-        ids, metadatas, texts = [], [], []
+        ids: list[str] = []
+        metadatas: list[dict[str, Any]] = []
+        texts: list[str] = []
         for c in chunks:
             meta = c["meta"]
             chunk_id = str(meta["chunk_id"])
             ids.append(chunk_id)
             texts.append(c["text"])
-            stored_meta = {
+            stored_meta: dict[str, Any] = {
                 "chunk_id": chunk_id,
                 "source_sha256": meta["source_sha256"],
                 "local_chunk_index": meta["local_chunk_index"],
@@ -114,6 +120,7 @@ class VectorRetriever(BaseRetriever):
             }
             if meta.get("context"):
                 stored_meta["context"] = str(meta["context"])
+            copy_optional_structure_metadata(meta, stored_meta)
             metadatas.append(stored_meta)
         return ids, metadatas, texts
 
@@ -123,7 +130,10 @@ class VectorRetriever(BaseRetriever):
         embeddings = Embedder.embed_documents([retrieval_text(c) for c in chunks])
         ids, metadatas, texts = self._materialize(chunks)
         self.collection.upsert(
-            ids=ids, embeddings=embeddings, documents=texts, metadatas=metadatas
+            ids=ids,
+            embeddings=cast(Any, embeddings),
+            documents=texts,
+            metadatas=cast(Any, metadatas),
         )
 
     # 添加 with embeddings。
@@ -139,33 +149,38 @@ class VectorRetriever(BaseRetriever):
         Embedder.validate_embeddings(embeddings)
         ids, metadatas, texts = self._materialize(chunks)
         self.collection.upsert(
-            ids=ids, embeddings=embeddings, documents=texts, metadatas=metadatas
+            ids=ids,
+            embeddings=embeddings,
+            documents=texts,
+            metadatas=cast(Any, metadatas),
         )
 
     # 完成 嵌入向量by分块id 处理。
     def embeddings_by_chunk_id(self) -> dict:
         # 导出 {chunk_id: embedding}，供跨代复用按稳定 chunk_id 关联向量，绝不重算 embedding。 只提供向量，文本/metadata 权威另取自 BM25 registry，避免向量侧损坏被洗白。
         data = self.collection.get(include=["embeddings"])
-        return {
-            str(chunk_id): data["embeddings"][i]
-            for i, chunk_id in enumerate(data["ids"])
-        }
+        embeddings = data.get("embeddings")
+        if embeddings is None:
+            return {}
+        return {str(chunk_id): embeddings[i] for i, chunk_id in enumerate(data["ids"])}
 
     # 检索。
     def search(self, query: str, top_k: int = 3) -> List[RetrievedDoc]:
         # 返回结构保持与 BM25Retriever 一致。
         results = self.collection.query(
-            query_embeddings=[Embedder.embed_query(query)], n_results=top_k
+            query_embeddings=cast(Any, [Embedder.embed_query(query)]), n_results=top_k
         )
         if not results or not results["documents"] or not results["documents"][0]:
             return []
 
         retrieved_docs: List[RetrievedDoc] = []
-        docs = results["documents"][0]
+        docs = cast(Any, results["documents"])[0]
         ids = results["ids"][0]
-        metas = results["metadatas"][0]
+        metas = cast(Any, results["metadatas"])[0]
         distances = (
-            results["distances"][0] if "distances" in results else [0.0] * len(ids)
+            cast(Any, results["distances"])[0]
+            if results.get("distances") is not None
+            else [0.0] * len(ids)
         )
 
         for i in range(len(ids)):
@@ -183,14 +198,14 @@ class VectorRetriever(BaseRetriever):
 
 
 # 完成 metafromstored 处理。
-def _meta_from_stored(meta_data: dict) -> dict:
+def _meta_from_stored(meta_data: Mapping[str, Any]) -> DocMeta:
     # 从 Chroma 存储元数据重建 chunk 身份元数据；缺 chunk_id 视为旧索引，必须重建而非现场拼回。
     chunk_id = meta_data.get("chunk_id")
     if not chunk_id:
         raise RuntimeError(
             "Vector index is missing stable chunk_id metadata; rebuild the index."
         )
-    restored = {
+    restored: dict[str, Any] = {
         "chunk_id": str(chunk_id),
         "source_sha256": str(meta_data.get("source_sha256", "")),
         "local_chunk_index": int(meta_data["local_chunk_index"]),
@@ -203,4 +218,5 @@ def _meta_from_stored(meta_data: dict) -> dict:
     }
     if meta_data.get("context"):
         restored["context"] = str(meta_data["context"])
-    return restored
+    copy_optional_structure_metadata(meta_data, restored)
+    return cast(DocMeta, restored)

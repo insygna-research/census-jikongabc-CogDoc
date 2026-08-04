@@ -4,7 +4,7 @@ import math
 from collections import OrderedDict
 from collections.abc import Mapping
 from threading import RLock
-from typing import Any
+from typing import Any, cast
 from langchain_core.messages import AIMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, START, END
@@ -27,6 +27,16 @@ from cogdoc.tools.retriever.vector_retriever import (
 from cogdoc.tools.retriever.bm25_retriever import BM25Retriever
 from cogdoc.tools.retriever.hybrid import HybridRetriever, IndexCorruptError
 from cogdoc.tools.retriever.metadata import safe_retrieval_metadata
+from cogdoc.tools.retriever.parent_context import select_parent_context
+from cogdoc.tools.evidence_rendering import (
+    EVIDENCE_BLOCK_SEPARATOR,
+    evidence_block_char_count,
+)
+from cogdoc.tools.retriever.evidence_pack import (
+    DROP_DUPLICATE_CHUNK_ID,
+    EvidencePack,
+    build_evidence_pack_from_sources,
+)
 from cogdoc.tools.retriever.confidence import assess_retrieval_support
 from cogdoc.tools.retriever.fusion import select_rerank_candidates
 from cogdoc.tools.reranker import BGEReranker, skipped_cpu_rerank_docs
@@ -185,12 +195,17 @@ def _find_source_chunk_index(
     return -1
 
 
-# 复制相邻文本块并标记上下文来源。
-def _copy_neighbor_doc(doc: RetrievedDoc, parent_chunk_id: str) -> RetrievedDoc:
+# 复制上下文文本块并标记带入来源；chunk_id/page 始终保持该 child 自己的身份。
+def _copy_context_doc(
+    doc: RetrievedDoc, anchor_chunk_id: str, expansion: str
+) -> RetrievedDoc:
     copied = copy.deepcopy(doc)
     retrieval = copied.setdefault("retrieval", {})
-    retrieval["search_channel"] = "neighbor"
-    retrieval["parent_chunk_id"] = parent_chunk_id
+    retrieval["search_channel"] = (
+        "parent_context" if expansion == "section" else "neighbor"
+    )
+    retrieval["context_anchor_chunk_id"] = anchor_chunk_id
+    retrieval["context_expansion"] = expansion
     return copied
 
 
@@ -199,7 +214,85 @@ def _missing_chunk_key(expanded: "OrderedDict[str, RetrievedDoc]") -> str:
     return f"__missing_chunk_id_{len(expanded)}"
 
 
-# 为重排命中文本块补充前后相邻文本块，降低答案缺上下文的概率。
+def _order_value(doc: Mapping[str, Any], key: str) -> int | None:
+    value = doc.get("meta", {}).get(key)
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return None
+    return normalized if normalized >= 0 else None
+
+
+def _ordered_expanded_docs(
+    reranked_docs: list[RetrievedDoc], expanded_docs: list[RetrievedDoc]
+) -> list[RetrievedDoc]:
+    """Keep parent groups in anchor-rank order and children in document order."""
+
+    emitted: set[int] = set()
+    ordered: list[RetrievedDoc] = []
+    seen_parent_ids: set[str] = set()
+    indexed_docs = list(enumerate(expanded_docs))
+
+    def append_candidates(candidates: list[tuple[int, RetrievedDoc]]) -> None:
+        for expanded_index, candidate in candidates:
+            if expanded_index in emitted:
+                continue
+            emitted.add(expanded_index)
+            ordered.append(candidate)
+
+    for anchor in reranked_docs:
+        anchor_meta = anchor.get("meta", {})
+        parent_chunk_id = str(anchor_meta.get("parent_chunk_id") or "")
+        anchor_chunk_id = str(anchor_meta.get("chunk_id") or "")
+        if parent_chunk_id:
+            if parent_chunk_id in seen_parent_ids:
+                continue
+            seen_parent_ids.add(parent_chunk_id)
+            candidates = [
+                (index, doc)
+                for index, doc in indexed_docs
+                if str(doc.get("meta", {}).get("parent_chunk_id") or "")
+                == parent_chunk_id
+            ]
+            candidates.sort(
+                key=lambda item: (
+                    _order_value(item[1], "child_index_in_parent")
+                    if _order_value(item[1], "child_index_in_parent") is not None
+                    else math.inf,
+                    _order_value(item[1], "chunk_index")
+                    if _order_value(item[1], "chunk_index") is not None
+                    else math.inf,
+                    item[0],
+                )
+            )
+            append_candidates(candidates)
+            continue
+        if not anchor_chunk_id:
+            continue
+        candidates = [
+            (index, doc)
+            for index, doc in indexed_docs
+            if str(doc.get("meta", {}).get("chunk_id") or "") == anchor_chunk_id
+            or str(doc.get("retrieval", {}).get("context_anchor_chunk_id") or "")
+            == anchor_chunk_id
+        ]
+        candidates.sort(
+            key=lambda item: (
+                _order_value(item[1], "chunk_index")
+                if _order_value(item[1], "chunk_index") is not None
+                else math.inf,
+                item[0],
+            )
+        )
+        append_candidates(candidates)
+
+    append_candidates(indexed_docs)
+    return ordered
+
+
+# 为重排命中补充同章节 child 窗口；旧索引或结构不完整时回退前后邻块。
 def _expand_with_neighbor_chunks(
     doc_id: str, reranked_docs: list[RetrievedDoc], state: GraphState | None = None
 ) -> list[RetrievedDoc]:
@@ -208,6 +301,14 @@ def _expand_with_neighbor_chunks(
 
     expanded: "OrderedDict[str, RetrievedDoc]" = OrderedDict()
     source_cache: dict[str, list[RetrievedDoc]] = {}
+    settings = get_settings()
+    parent_context_enabled = bool(getattr(settings, "qa_parent_context_enabled", True))
+    parent_context_max_chunks = max(
+        1, int(getattr(settings, "qa_parent_context_max_chunks", 5))
+    )
+    parent_context_max_chars = max(
+        0, int(getattr(settings, "qa_parent_context_max_chars", 3600))
+    )
     try:
         with kb_read_lease(doc_id):
             engine = RetrieverFactory.get_engine(doc_id)
@@ -219,9 +320,9 @@ def _expand_with_neighbor_chunks(
                     ] = copy.deepcopy(doc)
                     continue
                 source = str(meta.get("source", "") or "")
-                parent_chunk_id = str(meta.get("chunk_id", ""))
-                if not source or not parent_chunk_id:
-                    expanded[parent_chunk_id or _missing_chunk_key(expanded)] = (
+                anchor_chunk_id = str(meta.get("chunk_id", ""))
+                if not source or not anchor_chunk_id:
+                    expanded[anchor_chunk_id or _missing_chunk_key(expanded)] = (
                         copy.deepcopy(doc)
                     )
                     continue
@@ -231,37 +332,200 @@ def _expand_with_neighbor_chunks(
                 source_chunks = source_cache[source]
                 hit_idx = _find_source_chunk_index(source_chunks, doc)
                 if hit_idx < 0:
-                    expanded[parent_chunk_id or _missing_chunk_key(expanded)] = (
+                    expanded[anchor_chunk_id or _missing_chunk_key(expanded)] = (
                         copy.deepcopy(doc)
                     )
                     continue
 
-                start = max(0, hit_idx - NEIGHBOR_CONTEXT_RADIUS)
-                end = min(len(source_chunks), hit_idx + NEIGHBOR_CONTEXT_RADIUS + 1)
-                for idx in range(start, end):
-                    neighbor = source_chunks[idx]
-                    neighbor_id = str(
-                        neighbor.get("meta", {}).get("chunk_id", "") or ""
+                context_docs: list[RetrievedDoc] = []
+                expansion = "neighbor"
+                if parent_context_enabled:
+                    selection = select_parent_context(
+                        source_chunks,
+                        doc,
+                        max_chunks=parent_context_max_chunks,
+                        max_chars=parent_context_max_chars,
                     )
-                    if not neighbor_id:
+                    if not selection.fallback_required:
+                        context_docs = selection.docs
+                        expansion = "section"
+                if not context_docs:
+                    start = max(0, hit_idx - NEIGHBOR_CONTEXT_RADIUS)
+                    end = min(len(source_chunks), hit_idx + NEIGHBOR_CONTEXT_RADIUS + 1)
+                    context_docs = source_chunks[start:end]
+
+                for context_doc in context_docs:
+                    context_chunk_id = str(
+                        context_doc.get("meta", {}).get("chunk_id", "") or ""
+                    )
+                    if not context_chunk_id:
                         continue
-                    if neighbor_id == parent_chunk_id:
-                        expanded[neighbor_id] = copy.deepcopy(doc)
-                    elif neighbor_id not in expanded:
-                        expanded[neighbor_id] = _copy_neighbor_doc(
-                            neighbor, parent_chunk_id
+                    if context_chunk_id == anchor_chunk_id:
+                        expanded[context_chunk_id] = copy.deepcopy(doc)
+                    elif context_chunk_id not in expanded:
+                        expanded[context_chunk_id] = _copy_context_doc(
+                            context_doc, anchor_chunk_id, expansion
                         )
     except Exception as exc:
         log_event(
             "qa",
-            "qa_neighbor_expand_failed",
+            "qa_context_expand_failed",
             state,
             level=logging.WARNING,
             error_class=type(exc).__name__,
         )
         return reranked_docs
 
-    return list(expanded.values())
+    return _ordered_expanded_docs(reranked_docs, list(expanded.values()))
+
+
+# 校验候选先放 rerank anchor，再放同章节上下文，最后补其余排名候选。
+def _verification_candidates_with_context(
+    reranked_docs: list[RetrievedDoc],
+    expanded_docs: list[RetrievedDoc],
+    ranked_candidates: list[RetrievedDoc],
+) -> list[RetrievedDoc]:
+    merged: "OrderedDict[str, RetrievedDoc]" = OrderedDict()
+    seen_identityless_objects: set[int] = set()
+
+    def add(doc: RetrievedDoc) -> None:
+        chunk_id = str(doc.get("meta", {}).get("chunk_id", "") or "")
+        if not chunk_id:
+            object_id = id(doc)
+            if object_id in seen_identityless_objects:
+                return
+            seen_identityless_objects.add(object_id)
+        key = chunk_id or _missing_chunk_key(merged)
+        if key not in merged:
+            merged[key] = doc
+
+    for doc in reranked_docs:
+        add(doc)
+
+    # Verifier budgets are usually smaller than generation windows.  Feed it
+    # the nearest left/right siblings first so a five-child balanced window is
+    # not truncated into anchor + two left-side children.
+    expanded_positions = {id(doc): index for index, doc in enumerate(expanded_docs)}
+    for anchor_rank, anchor in enumerate(reranked_docs):
+        anchor_chunk_id = str(anchor.get("meta", {}).get("chunk_id") or "")
+        anchor_order = _order_value(anchor, "child_index_in_parent")
+        if anchor_order is None:
+            anchor_order = _order_value(anchor, "chunk_index")
+        siblings = [
+            doc
+            for doc in expanded_docs
+            if anchor_chunk_id
+            and str(doc.get("retrieval", {}).get("context_anchor_chunk_id") or "")
+            == anchor_chunk_id
+        ]
+
+        def proximity(doc: RetrievedDoc) -> tuple[float, float, int, int]:
+            child_order = _order_value(doc, "child_index_in_parent")
+            if child_order is None:
+                child_order = _order_value(doc, "chunk_index")
+            if anchor_order is None or child_order is None:
+                return (math.inf, math.inf, anchor_rank, expanded_positions[id(doc)])
+            return (
+                abs(child_order - anchor_order),
+                child_order,
+                anchor_rank,
+                expanded_positions[id(doc)],
+            )
+
+        for doc in sorted(siblings, key=proximity):
+            add(doc)
+
+    for doc in (*expanded_docs, *ranked_candidates):
+        add(doc)
+    return list(merged.values())
+
+
+def _build_qa_evidence_pack(
+    *,
+    anchors: list[RetrievedDoc],
+    expanded_docs: list[RetrievedDoc],
+    ranked_candidates: list[RetrievedDoc],
+    pinned_chunk_ids: set[str],
+    requirement_ids: list[str],
+    settings: Any,
+) -> EvidencePack:
+    """Build the one closed evidence set shared by verifier and generator."""
+
+    return build_evidence_pack_from_sources(
+        anchors=anchors,
+        expanded_docs=expanded_docs,
+        verification_candidates=ranked_candidates,
+        pinned_chunk_ids=pinned_chunk_ids,
+        requirement_ids=requirement_ids,
+        max_docs=settings.qa_evidence_pack_max_docs,
+        max_chars=settings.qa_evidence_pack_max_chars,
+        document_char_cost=evidence_block_char_count,
+        separator_chars=len(EVIDENCE_BLOCK_SEPARATOR),
+    )
+
+
+def _verification_docs_from_pack(
+    pack: EvidencePack,
+    *,
+    max_docs: int,
+    requirement_ids: list[str],
+    pinned_chunk_ids: set[str],
+) -> list[RetrievedDoc]:
+    """Select verifier rows only from the exact materialized generation pack."""
+
+    packed_docs = list(pack.kept_docs)
+    packed_anchors = [
+        item.doc
+        for item in sorted(
+            (item for item in pack.kept if "anchor" in item.provenance),
+            key=lambda item: (
+                item.anchor_rank if item.anchor_rank is not None else math.inf,
+                item.ref.input_order,
+            ),
+        )
+    ]
+    priority_pool = _verification_candidates_with_context(
+        packed_anchors,
+        packed_docs,
+        [],
+    )
+    return list(
+        select_verification_docs(
+            priority_pool,
+            max_docs,
+            requirement_ids=requirement_ids,
+            pinned_chunk_ids=pinned_chunk_ids,
+        )
+    )
+
+
+def _evidence_pack_metrics(
+    pack: EvidencePack,
+    *,
+    pinned_chunk_ids: set[str],
+) -> dict[str, Any]:
+    drop_reason_counts: dict[str, int] = {}
+    for item in pack.dropped:
+        # Duplicate stage entries were normalized before the global budget and
+        # therefore are not generation-evidence drops.
+        if item.reason == DROP_DUPLICATE_CHUNK_ID:
+            continue
+        drop_reason_counts[item.reason] = drop_reason_counts.get(item.reason, 0) + 1
+    kept_ids = {item.ref.chunk_id for item in pack.kept if item.ref.chunk_id}
+    return {
+        "evidence_pack_input_count": pack.input_count,
+        "evidence_pack_kept_count": len(pack.kept),
+        "evidence_pack_dropped_count": max(0, pack.input_count - len(pack.kept)),
+        "evidence_pack_input_chars": pack.input_estimated_chars,
+        "evidence_pack_kept_chars": pack.estimated_chars,
+        "evidence_pack_overlap_removed_chars": pack.overlap_removed_chars,
+        "evidence_pack_drop_reason_counts": drop_reason_counts,
+        "evidence_pack_anchor_count": sum(
+            "anchor" in item.provenance for item in pack.kept
+        ),
+        "evidence_pack_pinned_count": len(kept_ids & pinned_chunk_ids),
+        "evidence_pack_over_budget": pack.over_budget_hard_constraints,
+    }
 
 
 def _retrieval_top_k(retry_count: int) -> int:
@@ -283,6 +547,39 @@ def _evidence_requirement_ids(state: Mapping[str, Any]) -> list[str]:
     ]
 
 
+def _verified_requirement_ids_by_chunk(
+    state: Mapping[str, Any],
+) -> dict[str, set[str]]:
+    matched_by_chunk: dict[str, set[str]] = {}
+    for assessment in list(state.get("evidence_requirement_assessments") or []):
+        if not isinstance(assessment, Mapping):
+            continue
+        if str(assessment.get("verdict") or "") != "supported":
+            continue
+        requirement_id = str(assessment.get("requirement_id") or "")
+        if not requirement_id:
+            continue
+        for chunk_id in list(assessment.get("evidence_chunk_ids") or []):
+            normalized = str(chunk_id or "")
+            if normalized:
+                matched_by_chunk.setdefault(normalized, set()).add(requirement_id)
+    return matched_by_chunk
+
+
+def _with_verified_requirement_ids(
+    doc: RetrievedDoc, requirement_ids: set[str]
+) -> RetrievedDoc:
+    copied = copy.deepcopy(doc)
+    if not requirement_ids:
+        return copied
+    retrieval = copied.setdefault("retrieval", {})
+    existing = retrieval.get("matched_requirement_ids")
+    existing_items = existing if isinstance(existing, list) else []
+    normalized = {str(item) for item in existing_items if item is not None}
+    retrieval["matched_requirement_ids"] = sorted(normalized | requirement_ids)
+    return copied
+
+
 def _carry_verified_docs(
     state: GraphState, current_docs: list[RetrievedDoc]
 ) -> tuple[list[RetrievedDoc], int]:
@@ -296,6 +593,7 @@ def _carry_verified_docs(
     if not verified_ids:
         return current_docs, 0
 
+    requirement_ids_by_chunk = _verified_requirement_ids_by_chunk(state)
     seen_ids = {str(doc.get("meta", {}).get("chunk_id") or "") for doc in current_docs}
     carryover: list[RetrievedDoc] = []
     for doc in state.get("verification_docs", []):
@@ -303,8 +601,23 @@ def _carry_verified_docs(
         if chunk_id not in verified_ids or chunk_id in seen_ids:
             continue
         seen_ids.add(chunk_id)
-        carryover.append(copy.deepcopy(doc))
-    return carryover + current_docs, len(carryover)
+        carryover.append(
+            _with_verified_requirement_ids(
+                doc, requirement_ids_by_chunk.get(chunk_id, set())
+            )
+        )
+    annotated_current = [
+        _with_verified_requirement_ids(
+            doc,
+            requirement_ids_by_chunk.get(
+                str(doc.get("meta", {}).get("chunk_id") or ""), set()
+            ),
+        )
+        if str(doc.get("meta", {}).get("chunk_id") or "") in verified_ids
+        else doc
+        for doc in current_docs
+    ]
+    return carryover + annotated_current, len(carryover)
 
 
 # 检索节点。
@@ -414,34 +727,67 @@ def rerank_node(state: GraphState) -> dict:
             device=target_device,
         )
     reranked_docs = ranked_candidates[: settings.qa_rerank_top_n]
-    pinned_ids = set(state.get("evidence_verified_chunk_ids", []))
-    verification_candidates = sorted(
-        ranked_candidates,
-        key=lambda doc: (
-            str(doc.get("meta", {}).get("chunk_id") or "") not in pinned_ids
-        ),
+    # 上下文扩展不改变一阶段支持度判断；它只补齐 verifier 与生成所见闭集。
+    expanded_docs = _expand_with_neighbor_chunks(doc_id, reranked_docs, state)
+    parent_context_expanded_count = sum(
+        doc.get("retrieval", {}).get("context_expansion") == "section"
+        for doc in expanded_docs
     )
-    verification_docs = select_verification_docs(
-        verification_candidates,
-        settings.qa_evidence_verify_max_docs,
+    neighbor_context_expanded_count = sum(
+        doc.get("retrieval", {}).get("context_expansion") == "neighbor"
+        for doc in expanded_docs
+    )
+    pinned_ids = set(state.get("evidence_verified_chunk_ids", []))
+    evidence_pack = _build_qa_evidence_pack(
+        anchors=reranked_docs,
+        expanded_docs=expanded_docs,
+        ranked_candidates=ranked_candidates,
+        pinned_chunk_ids=pinned_ids,
         requirement_ids=requirement_ids,
+        settings=settings,
+    )
+    packed_docs = list(evidence_pack.kept_docs)
+    pack_metrics = _evidence_pack_metrics(
+        evidence_pack,
+        pinned_chunk_ids=pinned_ids,
+    )
+    verification_docs = (
+        []
+        if evidence_pack.over_budget_hard_constraints
+        else _verification_docs_from_pack(
+            evidence_pack,
+            max_docs=settings.qa_evidence_verify_max_docs,
+            requirement_ids=requirement_ids,
+            pinned_chunk_ids=pinned_ids,
+        )
     )
     support = assess_retrieval_support(reranked_docs, settings)
+    retrieval_abstained = (
+        not support.supported or evidence_pack.over_budget_hard_constraints
+    )
+    retrieval_abstain_reason = (
+        "evidence_pack_hard_budget_exceeded"
+        if evidence_pack.over_budget_hard_constraints
+        else support.reason
+    )
     decision_state = {
         **state,
         "retrieval_first_stage_supported": support.supported,
         "retrieval_confidence": support.score,
-        "retrieval_abstained": not support.supported,
-        "retrieval_abstain_reason": support.reason,
+        "retrieval_abstained": retrieval_abstained,
+        "retrieval_abstain_reason": retrieval_abstain_reason,
+        **pack_metrics,
     }
-    verification_pending = should_verify_evidence(decision_state, settings)
+    verification_pending = bool(
+        not evidence_pack.over_budget_hard_constraints
+        and should_verify_evidence(decision_state, settings)
+    )
     retry_pending = bool(
         not support.supported
         and not verification_pending
         and _can_retry_retrieval(decision_state)
     )
-    # 下游沿用重排结果字段名，实际内容已包含相邻上下文扩展。
-    expanded_docs = _expand_with_neighbor_chunks(doc_id, reranked_docs, state)
+    # 下游沿用重排结果字段名，实际内容已包含有界结构/邻块上下文。
     log_event(
         "qa",
         "qa_rerank",
@@ -451,26 +797,32 @@ def rerank_node(state: GraphState) -> dict:
         reranked_count=len(reranked_docs),
         verification_candidate_count=len(verification_docs),
         expanded_count=len(expanded_docs),
+        parent_context_expanded_count=parent_context_expanded_count,
+        neighbor_context_expanded_count=neighbor_context_expanded_count,
         device=target_device,
         rerank_skipped_reason=rerank_skipped_reason,
         retrieval_confidence=round(support.score, 6),
-        retrieval_abstained=not support.supported,
-        retrieval_abstain_reason=support.reason,
+        retrieval_abstained=retrieval_abstained,
+        retrieval_abstain_reason=retrieval_abstain_reason,
         evidence_verification_pending=verification_pending,
         adaptive_retrieval_retry_pending=retry_pending,
         retrieval_round=state.get("retrieval_round", 0),
         requirement_count=len(requirement_ids),
+        **pack_metrics,
     )
     result = {
-        "reranked_docs": expanded_docs,
+        "reranked_docs": packed_docs,
         "verification_docs": verification_docs,
         "retrieval_first_stage_supported": support.supported,
         "retrieval_confidence": support.score,
-        "retrieval_abstained": not support.supported,
-        "retrieval_abstain_reason": support.reason,
+        "retrieval_abstained": retrieval_abstained,
+        "retrieval_abstain_reason": retrieval_abstain_reason,
         "retrieval_signals": support.signals,
         "evidence_verification_pending": verification_pending,
         "adaptive_retrieval_retry_pending": retry_pending,
+        "parent_context_expanded_count": parent_context_expanded_count,
+        "neighbor_context_expanded_count": neighbor_context_expanded_count,
+        **pack_metrics,
     }
     # 补检索终轮若因置信度过低不再进入 verifier，不能把上一轮逐需求结论
     # 冒充为当前候选集的终态结论；缺失 ID 仍保留用于解释拒答与追踪。
@@ -490,18 +842,6 @@ def rerank_node(state: GraphState) -> dict:
 # 对精确事实问题执行结构化证据充分性校验。
 def evidence_verify_node(state: GraphState) -> dict:
     output = EvidenceVerifierAgent.verify(state)
-    if output.get("evidence_supported"):
-        verified_ids = set(output.get("evidence_verified_chunk_ids", []))
-        generation_docs = list(state.get("reranked_docs", []))
-        generation_ids = {
-            str(doc.get("meta", {}).get("chunk_id") or "") for doc in generation_docs
-        }
-        for doc in state.get("verification_docs", []):
-            chunk_id = str(doc.get("meta", {}).get("chunk_id") or "")
-            if chunk_id in verified_ids and chunk_id not in generation_ids:
-                generation_docs.append(copy.deepcopy(doc))
-                generation_ids.add(chunk_id)
-        output["reranked_docs"] = generation_docs
     retry_state: dict[str, Any] = dict(state)
     retry_state.update(output)
     output["adaptive_retrieval_retry_pending"] = bool(
@@ -515,7 +855,7 @@ def evidence_verify_node(state: GraphState) -> dict:
         evidence_verified_chunk_count=len(
             output.get("evidence_verified_chunk_ids", [])
         ),
-        generation_evidence_count=len(output.get("reranked_docs", [])),
+        generation_evidence_count=len(state.get("reranked_docs", [])),
         evidence_verification_reason=output.get("evidence_verification_reason", ""),
         evidence_verifier_error=output.get("evidence_verifier_error", ""),
     )
@@ -546,6 +886,10 @@ def abstain_node(state: GraphState) -> dict:
 
 # 根据检索置信度选择生成或确定性拒答。
 def retrieval_check(state: GraphState) -> str:
+    if state.get("evidence_pack_over_budget", False) or (
+        state.get("retrieval_abstain_reason") == "evidence_pack_hard_budget_exceeded"
+    ):
+        return "abstain_node"
     if should_verify_evidence(state, get_settings()):
         return "evidence_verify_node"
     if state.get("retrieval_abstained", False) and _can_retry_retrieval(state):
@@ -567,6 +911,9 @@ def evidence_check(state: GraphState) -> str:
 def _can_retry_retrieval(state: Mapping[str, Any]) -> bool:
     settings = get_settings()
     if not settings.qa_adaptive_retrieval_enabled:
+        return False
+    # Retrying retrieval cannot make configured hard anchor/pinned budgets larger.
+    if state.get("retrieval_abstain_reason") == "evidence_pack_hard_budget_exceeded":
         return False
     retry_count = max(0, int(state.get("retrieval_retry_count", 0) or 0))
     if retry_count >= settings.qa_adaptive_retrieval_max_retries:
@@ -618,6 +965,36 @@ def retrieval_retry_node(state: GraphState) -> dict:
     }
 
 
+def _generation_evidence(doc: RetrievedDoc) -> Evidence:
+    meta = doc.get("meta", {})
+    page = meta.get("page", 0)
+    evidence: Evidence = {
+        "chunk_id": str(meta.get("chunk_id") or ""),
+        "source_type": str(meta.get("source_type") or "document"),
+        "knowledge_id": str(meta.get("knowledge_id") or ""),
+        "chunk_index": cast(int, meta.get("chunk_index", -1)),
+        "source": str(meta.get("source") or ""),
+        "page": cast(int, page),
+        "page_start": cast(int, meta.get("page_start", page)),
+        "page_end": cast(int, meta.get("page_end", page)),
+        "rerank_score": doc.get("retrieval", {}).get("rerank_score"),
+        "rewrite_query": doc.get("retrieval", {}).get("rewrite_query"),
+        "text_preview": doc["text"][:100],
+        "retrieval": safe_retrieval_metadata(doc.get("retrieval")),
+    }
+    if meta.get("parent_chunk_id"):
+        evidence["parent_chunk_id"] = str(meta["parent_chunk_id"])
+    if meta.get("section_title"):
+        evidence["section_title"] = str(meta["section_title"])
+    if meta.get("section_path"):
+        evidence["section_path"] = str(meta["section_path"])
+    if meta.get("section_level") is not None:
+        evidence["section_level"] = cast(int, meta["section_level"])
+    if meta.get("child_index_in_parent") is not None:
+        evidence["child_index_in_parent"] = cast(int, meta["child_index_in_parent"])
+    return evidence
+
+
 # 生成节点。
 def generate_node(state: GraphState) -> dict:
     query = state.get("query", "")
@@ -638,7 +1015,7 @@ def generate_node(state: GraphState) -> dict:
         correction_note = CITATION_CORRECTION_PROMPT_TEMPLATE.format(critique=critique)
         if messages_payload and isinstance(messages_payload[0], SystemMessage):
             messages_payload[0] = SystemMessage(
-                content=messages_payload[0].content + correction_note
+                content=cast(str, messages_payload[0].content) + correction_note
             )
         else:
             messages_payload.insert(0, SystemMessage(content=correction_note))
@@ -646,27 +1023,7 @@ def generate_node(state: GraphState) -> dict:
     response_message = llm.invoke(messages_payload)
 
     # 证据保留页跨度，引用校验仍按页级格式。
-    evidence: list[Evidence] = [
-        Evidence(
-            chunk_id=doc.get("meta", {}).get("chunk_id", ""),
-            source_type=doc.get("meta", {}).get("source_type", "document"),
-            knowledge_id=doc.get("meta", {}).get("knowledge_id", ""),
-            chunk_index=doc.get("meta", {}).get("chunk_index", -1),
-            source=doc.get("meta", {}).get("source", ""),
-            page=doc.get("meta", {}).get("page", 0),
-            page_start=doc.get("meta", {}).get(
-                "page_start", doc.get("meta", {}).get("page", 0)
-            ),
-            page_end=doc.get("meta", {}).get(
-                "page_end", doc.get("meta", {}).get("page", 0)
-            ),
-            rerank_score=doc.get("retrieval", {}).get("rerank_score"),
-            rewrite_query=doc.get("retrieval", {}).get("rewrite_query"),
-            text_preview=doc["text"][:100],
-            retrieval=safe_retrieval_metadata(doc.get("retrieval")),
-        )
-        for doc in final_docs
-    ]
+    evidence = [_generation_evidence(doc) for doc in final_docs]
 
     return {
         "messages": [response_message],
@@ -683,7 +1040,9 @@ def citation_node(state: GraphState) -> dict:
     iteration_count = state.get("iteration_count", 0)
     max_iteration_count = state.get("max_iteration_count", 2)
 
-    check_res = CitationValidatorAgent.validate_citations(answer, final_docs)
+    check_res = CitationValidatorAgent.validate_citations(
+        answer, cast(list[dict[str, Any]], final_docs)
+    )
     log_event(
         "qa",
         "qa_citation_check",

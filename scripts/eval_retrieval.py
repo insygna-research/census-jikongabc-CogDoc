@@ -25,6 +25,7 @@ from cogdoc.tools.eval.retrieval_metrics import (  # noqa: E402
     infer_retrieval_layer,
     metric_direction,
     percentile,
+    requirement_coverage_rate,
 )
 
 
@@ -39,7 +40,18 @@ DEFAULT_EVAL_SET = _project_path(_settings.eval_set_path)
 # 真实评测集不入库，干净检出时回退到示例评测集。
 EXAMPLE_EVAL_SET = _project_path(_settings.eval_example_set_path)
 DEFAULT_K_VALUES = [1, 3, 5, 9]
-DIAGNOSTIC_METRICS = {"adaptive_retry_trigger_rate", "retrieval_query_count"}
+DIAGNOSTIC_METRICS = {
+    "adaptive_retry_trigger_rate",
+    "retrieval_query_count",
+    "parent_context_trigger_rate",
+    "parent_context_expanded_count",
+    "neighbor_context_expanded_count",
+}
+DIAGNOSTIC_METRIC_PREFIXES = ("evidence_pack_",)
+
+
+def _is_diagnostic_metric(metric: str) -> bool:
+    return metric in DIAGNOSTIC_METRICS or metric.startswith(DIAGNOSTIC_METRIC_PREFIXES)
 
 
 # 解析默认评测集。
@@ -80,7 +92,15 @@ def retrieve_result(
     rewritten_queries: List[str] | None = None,
     evidence_requirements: List[dict] | None = None,
 ) -> dict:
-    from cogdoc.graph.subgraphs.qa import RetrieverFactory
+    from cogdoc.graph.subgraphs.qa import (
+        RetrieverFactory,
+        _build_qa_evidence_pack,
+        _carry_verified_docs,
+        _evidence_pack_metrics,
+        _expand_with_neighbor_chunks,
+        _verification_candidates_with_context,
+        _verification_docs_from_pack,
+    )
     from cogdoc.service.kb_readers import kb_read_lease
     from cogdoc.service.retrieval_pipeline import (
         build_retrieval_queries,
@@ -111,6 +131,22 @@ def retrieve_result(
     total_channel_counts: Dict[str, int] = {}
     retrieval_feedback_error = ""
     retrieval_carryover_count = 0
+    generation_docs: List[RetrievedDoc] = []
+    verification_docs: List[RetrievedDoc] = []
+    pre_pack_docs: List[RetrievedDoc] = []
+    packed_docs: List[RetrievedDoc] = []
+    pack_metrics: dict = {
+        "evidence_pack_input_count": 0,
+        "evidence_pack_kept_count": 0,
+        "evidence_pack_dropped_count": 0,
+        "evidence_pack_input_chars": 0,
+        "evidence_pack_kept_chars": 0,
+        "evidence_pack_overlap_removed_chars": 0,
+        "evidence_pack_drop_reason_counts": {},
+        "evidence_pack_anchor_count": 0,
+        "evidence_pack_pinned_count": 0,
+        "evidence_pack_over_budget": False,
+    }
 
     while True:
         round_top_k = top_k
@@ -132,8 +168,9 @@ def retrieve_result(
             max_queries=settings.qa_retrieval_max_queries,
         )
         with kb_read_lease(doc_id):
+            engine = RetrieverFactory.get_engine(doc_id)
             pipeline_result = retrieve_candidate_pool(
-                RetrieverFactory.get_engine(doc_id),
+                engine,
                 runtime.derived_knowledge_retriever,
                 runtime.retrieval_feedback_store,
                 kb_id=doc_id,
@@ -150,18 +187,17 @@ def retrieve_result(
         if pipeline_result.feedback_error and not retrieval_feedback_error:
             retrieval_feedback_error = pipeline_result.feedback_error
         current_docs = pipeline_result.docs
-        seen_chunk_ids = {
-            str(doc.get("meta", {}).get("chunk_id") or "") for doc in current_docs
-        }
-        carryover_docs: List[RetrievedDoc] = []
-        if retry_count:
-            for chunk_id, verified_doc in verified_docs.items():
-                if chunk_id in seen_chunk_ids:
-                    continue
-                seen_chunk_ids.add(chunk_id)
-                carryover_docs.append(copy.deepcopy(verified_doc))
-        retrieval_carryover_count = len(carryover_docs)
-        ranked_docs = carryover_docs + current_docs
+        ranked_docs, retrieval_carryover_count = _carry_verified_docs(
+            {
+                "retrieval_retry_count": retry_count,
+                "evidence_verified_chunk_ids": list(pinned_ids),
+                "evidence_requirement_assessments": list(
+                    verification.get("evidence_requirement_assessments") or []
+                ),
+                "verification_docs": list(verified_docs.values()),
+            },
+            current_docs,
+        )
         if rerank and ranked_docs:
             from cogdoc.tools.reranker import BGEReranker
 
@@ -186,8 +222,42 @@ def retrieve_result(
         # 完整排名用于 recall@n；放行判断严格复用线上 generation top-n 预算。
         decision_docs = ranked_docs[: max(0, int(settings.qa_rerank_top_n))]
         support = assess_retrieval_support(decision_docs, settings)
+        generation_docs = decision_docs
+        if decision_docs and hasattr(engine, "load_source_chunks"):
+            # Hydrate before verifier exactly as the online QA graph does.  Rank
+            # metrics still use the unexpanded anchors above.
+            generation_docs = _expand_with_neighbor_chunks(doc_id, decision_docs)
+        pre_pack_docs = _verification_candidates_with_context(
+            decision_docs,
+            generation_docs,
+            ranked_docs,
+        )
+        evidence_pack = _build_qa_evidence_pack(
+            anchors=decision_docs,
+            expanded_docs=generation_docs,
+            ranked_candidates=ranked_docs,
+            pinned_chunk_ids=pinned_ids,
+            requirement_ids=requirement_ids,
+            settings=settings,
+        )
+        packed_docs = list(evidence_pack.kept_docs)
+        generation_docs = packed_docs
+        pack_metrics = _evidence_pack_metrics(
+            evidence_pack,
+            pinned_chunk_ids=pinned_ids,
+        )
         if initial_supported is None:
             initial_supported = support.supported
+
+        # Anchor/pinned evidence is a hard constraint.  When it alone exceeds
+        # the global pack budget, retrying cannot repair the configured limit;
+        # fail closed before invoking the model verifier.
+        if evidence_pack.over_budget_hard_constraints:
+            verification_required = False
+            verification = {}
+            verification_docs = []
+            prioritized_requirement_ids = []
+            break
 
         if verify_evidence:
             # 每轮结论只描述当前候选集；定向重试 ID 和 pinned chunk 单独保留。
@@ -195,20 +265,14 @@ def retrieve_result(
             verification = {}
             from cogdoc.agents.evidence_verifier import (
                 EvidenceVerifierAgent,
-                select_verification_docs,
                 should_verify_evidence,
             )
 
-            verification_candidates = sorted(
-                ranked_docs,
-                key=lambda doc: (
-                    str(doc.get("meta", {}).get("chunk_id") or "") not in pinned_ids
-                ),
-            )
-            verification_docs = select_verification_docs(
-                verification_candidates,
-                settings.qa_evidence_verify_max_docs,
+            verification_docs = _verification_docs_from_pack(
+                evidence_pack,
+                max_docs=settings.qa_evidence_verify_max_docs,
                 requirement_ids=requirement_ids,
+                pinned_chunk_ids=pinned_ids,
             )
             verify_state = {
                 "query": query,
@@ -276,16 +340,32 @@ def retrieve_result(
             break
         retry_count += 1
 
-    supported = (
-        bool(verification.get("evidence_supported"))
-        if verification_required
-        else support.supported
-    )
+    pack_over_budget = bool(pack_metrics["evidence_pack_over_budget"])
+    supported = False
+    if not pack_over_budget:
+        supported = (
+            bool(verification.get("evidence_supported"))
+            if verification_required
+            else support.supported
+        )
     missing_requirement_ids = list(
         verification.get("missing_evidence_requirement_ids") or []
     )
     if retry_count > 0 and not supported and not missing_requirement_ids:
         missing_requirement_ids = list(prioritized_requirement_ids)
+    # Hydration diagnostics describe the final pre-pack candidate set even when
+    # the request later abstains and generation_context_items is intentionally empty.
+    parent_context_expanded_count = sum(
+        doc.get("retrieval", {}).get("context_expansion") == "section"
+        for doc in pre_pack_docs
+    )
+    neighbor_context_expanded_count = sum(
+        doc.get("retrieval", {}).get("context_expansion") == "neighbor"
+        for doc in pre_pack_docs
+    )
+    if not supported:
+        # Online abstention clears reranked_docs and never enters generation.
+        generation_docs = []
     result = {
         "sources": [
             str(doc.get("meta", {}).get("source") or "") for doc in ranked_docs
@@ -297,15 +377,49 @@ def retrieve_result(
             }
             for doc in ranked_docs
         ],
+        "generation_context_items": [
+            {
+                "chunk_id": str(doc.get("meta", {}).get("chunk_id") or ""),
+                "parent_chunk_id": str(
+                    doc.get("meta", {}).get("parent_chunk_id") or ""
+                ),
+                "source": str(doc.get("meta", {}).get("source") or ""),
+                "section_path": str(doc.get("meta", {}).get("section_path") or ""),
+                "context_expansion": str(
+                    doc.get("retrieval", {}).get("context_expansion") or "anchor"
+                ),
+            }
+            for doc in generation_docs
+        ],
+        "evidence_pack_input_items": [
+            {
+                "chunk_id": str(doc.get("meta", {}).get("chunk_id") or ""),
+                "source": str(doc.get("meta", {}).get("source") or ""),
+            }
+            for doc in pre_pack_docs
+        ],
+        "evidence_pack_context_items": [
+            {
+                "chunk_id": str(doc.get("meta", {}).get("chunk_id") or ""),
+                "source": str(doc.get("meta", {}).get("source") or ""),
+            }
+            for doc in packed_docs
+        ],
         "supported": supported,
         "first_stage_supported": bool(initial_supported),
         "confidence": support.score,
-        "reason": str(verification.get("retrieval_abstain_reason") or support.reason),
+        "reason": (
+            "evidence_pack_hard_budget_exceeded"
+            if pack_over_budget
+            else str(verification.get("retrieval_abstain_reason") or support.reason)
+        ),
         "signals": support.signals,
         "evidence_verification_required": verification_required,
         "evidence_supported": supported,
         "evidence_verification_reason": str(
-            verification.get("evidence_verification_reason")
+            "evidence_pack_hard_budget_exceeded"
+            if pack_over_budget
+            else verification.get("evidence_verification_reason")
             or ("not_required" if verify_evidence else "not_requested")
         ),
         "evidence_verified_chunk_ids": list(
@@ -325,7 +439,10 @@ def retrieve_result(
         "retrieval_ranking_count": total_ranking_count,
         "retrieval_channel_counts": total_channel_counts,
         "retrieval_carryover_count": retrieval_carryover_count,
+        "parent_context_expanded_count": parent_context_expanded_count,
+        "neighbor_context_expanded_count": neighbor_context_expanded_count,
         "retrieval_feedback_error": retrieval_feedback_error,
+        **pack_metrics,
     }
     return result
 
@@ -407,6 +524,49 @@ def run_eval(
         metrics["retrieval_query_count"] = float(
             retrieval_result.get("retrieval_query_count", 0) or 0
         )
+        parent_context_count = int(
+            retrieval_result.get("parent_context_expanded_count", 0) or 0
+        )
+        metrics["parent_context_trigger_rate"] = float(parent_context_count > 0)
+        metrics["parent_context_expanded_count"] = float(parent_context_count)
+        metrics["neighbor_context_expanded_count"] = float(
+            retrieval_result.get("neighbor_context_expanded_count", 0) or 0
+        )
+        for metric_name in (
+            "evidence_pack_input_count",
+            "evidence_pack_kept_count",
+            "evidence_pack_dropped_count",
+            "evidence_pack_input_chars",
+            "evidence_pack_kept_chars",
+            "evidence_pack_overlap_removed_chars",
+            "evidence_pack_anchor_count",
+            "evidence_pack_pinned_count",
+        ):
+            metrics[metric_name] = float(retrieval_result.get(metric_name, 0) or 0)
+        metrics["evidence_pack_over_budget"] = float(
+            bool(retrieval_result.get("evidence_pack_over_budget", False))
+        )
+        pack_requirement_coverage_pre: float | None = None
+        pack_requirement_coverage_post: float | None = None
+        if item.get("gold_requirements"):
+            pack_requirement_coverage_pre = requirement_coverage_rate(
+                retrieval_result.get("evidence_pack_input_items", []),
+                item["gold_requirements"],
+            )
+            pack_requirement_coverage_post = requirement_coverage_rate(
+                retrieval_result.get("evidence_pack_context_items", []),
+                item["gold_requirements"],
+            )
+            metrics["evidence_pack_requirement_coverage_pre"] = (
+                pack_requirement_coverage_pre
+            )
+            metrics["evidence_pack_requirement_coverage_post"] = (
+                pack_requirement_coverage_post
+            )
+            metrics["generation_requirement_coverage"] = requirement_coverage_rate(
+                retrieval_result.get("generation_context_items", []),
+                item["gold_requirements"],
+            )
         if item["expected_sources"]:
             metrics["answerable_acceptance_rate"] = (
                 1.0 if retrieval_result["supported"] else 0.0
@@ -471,6 +631,49 @@ def run_eval(
                 "retrieval_carryover_count": retrieval_result.get(
                     "retrieval_carryover_count", 0
                 ),
+                "generation_context_items": retrieval_result.get(
+                    "generation_context_items", []
+                ),
+                "evidence_pack_input_items": retrieval_result.get(
+                    "evidence_pack_input_items", []
+                ),
+                "evidence_pack_context_items": retrieval_result.get(
+                    "evidence_pack_context_items", []
+                ),
+                "evidence_pack_input_count": int(
+                    retrieval_result.get("evidence_pack_input_count", 0) or 0
+                ),
+                "evidence_pack_kept_count": int(
+                    retrieval_result.get("evidence_pack_kept_count", 0) or 0
+                ),
+                "evidence_pack_dropped_count": int(
+                    retrieval_result.get("evidence_pack_dropped_count", 0) or 0
+                ),
+                "evidence_pack_input_chars": int(
+                    retrieval_result.get("evidence_pack_input_chars", 0) or 0
+                ),
+                "evidence_pack_kept_chars": int(
+                    retrieval_result.get("evidence_pack_kept_chars", 0) or 0
+                ),
+                "evidence_pack_overlap_removed_chars": int(
+                    retrieval_result.get("evidence_pack_overlap_removed_chars", 0) or 0
+                ),
+                "evidence_pack_drop_reason_counts": dict(
+                    retrieval_result.get("evidence_pack_drop_reason_counts", {}) or {}
+                ),
+                "evidence_pack_over_budget": bool(
+                    retrieval_result.get("evidence_pack_over_budget", False)
+                ),
+                "evidence_pack_requirement_coverage_pre": (
+                    pack_requirement_coverage_pre
+                ),
+                "evidence_pack_requirement_coverage_post": (
+                    pack_requirement_coverage_post
+                ),
+                "parent_context_expanded_count": parent_context_count,
+                "neighbor_context_expanded_count": retrieval_result.get(
+                    "neighbor_context_expanded_count", 0
+                ),
                 "retrieval_feedback_error": retrieval_result.get(
                     "retrieval_feedback_error", ""
                 ),
@@ -505,7 +708,8 @@ def run_eval(
         "baseline_gated_metrics": sorted(
             metric
             for metric in aggregate_metrics
-            if metric_direction(metric) == "higher" and metric not in DIAGNOSTIC_METRICS
+            if metric_direction(metric) == "higher"
+            and not _is_diagnostic_metric(metric)
         ),
         "metric_directions": {
             metric: metric_direction(metric) for metric in aggregate_metrics
@@ -575,6 +779,18 @@ def print_report(report: dict) -> None:
                 f"carryover={row.get('retrieval_carryover_count', 0)} "
                 f"rescued={row.get('adaptive_retrieval_rescued', False)} "
                 f"channels={row.get('retrieval_channel_counts', {})}"
+            )
+        if row.get("evidence_pack_input_count") or row.get("evidence_pack_over_budget"):
+            print(
+                "        evidence_pack="
+                f"docs={row.get('evidence_pack_input_count', 0)}"
+                f"->{row.get('evidence_pack_kept_count', 0)} "
+                f"chars={row.get('evidence_pack_input_chars', 0)}"
+                f"->{row.get('evidence_pack_kept_chars', 0)} "
+                f"overlap_removed="
+                f"{row.get('evidence_pack_overlap_removed_chars', 0)} "
+                f"drops={row.get('evidence_pack_drop_reason_counts', {})} "
+                f"over_budget={row.get('evidence_pack_over_budget', False)}"
             )
         if cfg.get("verify_evidence"):
             print(

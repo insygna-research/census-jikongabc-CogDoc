@@ -170,3 +170,28 @@ def test_retrieve_hit_preserves_derived_knowledge_metadata():
     assert hit.source_type == "derived_knowledge"
     assert hit.knowledge_id == "K1"
     assert hit.retrieval["matched_terms"] == ["问题"]
+
+
+# 调试检索公开 Parent–Child 结构，且 child chunk_id 仍是命中身份。
+def test_retrieve_hit_preserves_parent_child_metadata():
+    hit = agent._retrieve_hit(
+        1,
+        {
+            "text": "训练流程",
+            "meta": {
+                "chunk_id": "child:2",
+                "parent_chunk_id": "section:1",
+                "section_title": "Training",
+                "section_path": "Methods > Training",
+                "section_level": 2,
+                "child_index_in_parent": 1,
+                "source": "paper.pdf",
+            },
+        },
+    )
+
+    assert hit.chunk_id == "child:2"
+    assert hit.parent_chunk_id == "section:1"
+    assert hit.section_path == "Methods > Training"
+    assert hit.section_level == 2
+    assert hit.child_index_in_parent == 1

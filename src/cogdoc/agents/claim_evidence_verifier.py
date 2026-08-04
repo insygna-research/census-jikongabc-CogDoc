@@ -271,19 +271,7 @@ def _doc_meta(doc: Mapping[str, Any]) -> Mapping[str, Any]:
     return meta if isinstance(meta, Mapping) else {}
 
 
-def documents_for_state(state: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    task_type = str(state.get("task_type") or "qa")
-    if task_type == "summary":
-        candidates = list(state.get("summary_docs") or [])
-    elif task_type == "compare":
-        candidates = []
-        docs_by_source = state.get("compare_docs_by_source") or {}
-        if isinstance(docs_by_source, Mapping):
-            for docs in docs_by_source.values():
-                candidates.extend(list(docs or []))
-    else:
-        candidates = list(state.get("reranked_docs") or [])
-
+def _unique_documents(candidates: Sequence[Any]) -> list[Mapping[str, Any]]:
     unique: dict[str, Mapping[str, Any]] = {}
     for index, doc in enumerate(candidates):
         if not isinstance(doc, Mapping):
@@ -292,6 +280,147 @@ def documents_for_state(state: Mapping[str, Any]) -> list[Mapping[str, Any]]:
         chunk_id = str(meta.get("chunk_id") or f"__missing_{index}")
         unique.setdefault(chunk_id, doc)
     return list(unique.values())
+
+
+def _evidence_chunk_ids(evidence: Any) -> set[str]:
+    if not isinstance(evidence, Sequence) or isinstance(
+        evidence, (str, bytes, bytearray)
+    ):
+        return set()
+    return {
+        chunk_id
+        for item in evidence
+        if isinstance(item, Mapping) and (chunk_id := str(item.get("chunk_id") or ""))
+    }
+
+
+def _summary_generation_units(state: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    results = state.get("summary_section_results")
+    if not isinstance(results, Sequence) or isinstance(
+        results, (str, bytes, bytearray)
+    ):
+        return []
+    return [item for item in results if isinstance(item, Mapping)]
+
+
+def _compare_generation_units(state: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    profiles = state.get("document_profiles")
+    if not isinstance(profiles, Sequence) or isinstance(
+        profiles, (str, bytes, bytearray)
+    ):
+        return []
+    units: list[Mapping[str, Any]] = []
+    for profile in profiles:
+        if not isinstance(profile, Mapping):
+            continue
+        cells = profile.get("cells")
+        if not isinstance(cells, Sequence) or isinstance(
+            cells, (str, bytes, bytearray)
+        ):
+            continue
+        units.extend(cell for cell in cells if isinstance(cell, Mapping))
+    return units
+
+
+def _documents_with_chunk_ids(
+    docs: Sequence[Mapping[str, Any]], chunk_ids: set[str]
+) -> list[Mapping[str, Any]]:
+    return [doc for doc in docs if _doc_chunk_id(doc) in chunk_ids]
+
+
+def _uniquely_cited_documents(
+    text: str, docs: Sequence[Mapping[str, Any]]
+) -> list[Mapping[str, Any]]:
+    """Resolve legacy evidence only when a citation names exactly one child."""
+
+    selected: list[Mapping[str, Any]] = []
+    selected_ids: set[str] = set()
+    for ref in _citation_refs(text):
+        matches = {
+            _doc_chunk_id(doc): doc
+            for doc in docs
+            if _doc_chunk_id(doc) and ref in _doc_ref_keys(doc)
+        }
+        # A page citation is not a child identity. Ambiguous same-page chunks must
+        # fail closed instead of all becoming evidence for a generator that may
+        # have seen only one of them.
+        if len(matches) != 1:
+            continue
+        chunk_id, doc = next(iter(matches.items()))
+        if chunk_id not in selected_ids:
+            selected_ids.add(chunk_id)
+            selected.append(doc)
+    return selected
+
+
+def _generation_documents(
+    state: Mapping[str, Any],
+    candidates: Sequence[Mapping[str, Any]],
+    units: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Return the exact child-document closed set used by Summary/Compare."""
+
+    exact_ids: set[str] = set()
+    legacy_units: list[Mapping[str, Any]] = []
+    for unit in units:
+        if "evidence" in unit:
+            exact_ids.update(_evidence_chunk_ids(unit.get("evidence")))
+        else:
+            legacy_units.append(unit)
+
+    selected = _documents_with_chunk_ids(candidates, exact_ids)
+    selected_ids = {_doc_chunk_id(doc) for doc in selected}
+    if not legacy_units and units:
+        return selected
+
+    # Older persisted states may not have per-section/per-cell evidence. Prefer
+    # their explicit aggregate evidence IDs, but never turn a source+page citation
+    # into every chunk on that page. Without an aggregate record, compatibility is
+    # allowed only when the citation maps to one unambiguous child.
+    if "evidence" in state:
+        legacy_pool = _documents_with_chunk_ids(
+            candidates, _evidence_chunk_ids(state.get("evidence"))
+        )
+    else:
+        legacy_pool = list(candidates)
+
+    fallback_units: Sequence[Mapping[str, Any]] = legacy_units
+    if not units:
+        fallback_units = [{"content": str(state.get("answer") or "")}]
+    for unit in fallback_units:
+        for doc in _uniquely_cited_documents(
+            str(unit.get("content") or ""), legacy_pool
+        ):
+            chunk_id = _doc_chunk_id(doc)
+            if chunk_id not in selected_ids:
+                selected_ids.add(chunk_id)
+                selected.append(doc)
+    return selected
+
+
+def documents_for_state(state: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Resolve documents the final generator actually had in its evidence set."""
+
+    task_type = str(state.get("task_type") or "qa")
+    if task_type == "summary":
+        candidates = _unique_documents(list(state.get("summary_docs") or []))
+        return _generation_documents(
+            state, candidates, _summary_generation_units(state)
+        )
+    if task_type == "compare":
+        raw_candidates: list[Any] = []
+        docs_by_source = state.get("compare_docs_by_source") or {}
+        if isinstance(docs_by_source, Mapping):
+            for docs in docs_by_source.values():
+                if isinstance(docs, Sequence) and not isinstance(
+                    docs, (str, bytes, bytearray)
+                ):
+                    raw_candidates.extend(docs)
+        candidates = _unique_documents(raw_candidates)
+        return _generation_documents(
+            state, candidates, _compare_generation_units(state)
+        )
+    return _unique_documents(list(state.get("reranked_docs") or []))
 
 
 def _doc_ref_keys(doc: Mapping[str, Any]) -> set[str]:

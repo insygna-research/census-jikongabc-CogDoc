@@ -22,6 +22,8 @@
 
 - **混合检索、query-level 融合** — 每条原问题、改写查询和需求专用查询都会检索 PDF 向量+BM25 混合 channel 与已审核派生知识 channel；产生的 query/channel 排名等权进入确定性 RRF，requirement quota 防止后出现的聚焦查询在重排前被饿死。分词与 BM25 均为 native——中文走 `jieba-rs`，英文做小写化 + Snowball 词干化 + 停用词过滤。
 
+- **结构感知 Parent–Child 上下文** — 保守识别 Markdown、编号及中英文常见标题并形成章节父块。召回、重排和引用仍精确到 child chunk，命中后只从同章节补充有界连续 sibling 窗口；旧索引或无结构文档继续回退现有的前后各一块逻辑。
+
 - **内容寻址的增量缓存** — 逐文件 SHA-256 manifest 加带版本的 chunk 身份契约：未变化的文件直接复用已建索引，只有 PDF 内容或切块方案真正变化时才增量重建。
 
 - **多知识库 · 多对话 · 分层记忆** — 完整展示历史持久化用于回放；通过引用校验的近期回合组成有界短期记忆，被淘汰回合转为会话级摘要和决策，只有带明确记忆信号的稳定事实才进入跨会话长期记忆，错误答案不会进入 Agent 记忆。
@@ -139,7 +141,7 @@ Streamlit 前端只是 FastAPI 服务上的瘦客户端——你也可以直接�
 | `GET /v1/index-jobs/{job_id}` | 轮询入库进度 |
 | `POST /v1/chat`、`POST /v1/chat/stream` | 提问（JSON 或 SSE 流式） |
 | `POST /v1/summary`、`POST /v1/compare` | 显式执行 Summary / Compare，避免路由歧义 |
-| `POST /v1/retrieve` | 返回结构化检索命中，包含 chunk/source/page 预览 |
+| `POST /v1/retrieve` | 返回 child 级检索命中，包含 parent/section 身份、source/page 预览和排序元数据 |
 | `GET /v1/sessions`、`GET /v1/sessions/{id}/history` | 列出 / 回放对话历史 |
 | `GET /v1/sessions/{id}/memory` | 查看短期、中期和长期记忆快照 |
 | `DELETE /v1/memory/long-term?doc_id=...` | 清除一个知识库的长期记忆 |
@@ -489,8 +491,8 @@ Python 层负责图编排、Prompt、模型客户端、索引、CLI 控制台、
 1. **扫描** — `scan_pdf_manifest_native`（Rust）用 rayon 并行、1 MiB 缓冲的 SHA-256 计算每个 PDF，返回 `{doc_id, documents: [{name, size, sha256}]}`，按文件名排序。
 2. **比对** — `manifests_match` 仅当 `doc_id`、`chunk_identity_version` 及每个 `{name, sha256}` 都与已存 manifest 一致时才复用索引；任一不匹配都强制重建。
 3. **解析** — `smart_parse`（PyMuPDF）抽取页文本，并按文本块中心 x 坐标重排双栏布局。开启可选 OCR 后，低文本页面会在页数与超时预算内渲染并交给本地 Tesseract 识别；未开启时仍标记为 `is_ocr_fallback`，且只保留原生文本结果。
-4. **切块** — `chunk_paper` 以 600 字符为硬上限、60 字符 overlap（最小 30）切过页文本流；边界优先按段落、句末标点/分号、换行/空白确定，超长无边界文本才退回固定窗口。每个 chunk 会保存前后最多 160 字符的定位上下文，通过 `bisect` 映射回页跨度，并赋予稳定的 `chunk_id`。
-5. **建索引** — chunk 写入 Chroma（向量）和 BM25 持久化 artifact；BM25 artifact 保存精简 chunk registry 与 native `Bm25Index` 字节，加载时直接从字节恢复 native 索引，不再从 Python 分词语料重建。`save_index_manifest` 落盘 manifest。分词走 `tokenize_mixed_text_native` / `tokenize_corpus_native`（中文 `jieba-rs`，英文 Snowball 词干化 + 停用词过滤）。
+4. **切块** — `chunk_paper` 先保守识别章节，再把每个 child 限制在 600 字符以内、重叠 60 字符，优先沿段落、句末/分号、换行和空白边界切分，超长无断句文本才退回固定窗口。无结构噪声仍沿用最短 30 字符过滤，但每个非空的已识别章节或 preamble 都会保留，避免章节硬边界抹掉短证据。child 不跨越已识别的章节边界；每块保存稳定 `parent_chunk_id`、章节路径、父级内序号及最多 160 字符的章节内定位上下文，同时保留自己的稳定 `chunk_id` 和页码跨度作为引用身份。
+5. **建索引** — chunk 写入 Chroma（向量）和 BM25 持久化 artifact；来源名、章节路径、定位上下文和 child 正文共同组成检索文本，两路存储均完整透传结构元数据并返回原始 child 正文。BM25 artifact 保存精简 chunk registry 与 native `Bm25Index` 字节，加载时直接从字节恢复 native 索引，不再从 Python 分词语料重建。`save_index_manifest` 落盘 manifest。分词走 `tokenize_mixed_text_native` / `tokenize_corpus_native`（中文 `jieba-rs`，英文 Snowball 词干化 + 停用词过滤）。
 
 已审核派生知识与 PDF 源文档分开建索引。审核状态变化后可重建派生知识 Chroma collection，过期扫描会标记那些来源绑定已不再匹配当前知识库文档的知识。
 
@@ -500,13 +502,15 @@ Python 层负责图编排、Prompt、模型客户端、索引、CLI 控制台、
 chunk_id = sha256:{source_sha256}:src:{source_name}:p{page_start}-p{page_end}:c{local_chunk_index}
 ```
 
-`chunk_id` 是贯穿 chunker、index、retriever、RRF、evidence 的唯一稳定身份键——去重和融合从不依赖数组下标。它带版本（`chunk_identity_version = source_sha256_name_page_span_local_v3_semantic_cs600_ov60_min30_ctx160`）；改动切块边界必须 bump `CHUNK_IDENTITY_BASE_VERSION`，让旧索引重建而非混用两套方案。
+`chunk_id` 是贯穿 chunker、index、retriever、RRF、引用和 evidence 的唯一稳定 child 身份键——去重和融合从不依赖数组下标。`parent_chunk_id = sha256:{source_sha256}:src:{source_name}:section:{section_index}` 只负责把 child 组织成可补充的上下文组，绝不替代 child 的引用身份。契约带版本（`chunk_identity_version = source_sha256_name_page_span_local_v5_parent_child_section_index_cs600_ov60_min30_ctx160`）；改动切块边界、结构识别或索引文本必须 bump `CHUNK_IDENTITY_BASE_VERSION`，让旧索引重建而非混用两套方案。
 
 ## 查询链路
 
 - **意图路由** — `RouterAgent` 要求 LLM 返回结构化 `task_type ∈ {qa, summary, compare, unknown}`，任何解析异常都按关键词规则回退。`qa`、`summary`、`compare` 都已接到真实子图。
 - **改写 + 证据需求规划** — `QueryRewriteAgent` 生成 1–3 条关键词查询，同时起草最多 3 个 `{question, retrieval_query, recovery_query}` 原子需求；服务端确定性分配 `r1..r3`，空规划或模型失败时回退为一个原问题需求。`RewriteVerifyAgent` 用一次 embedding 批处理执行两层语义守卫：先用含近期历史的原问题校验 requirement question，再用该 requirement 校验主/恢复查询。漂移的 requirement 被丢弃，漂移的聚焦查询回退到 requirement question，全部丢弃时回退原问题需求；原有改写保留/丢弃行为和 `steps_trace` 不变。
 - **带归因的 query-level RRF** — 原问题、改写和 requirement 查询都会检索 PDF 混合引擎与已审核派生知识。每个 query/channel 排名等权贡献 `score(d) = Σ_q,c 1 / (k + rank_q,c(d))`（`k = 60`），候选按稳定 `chunk_id` 去重，同分按身份键确定性打破。融合元数据保留命中的 queries、channels、requirement IDs、命中数、原问题是否命中、最佳排名和检索轮次，不再把归因压缩为一条 rewrite。
+- **有界 Parent–Child 补充** — child 级 rerank 与支持度判断完成后，每个原文命中从相同 `parent_chunk_id` 中加载连续、左右平衡的 sibling 窗口，并分别受块数与字符预算限制。补入 child 保留自己的 ID/页码，并记录 `context_anchor_chunk_id` 和 `context_expansion=section`；派生知识不做扩展。结构缺失、不完整或显式关闭时走旧邻块路径，因此旧索引仍可读取，而版本门禁会让新索引安全重建。
+- **确定性 Evidence Pack** — 结构补充后的 anchor、requirement 归因候选、自适应检索 carryover 与 sibling 上下文会被压缩为一个不可变 QA 证据闭集，并统一受全局块数和字符预算限制。字符预算精确等于 QA generator 最终渲染的证据上下文，完整计入文档/知识标签、身份属性、定位头、materialize 后正文和块间分隔符；system 指令、对话历史和 query 不计入，也不伪装成模型 token 估算。anchor 与已验证 carryover 是硬约束；若它们单独就超出任一预算，QA 会 fail-closed，而不会静默丢弃。证据 verifier（可只选闭集子集）、答案 generator 和 claim audit 都只能消费同一闭集内的 chunk。连续 child 的精确 overlap 只会在隔离的 pack 副本中移除；`retrieval.evidence_text_start`、`retrieval.evidence_text_end` 和 `retrieval.evidence_trimmed_overlap_chars` 保留其原文范围与裁剪归因。
 - **Requirement quota + 重排** — 进入 `BGEReranker`（`bge-reranker-v2-m3`）前，有界候选选择器会为每个 requirement 至少保留一条有归因候选，再按融合顺序补足剩余预算。证据校验候选也先覆盖 requirement，再做来源多样化，避免强势的第一条查询饿死后续需求命中。最终重排仍对 `(原问题, doc)` 打分，rewrite 不会直接偏置 cross-encoder 分数。
 - **闭集证据校验 + 有界自适应恢复** — 开启证据校验后，符合二阶段条件的精确事实问题和所有多 requirement 问题，生成前都必须对每个需求给出一份 `supported` / `missing` / `contradictory` 结论，且只能使用给定 requirement ID 和 chunk ID。需求 ID 遗漏/重复/未知、伪造 chunk、未支持需求或无证据冲突都不能放行。若缺口可恢复，CogDoc 默认只重试一次：缺失 requirement 的 `recovery_query` 会紧随原问题优先执行，检索深度按有上限倍数扩大，融合/重排后重新校验。重试数、查询预算和 `top_k` 全部有界，verifier 异常不会重试；最终仍有 requirement 无有效支持时跳过生成，以稳定拒答 fail-closed。
 - **归因反馈权重** — 正向反馈（点赞或高于中性的评分）可提升其引用/evidence chunk。点踩、纠错和低于中性的评分只有在明确标记 `feedback_type=bad_retrieval` 时才生成负检索权重；其他答案质量问题不会误罚可能正确的证据。`skip_retrieval_feedback=true` 会让该条反馈的正负调权全部跳过。
@@ -633,6 +637,11 @@ python scripts/migrate_state.py --verify-only   # 校验导入结果
 | `RATE_LIMIT_PER_MINUTE` | `120` | 受保护 API 路由的令牌桶补充速率 |
 | `RATE_LIMIT_BURST` | `120` | 令牌桶突发容量；`<=0` 表示关闭限流 |
 | `COGDOC_MAX_UPLOAD_MB` | `50` | 网页/API 上传 PDF 的单文件大小上限 |
+| `QA_PARENT_CONTEXT_ENABLED` | `true` | 为 rerank 命中的 child 补充同章节有界 sibling；设为 `false` 时保留旧邻块扩展 |
+| `QA_PARENT_CONTEXT_MAX_CHUNKS` | `5` | 每个结构父级窗口最多保留的 child 数（含 anchor） |
+| `QA_PARENT_CONTEXT_MAX_CHARS` | `3600` | 每个结构父级窗口的软字符预算；anchor 永不被丢弃 |
+| `QA_EVIDENCE_PACK_MAX_DOCS` | `8` | 不可变 QA 模型证据载荷的全局 chunk 上限；anchor 与已验证 carryover 仍是硬约束 |
+| `QA_EVIDENCE_PACK_MAX_CHARS` | `7200` | 最终渲染证据上下文的精确字符上限，含标签/ID/定位/正文/分隔符，不含 system/history/query |
 | `QA_ABSTAIN_ENABLED` | `true` | 检索置信度不足时在调用 LLM 前确定性拒答 |
 | `QA_ABSTAIN_MAX_VECTOR_DISTANCE` | `0.86` | 可接受的归一化向量 L2 距离上限 |
 | `QA_ABSTAIN_MIN_BM25_SCORE` | `10.0` | 可独立证明检索支持度的 BM25 分数下限 |
@@ -733,9 +742,9 @@ python scripts/migrate_state.py --verify-only   # 校验导入结果
 }
 ```
 
-有标注时，报告会新增 `requirement_recall@k`、`all_requirements_covered@k` 和二值相关性 `evidence_ndcg@k`；chunk 级 gold 还会启用 `chunk_precision@k`，hard negative 会启用 `hard_negative_rejection@k`。执行 verifier 时新增 `requirement_full_coverage_rate`；执行 adaptive recovery 时新增 `adaptive_retry_trigger_rate`，对确实重试的样本还会计算 `adaptive_rescue_rate`。`retrieval_query_count` 用于暴露查询预算成本。其中 trigger rate 和 query count 是发布期诊断指标，不进入默认 baseline gate；覆盖、排序、干扰拒绝与救回指标在出现时可进入基线门禁。
+有标注时，报告会新增 `requirement_recall@k`、`all_requirements_covered@k` 和二值相关性 `evidence_ndcg@k`；chunk 级 gold 还会启用 `chunk_precision@k`，hard negative 会启用 `hard_negative_rejection@k`。`generation_requirement_coverage` 会用实际送入生成阶段的有界 Parent–Child 上下文检查相同 gold requirements。执行 verifier 时新增 `requirement_full_coverage_rate`；执行 adaptive recovery 时新增 `adaptive_retry_trigger_rate`，对确实重试的样本还会计算 `adaptive_rescue_rate`。`retrieval_query_count`、`parent_context_trigger_rate` 以及 parent/neighbor 扩展数量用于暴露发布成本和结构索引覆盖。trigger/count 指标不进入默认 baseline gate；证据覆盖、排序、干扰拒绝与救回指标在出现时可进入基线门禁。
 
-每条报告行还会保存 `retrieved_items`、`evidence_requirement_assessments`、`missing_evidence_requirement_ids`、`retrieval_retry_count`、`adaptive_retrieval_rescued`、`retrieval_query_count`、`retrieval_ranking_count`、`retrieval_carryover_count` 以及分 channel 计数 `retrieval_channel_counts`，因此可以把回归定位到规划、融合、校验或恢复阶段，而不是只从最终来源列表反推。
+每条报告行还会保存 `retrieved_items`、`generation_context_items`、`evidence_requirement_assessments`、`missing_evidence_requirement_ids`、`retrieval_retry_count`、`adaptive_retrieval_rescued`、`retrieval_query_count`、`retrieval_ranking_count`、`retrieval_carryover_count`、parent/neighbor 扩展数量以及分 channel 计数 `retrieval_channel_counts`，因此可以把回归定位到规划、融合、结构补充、校验或恢复阶段，而不是只从最终来源列表反推。完整 QA trace 同样记录扩展数量，证据预览则保留章节身份和上下文归因元数据，便于灰度对比。
 
 `make eval` 对本地检索集做临时评测；干净 checkout 没有本地集时会回退到 `eval/retrieval_eval.example.jsonl`。`make eval-coverage` 不触碰索引，只检查 smoke 覆盖配置。组合评测需要真实检索时运行 `make eval-suite-run-retrieval`。`make eval-quality` 会统计路由准确率、引用准确率和覆盖 QA、Summary、Compare、多轮、无答案、反馈层级的人工忠实性台账；`make eval-quality-coverage` 还会对必需 case type 和推荐 layer 执行覆盖门禁。点踩/纠错会在 `bad_cases.jsonl` 写入 `eval_draft`，方便复核后提升到质量评测集。只想检查质量覆盖时运行 `python scripts/eval_quality.py --coverage-only`。`--coverage-only` 有意不允许与 `--check-coverage`、`--json`、`--baseline` 同时使用。
 
@@ -743,7 +752,7 @@ python scripts/migrate_state.py --verify-only   # 校验导入结果
 
 运行 `python scripts/eval_retrieval.py --rerank --verify-evidence` 可把云端证据校验纳入最终放行率/拒答率统计；加 `--local-verifier` 则使用 Ollama。该模式会发起模型调用，因此有意不纳入默认检索门禁。
 
-每次对话都会生成 `request_id` / `trace_id`。`COGDOC_TRACE_ENABLED=true` 时，服务会把 JSON trace 写入 `COGDOC_TRACE_DIR`（默认 `logs/traces`），同一份安全载荷也可通过 `GET /v1/traces/{trace_id}` 查询；`GET /v1/traces` 可按 `doc_id` 和 `session_id` 限定范围，Streamlit Trace 面板正是用它只展示当前对话。trace 文件包含 `schema_version`、`status`（`ok`、`degraded` 或 `failed`）、总 `duration_ms`、安全配置快照、步骤摘要、改写摘要、错误摘要，并且只保存截断后的 evidence preview，不写入完整文档正文。独立 Debug 控制台读取同一套 trace 格式。
+每次对话都会生成 `request_id` / `trace_id`。`COGDOC_TRACE_ENABLED=true` 时，服务会把 JSON trace 写入 `COGDOC_TRACE_DIR`（默认 `logs/traces`），同一份安全载荷也可通过 `GET /v1/traces/{trace_id}` 查询；`GET /v1/traces` 可按 `doc_id` 和 `session_id` 限定范围，Streamlit Trace 面板正是用它只展示当前对话。trace 文件包含 `schema_version`、`status`（`ok`、`degraded` 或 `failed`）、总 `duration_ms`、安全配置快照、步骤摘要、改写摘要、错误摘要，并且只保存截断后的 evidence preview，不写入完整文档正文。QA rerank 步骤还会暴露 Evidence Pack 的输入/保留/丢弃数与字符数、移除的 overlap、分原因丢弃计数、anchor/pinned 数，以及硬约束的 `over_budget` 决策。独立 Debug 控制台读取同一套 trace 格式。
 
 备份恢复和索引重建规则见 [PRODUCTION_zh-CN.md](PRODUCTION_zh-CN.md)。
 

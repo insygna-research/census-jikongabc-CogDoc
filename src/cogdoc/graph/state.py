@@ -29,6 +29,11 @@ class DocMeta(TypedDict):
     context: NotRequired[str]
     source_type: NotRequired[str]
     knowledge_id: NotRequired[str]
+    parent_chunk_id: NotRequired[str]
+    section_title: NotRequired[str]
+    section_path: NotRequired[str]
+    section_level: NotRequired[int]
+    child_index_in_parent: NotRequired[int]
 
 
 # retrieval 只保存本次检索产生的动态指标。
@@ -39,7 +44,8 @@ class RetrievalMetrics(TypedDict, total=False):
     rerank_score: float
     search_channel: str
     rewrite_query: str
-    parent_chunk_id: str
+    context_anchor_chunk_id: str
+    context_expansion: str
     query_fusion_score: float
     query_hit_count: int
     matched_queries: List[str]
@@ -48,6 +54,10 @@ class RetrievalMetrics(TypedDict, total=False):
     best_query_rank: int
     original_query_hit: bool
     retrieval_round: int
+    # Evidence Pack 将进入模型的隔离文本视图映射回原 child 正文。
+    evidence_text_start: int
+    evidence_text_end: int
+    evidence_trimmed_overlap_chars: int
 
 
 # RetrievedDoc 是检索、重排和生成节点共享的文档结构。
@@ -55,6 +65,11 @@ class RetrievedDoc(TypedDict):
     text: str
     meta: DocMeta
     retrieval: NotRequired[RetrievalMetrics]
+    # Pack 内部的可恢复原文视图；模型、API 与 trace formatter 都不得读取。
+    _evidence_source_text: NotRequired[str]
+    _evidence_source_start: NotRequired[int]
+    _evidence_source_end: NotRequired[int]
+    _evidence_source_overlap_chars: NotRequired[int]
 
 
 # ChatMessage 保存会话历史中的单条消息。
@@ -74,6 +89,11 @@ class AgentStepTrace(TypedDict):
 # Evidence 面向前端和审计展示。
 class Evidence(TypedDict, total=False):
     chunk_id: str
+    parent_chunk_id: str
+    section_title: str
+    section_path: str
+    section_level: int
+    child_index_in_parent: int
     source_type: str
     knowledge_id: str
     chunk_index: int
@@ -179,6 +199,18 @@ class GraphState(TypedDict):
     retrieval_ranking_count: NotRequired[int]
     retrieval_channel_counts: NotRequired[Dict[str, int]]
     retrieval_carryover_count: NotRequired[int]
+    parent_context_expanded_count: NotRequired[int]
+    neighbor_context_expanded_count: NotRequired[int]
+    evidence_pack_input_count: NotRequired[int]
+    evidence_pack_kept_count: NotRequired[int]
+    evidence_pack_dropped_count: NotRequired[int]
+    evidence_pack_input_chars: NotRequired[int]
+    evidence_pack_kept_chars: NotRequired[int]
+    evidence_pack_overlap_removed_chars: NotRequired[int]
+    evidence_pack_drop_reason_counts: NotRequired[Dict[str, int]]
+    evidence_pack_anchor_count: NotRequired[int]
+    evidence_pack_pinned_count: NotRequired[int]
+    evidence_pack_over_budget: NotRequired[bool]
     retrieval_feedback_error: NotRequired[str]
     retrieval_retry_reason: NotRequired[str]
     adaptive_retrieval_retry_pending: NotRequired[bool]

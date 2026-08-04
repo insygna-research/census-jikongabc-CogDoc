@@ -84,6 +84,46 @@ def test_select_verification_docs_prioritizes_each_requirement():
     assert [doc["meta"]["chunk_id"] for doc in selected] == ["r1-doc", "r2-doc"]
 
 
+def test_select_verification_docs_preserves_pinned_adaptive_evidence():
+    pinned = _doc("pinned", "a.pdf", matched_requirement_ids=["r1"])
+    docs = [
+        _doc("r1-new", "b.pdf", matched_requirement_ids=["r1"]),
+        _doc("r2-new", "c.pdf", matched_requirement_ids=["r2"]),
+        pinned,
+    ]
+
+    selected = select_verification_docs(
+        docs,
+        2,
+        ["r1", "r2"],
+        pinned_chunk_ids={"pinned"},
+    )
+
+    assert [doc["meta"]["chunk_id"] for doc in selected] == [
+        "pinned",
+        "r2-new",
+    ]
+
+
+def test_pinned_docs_do_not_starve_newly_recovered_requirement():
+    pinned = [
+        _doc(f"pinned-{index}", "a.pdf", matched_requirement_ids=["r1"])
+        for index in range(3)
+    ]
+    recovered = _doc("r2-new", "b.pdf", matched_requirement_ids=["r2"])
+
+    selected = select_verification_docs(
+        [*pinned, recovered],
+        3,
+        ["r1", "r2"],
+        pinned_chunk_ids={doc["meta"]["chunk_id"] for doc in pinned},
+    )
+
+    selected_ids = [doc["meta"]["chunk_id"] for doc in selected]
+    assert selected_ids[:2] == ["pinned-0", "r2-new"]
+    assert len(set(selected_ids) & {"pinned-0", "pinned-1", "pinned-2"}) == 2
+
+
 # 第一阶段放行和阈值附近的事实问题都进入二阶段，明显低分仍直接拒答。
 def test_should_verify_supported_and_borderline_fact_queries():
     settings = _settings(qa_evidence_verify_borderline_min_score=0.75)
@@ -423,10 +463,11 @@ def test_contradictory_requirement_without_chunk_is_downgraded(monkeypatch):
     assert output["evidence_requirement_assessments"][0]["verdict"] == "missing"
 
 
-# 校验器使用了 Top 3 之外的来源时，该 chunk 必须进入后续生成和引用上下文。
-def test_evidence_verify_node_merges_verified_docs_into_generation(monkeypatch):
+# Evidence Pack 已是生成闭集；校验节点不得再把闭集外文档注入生成上下文。
+def test_evidence_verify_node_does_not_expand_authoritative_pack(monkeypatch):
     top_doc = _doc("a1", "a.pdf")
     cross_source_doc = _doc("b1", "b.pdf")
+    logged = []
     monkeypatch.setattr(
         qa.EvidenceVerifierAgent,
         "verify",
@@ -439,7 +480,9 @@ def test_evidence_verify_node_merges_verified_docs_into_generation(monkeypatch):
             "retrieval_abstain_reason": "evidence_supported",
         },
     )
-    monkeypatch.setattr(qa, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        qa, "log_event", lambda *args, **kwargs: logged.append((args, kwargs))
+    )
 
     output = qa.evidence_verify_node(
         {
@@ -448,10 +491,8 @@ def test_evidence_verify_node_merges_verified_docs_into_generation(monkeypatch):
         }
     )
 
-    assert [doc["meta"]["chunk_id"] for doc in output["reranked_docs"]] == [
-        "a1",
-        "b1",
-    ]
+    assert "reranked_docs" not in output
+    assert logged[0][1]["generation_evidence_count"] == 1
 
 
 # 校验器异常时不改变第一阶段结论：原本放行则放行，原本拒答则继续拒答。

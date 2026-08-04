@@ -14,6 +14,13 @@ _BAD_CASE_TYPES = {"thumbs_down", "correction"}
 _QUICK_FEEDBACK_TYPES = {"thumbs_up", "thumbs_down"}
 _EVIDENCE_PREVIEW_LIMIT = 6
 _MISSING_MTIME = -1.0
+_OPTIONAL_STRUCTURE_FIELDS = {
+    "parent_chunk_id",
+    "section_title",
+    "section_path",
+    "section_level",
+    "child_index_in_parent",
+}
 
 
 # 清理评测草稿引用项。
@@ -23,6 +30,11 @@ def _eval_ref(item: Any) -> Any:
     cleaned = dict(item)
     if not cleaned.get("retrieval"):
         cleaned.pop("retrieval", None)
+    # Keep legacy feedback drafts stable when clients did not submit structure,
+    # while retaining real Parent–Child coordinates when they are available.
+    for field in _OPTIONAL_STRUCTURE_FIELDS:
+        if cleaned.get(field) in (None, ""):
+            cleaned.pop(field, None)
     return cleaned
 
 

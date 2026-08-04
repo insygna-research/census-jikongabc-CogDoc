@@ -8,6 +8,14 @@ from cogdoc.service.kb_state import KBState
 from cogdoc.graph.subgraphs.qa import RetrieverFactory
 from cogdoc.tools.retriever.base_retriever import NullRetriever, NullWriteError
 from cogdoc.tools.retriever.hybrid import HybridRetriever, IndexCorruptError
+from cogdoc.tools.retriever.evidence_pack import (
+    EvidencePackCandidate,
+    build_evidence_pack,
+)
+from cogdoc.tools.evidence_rendering import (
+    EVIDENCE_BLOCK_SEPARATOR,
+    evidence_block_char_count,
+)
 from cogdoc.tools.retriever.vector_retriever import EmbeddingModelMismatchError
 from cogdoc.agents.qa_generator import Generator
 from cogdoc.graph.subgraphs import qa
@@ -102,6 +110,70 @@ def test_generator_prompt_includes_knowledge_citation_format():
     assert '<Knowledge knowledge_id="K123"' in rendered
     assert "[knowledge:K123]" in rendered
     assert "[source属性值:P+page属性值]" in rendered
+
+
+# 验证结构化子块把章节路径提供给生成器，但引用身份仍使用原 child chunk。
+def test_generator_prompt_includes_section_path_without_replacing_child_identity():
+    docs = [
+        {
+            "text": "训练分为预训练和微调两个阶段。",
+            "meta": {
+                "chunk_id": "child:7",
+                "parent_chunk_id": "section:2",
+                "section_title": "2.1 Training",
+                "section_path": "Methods > Training",
+                "source": "paper.pdf",
+                "page": 4,
+            },
+        }
+    ]
+
+    rendered = Generator._build_context_string(docs)
+
+    assert "章节路径：Methods > Training" in rendered
+    assert 'chunk_id="child:7"' in rendered
+    assert "section:2" not in rendered
+
+
+def test_generator_consumes_materialized_overlap_deduplicated_pack():
+    overlap = "0123456789abcdef"
+    docs = [
+        {
+            "text": f"left-{overlap}",
+            "meta": {
+                "chunk_id": "child:0",
+                "parent_chunk_id": "section:1",
+                "child_index_in_parent": 0,
+                "source": "paper.pdf",
+                "page": 1,
+            },
+        },
+        {
+            "text": f"{overlap}-right",
+            "meta": {
+                "chunk_id": "child:1",
+                "parent_chunk_id": "section:1",
+                "child_index_in_parent": 1,
+                "source": "paper.pdf",
+                "page": 1,
+            },
+        },
+    ]
+    pack = build_evidence_pack(
+        [EvidencePackCandidate(doc) for doc in docs],
+        max_docs=2,
+        max_chars=1000,
+        document_char_cost=evidence_block_char_count,
+        separator_chars=len(EVIDENCE_BLOCK_SEPARATOR),
+    )
+
+    rendered = Generator._build_context_string(list(pack.kept_docs))
+
+    assert pack.estimated_chars == len(rendered)
+    assert rendered.count(overlap) == 1
+    assert pack.kept_docs[1]["text"] == "-right"
+    assert pack.kept_docs[1]["retrieval"]["evidence_text_start"] == len(overlap)
+    assert docs[1]["text"] == f"{overlap}-right"
 
 
 # 验证问答召回融合派生知识。

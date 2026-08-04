@@ -1,15 +1,17 @@
 import bisect
 import re
 from dataclasses import dataclass
-from typing import List
-from cogdoc.graph.state import ParsedPage, RetrievedDoc
+from typing import List, cast
+from cogdoc.graph.state import DocMeta, ParsedPage, RetrievedDoc
 from cogdoc.tools.chunk_identity import (
     DEFAULT_CHUNK_CONTEXT_CHARS,
     DEFAULT_CHUNK_CHAR_OVERLAP,
     DEFAULT_CHUNK_CHAR_SIZE,
     MIN_CHUNK_CHARS,
     build_chunk_id,
+    build_parent_chunk_id,
 )
+from cogdoc.tools.section_structure import SectionSpan, detect_section_spans
 
 
 _BLANK_LINE_RE = re.compile(r"\n\s*\n")
@@ -113,6 +115,16 @@ def _semantic_spans(text: str, max_chars: int) -> List[TextSpan]:
     return spans
 
 
+# 在指定章节范围内构造全局字符坐标的语义单元。
+def _section_semantic_spans(
+    text: str, section: SectionSpan, max_chars: int
+) -> List[TextSpan]:
+    return [
+        TextSpan(section.start + span.start, section.start + span.end)
+        for span in _semantic_spans(text[section.start : section.end], max_chars)
+    ]
+
+
 # 查找下一个 chunk 的完整语义重叠起点。
 def _find_overlap_start(
     units: List[TextSpan], start_idx: int, end_idx: int, overlap_chars: int
@@ -131,12 +143,21 @@ def _find_overlap_start(
 
 
 # 构造 chunk 前后的定位上下文。
-def _build_context(text: str, start: int, end: int, context_chars: int) -> str:
+def _build_context(
+    text: str,
+    start: int,
+    end: int,
+    context_chars: int,
+    *,
+    section_start: int = 0,
+    section_end: int | None = None,
+) -> str:
     if context_chars <= 0:
         return ""
 
-    before = _context_before(text, start, context_chars)
-    after = _context_after(text, end, context_chars)
+    bounded_end = len(text) if section_end is None else section_end
+    before = _context_before(text, start, context_chars, section_start)
+    after = _context_after(text, end, context_chars, bounded_end)
     parts = []
     if before:
         parts.append(f"前文：{before}")
@@ -146,8 +167,10 @@ def _build_context(text: str, start: int, end: int, context_chars: int) -> str:
 
 
 # 截取 chunk 前方的上下文片段。
-def _context_before(text: str, start: int, context_chars: int) -> str:
-    snippet = text[max(0, start - context_chars) : start].strip()
+def _context_before(
+    text: str, start: int, context_chars: int, lower_bound: int = 0
+) -> str:
+    snippet = text[max(lower_bound, start - context_chars) : start].strip()
     for match in _SENTENCE_END_RE.finditer(snippet):
         candidate = snippet[match.end() :].strip()
         if candidate:
@@ -156,8 +179,11 @@ def _context_before(text: str, start: int, context_chars: int) -> str:
 
 
 # 截取 chunk 后方的上下文片段。
-def _context_after(text: str, end: int, context_chars: int) -> str:
-    snippet = text[end : min(len(text), end + context_chars)].strip()
+def _context_after(
+    text: str, end: int, context_chars: int, upper_bound: int | None = None
+) -> str:
+    bounded_end = len(text) if upper_bound is None else upper_bound
+    snippet = text[end : min(bounded_end, end + context_chars)].strip()
     boundary = -1
     for match in _SENTENCE_END_RE.finditer(snippet):
         boundary = match.end()
@@ -174,6 +200,9 @@ def chunk_paper(
     chunk_char_overlap: int = DEFAULT_CHUNK_CHAR_OVERLAP,
     chunk_context_chars: int = DEFAULT_CHUNK_CONTEXT_CHARS,
 ) -> List[RetrievedDoc]:
+
+    if chunk_char_overlap >= chunk_char_size:
+        raise ValueError("chunk_char_overlap must be smaller than chunk_char_size")
 
     if not parsed_pages:
         return []
@@ -219,13 +248,26 @@ def chunk_paper(
         return []
 
     max_chars = max(1, chunk_char_size)
-    semantic_units = _semantic_spans(global_text, max_chars)
+    sections = detect_section_spans(global_text)
+    has_detected_structure = any(section.title for section in sections)
+    semantic_units: List[TextSpan] = []
+    unit_section_indexes: List[int] = []
+    for section_index, section in enumerate(sections):
+        section_units = _section_semantic_spans(global_text, section, max_chars)
+        semantic_units.extend(section_units)
+        unit_section_indexes.extend([section_index] * len(section_units))
+    child_indexes: dict[int, int] = {}
     unit_idx = 0
 
     while unit_idx < len(semantic_units):
+        section_index = unit_section_indexes[unit_idx]
+        section = sections[section_index]
         chunk_start = semantic_units[unit_idx].start
         next_idx = unit_idx
-        while next_idx < len(semantic_units):
+        while (
+            next_idx < len(semantic_units)
+            and unit_section_indexes[next_idx] == section_index
+        ):
             candidate_end = semantic_units[next_idx].end
             if next_idx > unit_idx and candidate_end - chunk_start > max_chars:
                 break
@@ -243,14 +285,21 @@ def chunk_paper(
         chunk_end = semantic_units[next_idx - 1].end
         chunk_text = global_text[chunk_start:chunk_end].strip()
 
-        if len(chunk_text) > MIN_CHUNK_CHARS:
+        # 章节硬边界使短 section 无法再与相邻正文合并；结构化文档的非空
+        # section/preamble 必须至少保留其内容。无结构文档继续沿用旧过滤规则。
+        if chunk_text and (has_detected_structure or len(chunk_text) > MIN_CHUNK_CHARS):
             p_start = find_page_by_pos(chunk_start)
             p_end = find_page_by_pos(chunk_end - 1)
             chunk_id = build_chunk_id(
                 source_sha256, source_name, p_start, p_end, local_chunk_index
             )
             context = _build_context(
-                global_text, chunk_start, chunk_end, chunk_context_chars
+                global_text,
+                chunk_start,
+                chunk_end,
+                chunk_context_chars,
+                section_start=section.start,
+                section_end=section.end,
             )
 
             meta = {
@@ -265,13 +314,10 @@ def chunk_paper(
                 "origin": "vector",
             }
             covered_pages = [
-                page
-                for page in parsed_pages
-                if p_start <= int(page["page"]) <= p_end
+                page for page in parsed_pages if p_start <= int(page["page"]) <= p_end
             ]
             extraction_methods = {
-                str(page.get("extraction_method", "native"))
-                for page in covered_pages
+                str(page.get("extraction_method", "native")) for page in covered_pages
             }
             meta["extraction_method"] = (
                 next(iter(extraction_methods))
@@ -281,27 +327,42 @@ def chunk_paper(
             ocr_providers = {
                 str(page.get("ocr_provider"))
                 for page in covered_pages
-                if page.get("ocr_provider")
-                and page.get("extraction_method") == "ocr"
+                if page.get("ocr_provider") and page.get("extraction_method") == "ocr"
             }
             if ocr_providers:
                 meta["ocr_provider"] = (
-                    next(iter(ocr_providers))
-                    if len(ocr_providers) == 1
-                    else "mixed"
+                    next(iter(ocr_providers)) if len(ocr_providers) == 1 else "mixed"
                 )
             if context:
                 meta["context"] = context
+            if has_detected_structure:
+                child_index = child_indexes.get(section_index, 0)
+                meta.update(
+                    {
+                        "parent_chunk_id": build_parent_chunk_id(
+                            source_sha256, source_name, section.ordinal
+                        ),
+                        "section_level": section.level,
+                        "child_index_in_parent": child_index,
+                    }
+                )
+                if section.title:
+                    meta["section_title"] = section.title
+                    meta["section_path"] = " > ".join(section.path)
+                child_indexes[section_index] = child_index + 1
 
-            chunks.append({"text": chunk_text, "meta": meta})
+            chunks.append({"text": chunk_text, "meta": cast(DocMeta, meta)})
 
             local_chunk_index += 1
 
         if next_idx >= len(semantic_units):
             break
 
-        if chunk_char_overlap >= chunk_char_size:
-            break
+        # 章节边界是硬边界，重叠不能把前一章节内容带进后一章节 child。
+        if unit_section_indexes[next_idx] != section_index:
+            unit_idx = next_idx
+            continue
+
         unit_idx = _find_overlap_start(
             semantic_units, unit_idx, next_idx, chunk_char_overlap
         )

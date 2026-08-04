@@ -99,6 +99,11 @@ class Citation(ApiModel):
 # 证据片段带截断预览，供前端证据面板展示。
 class Evidence(ApiModel):
     chunk_id: str = ""
+    parent_chunk_id: str = ""
+    section_title: str = ""
+    section_path: str = ""
+    section_level: int | None = None
+    child_index_in_parent: int | None = None
     source_type: str = "document"
     knowledge_id: str = ""
     chunk_index: int | None = None
@@ -716,6 +721,11 @@ def _evidence_from_mapping(item: Any) -> Evidence:
     page = _int_or_none(data.get("page"))
     return Evidence(
         chunk_id=str(data.get("chunk_id", "") or ""),
+        parent_chunk_id=str(data.get("parent_chunk_id", "") or ""),
+        section_title=str(data.get("section_title", "") or ""),
+        section_path=str(data.get("section_path", "") or ""),
+        section_level=_int_or_none(data.get("section_level")),
+        child_index_in_parent=_int_or_none(data.get("child_index_in_parent")),
         source_type=str(data.get("source_type", "document") or "document"),
         knowledge_id=str(data.get("knowledge_id", "") or ""),
         chunk_index=_int_or_none(data.get("chunk_index")),

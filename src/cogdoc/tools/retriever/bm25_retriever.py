@@ -2,13 +2,14 @@ import os
 import pickle
 import copy
 from threading import RLock
-from typing import List
+from typing import Any, List, cast
 from cogdoc.config.settings import get_settings
-from cogdoc.graph.state import RetrievedDoc
+from cogdoc.graph.state import DocMeta, RetrievedDoc
 from cogdoc.tools.document_loader import list_sources, load_source_chunks
 from cogdoc.tools.tokenizer import tokenize_mixed_text, tokenize_corpus
 from cogdoc.tools.rust_core_loader import ensure_rust_core
 from cogdoc.tools.retriever.base_retriever import BaseRetriever
+from cogdoc.tools.retriever.metadata import copy_optional_structure_metadata
 from cogdoc.tools.retriever.retrieval_text import retrieval_text
 
 
@@ -22,7 +23,7 @@ _PERSIST_FORMAT = "bm25_index_bytes_v1"
 # 初始化实例状态。
 class BM25Retriever(BaseRetriever):
     # 初始化实例状态。
-    def __init__(self, collection_id: str, persist_directory: str = None):
+    def __init__(self, collection_id: str, persist_directory: str | None = None):
         persist_directory = persist_directory or get_settings().bm25_persist_dir
         os.makedirs(persist_directory, exist_ok=True)
         self.db_path = os.path.join(persist_directory, f"bm25_{collection_id}.pkl")
@@ -97,7 +98,7 @@ class BM25Retriever(BaseRetriever):
     def _clean_doc(c: RetrievedDoc) -> RetrievedDoc:
         # 只留 chunk 身份元数据，去掉检索期临时字段。
         meta = c["meta"]
-        cleaned_meta = {
+        cleaned_meta: dict[str, Any] = {
             "chunk_id": str(meta["chunk_id"]),
             "source_sha256": str(meta["source_sha256"]),
             "local_chunk_index": int(meta["local_chunk_index"]),
@@ -110,9 +111,10 @@ class BM25Retriever(BaseRetriever):
         }
         if meta.get("context"):
             cleaned_meta["context"] = str(meta["context"])
+        copy_optional_structure_metadata(meta, cleaned_meta)
         return {
             "text": c["text"],
-            "meta": cleaned_meta,
+            "meta": cast(DocMeta, cleaned_meta),
         }
 
     # 持久化结果。
@@ -225,7 +227,7 @@ class BM25Retriever(BaseRetriever):
             page_end = int(meta_data["page_end"])
             local_chunk_index = int(meta_data["local_chunk_index"])
 
-            meta = {
+            meta: dict[str, Any] = {
                 "chunk_id": str(chunk_id),
                 "source_sha256": source_sha256,
                 "local_chunk_index": local_chunk_index,
@@ -238,10 +240,11 @@ class BM25Retriever(BaseRetriever):
             }
             if meta_data.get("context"):
                 meta["context"] = str(meta_data["context"])
+            copy_optional_structure_metadata(meta_data, meta)
             retrieved_docs.append(
                 {
                     "text": doc_copy["text"],
-                    "meta": meta,
+                    "meta": cast(DocMeta, meta),
                     "retrieval": {"bm25_score": float(score), "search_channel": "bm25"},
                 }
             )

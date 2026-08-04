@@ -1,5 +1,8 @@
 from cogdoc.agents import summary_generator
-from cogdoc.agents.claim_evidence_verifier import CLAIM_AUDIT_EXEMPTION_GUIDANCE
+from cogdoc.agents.claim_evidence_verifier import (
+    CLAIM_AUDIT_EXEMPTION_GUIDANCE,
+    documents_for_state,
+)
 from cogdoc.graph import workflow
 from cogdoc.graph.subgraphs import summary
 from cogdoc.graph.subgraphs.summary import (
@@ -391,6 +394,36 @@ def test_global_summary_node_dedupes_section_evidence():
     )
 
     assert [item["chunk_id"] for item in result["evidence"]] == ["chunk:a.pdf:1"]
+
+
+def test_global_summary_claim_documents_exclude_unseen_same_page_child():
+    seen = _doc("a.pdf", 1, 0)
+    unseen = _doc("a.pdf", 1, 1)
+    section_results = [
+        {
+            "section_id": "one",
+            "title": "研究问题",
+            "content": "文档提出了目标问题。[a.pdf:P1]",
+            "evidence": [
+                {
+                    "chunk_id": "chunk:a.pdf:0",
+                    "source": "a.pdf",
+                    "page": 1,
+                }
+            ],
+        }
+    ]
+    state = {
+        "task_type": "summary",
+        "summary_source": "a.pdf",
+        "summary_docs": [seen, unseen],
+        "summary_section_results": section_results,
+    }
+
+    final = global_summary_node(state)
+    docs = documents_for_state({**state, **final})
+
+    assert [doc["meta"]["chunk_id"] for doc in docs] == ["chunk:a.pdf:0"]
 
 
 # 验证 global summary node blocks invalid citation 场景。

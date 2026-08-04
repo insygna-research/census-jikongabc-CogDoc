@@ -50,6 +50,28 @@ class _AnswerLLM:
         return AIMessage(content="A 与 B 均有直接证据。[a.pdf:P1] [b.pdf:P1]")
 
 
+def test_verified_carryover_retains_requirement_attribution():
+    carried, count = qa._carry_verified_docs(
+        {
+            "retrieval_retry_count": 1,
+            "evidence_verified_chunk_ids": ["c1"],
+            "evidence_requirement_assessments": [
+                {
+                    "requirement_id": "r1",
+                    "verdict": "supported",
+                    "evidence_chunk_ids": ["c1"],
+                    "reason": "A 已覆盖",
+                }
+            ],
+            "verification_docs": [_doc("c1", "a.pdf")],
+        },
+        [_doc("c2", "b.pdf")],
+    )
+
+    assert count == 1
+    assert carried[0]["retrieval"]["matched_requirement_ids"] == ["r1"]
+
+
 def test_adaptive_retrieval_recovers_missing_requirement_once(monkeypatch):
     settings = Settings(
         _env_file=None,

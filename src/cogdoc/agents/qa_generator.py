@@ -1,4 +1,4 @@
-from typing import List
+from typing import Any, List, cast
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from cogdoc.config.settings import get_settings
@@ -8,6 +8,7 @@ from cogdoc.agents.conversation_memory import (
     CHAT_HISTORY_MESSAGE_LIMIT,
     format_recent_chat_history,
 )
+from cogdoc.tools.evidence_rendering import render_evidence_context
 
 
 QA_SYSTEM_PROMPT_TEMPLATE = (
@@ -36,7 +37,7 @@ QA_USER_PROMPT_TEMPLATE = (
 
 # 不同后端和模型使用独立客户端缓存。
 class Generator:
-    _clients = {}
+    _clients: dict[str, Any] = {}
 
     # 清理客户端。
     @classmethod
@@ -49,7 +50,7 @@ class Generator:
     def _get_client(
         cls,
         is_local: bool = False,
-        custom_model_name: str = None,
+        custom_model_name: str | None = None,
     ) -> ChatOpenAI:
         # 客户端键必须包含后端、地址和模型名。
         settings = get_settings()
@@ -78,8 +79,8 @@ class Generator:
         if client_key not in cls._clients:
             cls._clients[client_key] = ChatOpenAI(
                 model=model_name,
-                openai_api_key=api_key,
-                openai_api_base=base_url,
+                api_key=cast(Any, api_key),
+                base_url=base_url,
                 temperature=0.2,
                 timeout=timeout,
                 max_retries=max_retries,
@@ -102,48 +103,8 @@ class Generator:
     # 构建上下文文本。
     @classmethod
     def _build_context_string(cls, docs: List[RetrievedDoc]) -> str:
-        # 分别渲染原始文档和派生知识，防止补充知识伪装成原文。
-        if not docs:
-            return "（未检索到任何相关的参考本地知识库内容。）"
-
-        context_blocks = []
-        for doc in docs:
-            meta = doc["meta"]
-            if meta.get("source_type") == "derived_knowledge":
-                knowledge_id = meta.get("knowledge_id") or str(
-                    meta.get("chunk_id", "")
-                ).replace("knowledge:", "")
-                certainty = meta.get("certainty", "")
-                related_source = meta.get("related_source", "")
-                chunk_context = str(meta.get("context", "") or "").strip()
-                body = doc["text"].strip()
-                if chunk_context:
-                    body = f"来源说明：\n{chunk_context}\n\n内容：\n{body}"
-                block = (
-                    f'<Knowledge knowledge_id="{knowledge_id}" certainty="{certainty}" '
-                    f'related_source="{related_source}">\n'
-                    f"{body}\n"
-                    f"</Knowledge>"
-                )
-                context_blocks.append(block)
-                continue
-
-            source = meta.get("source", "未知文件")
-            page = meta.get("page", 1)
-            chunk_id = meta.get("chunk_id", meta.get("chunk_index", 0))
-            chunk_context = str(meta.get("context", "") or "").strip()
-            body = doc["text"].strip()
-            if chunk_context:
-                body = f"定位上下文：\n{chunk_context}\n\n正文：\n{body}"
-
-            block = (
-                f'<Document source="{source}" page="{page}" chunk_id="{chunk_id}">\n'
-                f"{body}\n"
-                f"</Document>"
-            )
-            context_blocks.append(block)
-
-        return "\n\n".join(context_blocks)
+        # 共享 renderer 也是 Evidence Pack 的精确字符计数口径。
+        return render_evidence_context(docs)
 
     # 格式化提示。
     @classmethod

@@ -1,6 +1,6 @@
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel, Field
@@ -191,16 +191,55 @@ def select_verification_docs(
     docs: Sequence[VerificationDoc],
     max_docs: int,
     requirement_ids: Sequence[str] | None = None,
+    pinned_chunk_ids: Collection[str] | None = None,
 ) -> list[VerificationDoc]:
     if max_docs <= 0:
         return []
     selected: list[VerificationDoc] = []
     selected_ids: set[int] = set()
     seen_sources: set[str] = set()
-
-    # 先为每个需求保留至少一个有明确检索归因的高排名候选。
     covered_requirements: set[str] = set()
     requested_ids = list(dict.fromkeys(str(item) for item in requirement_ids or []))
+
+    def add(doc: VerificationDoc) -> None:
+        selected.append(doc)
+        selected_ids.add(id(doc))
+        covered_requirements.update(_matched_requirement_ids(doc))
+        source = _source_key(doc)
+        if source:
+            seen_sources.add(source)
+
+    # Evidence already verified in a previous adaptive round is part of the
+    # generation closed set.  The verifier uses only a subset: retain the
+    # smallest pinned cover first so old r1 evidence cannot starve a newly
+    # retrieved r2 candidate under the independent verifier-doc budget.
+    pinned_ids = {str(item) for item in pinned_chunk_ids or [] if str(item)}
+    remaining_pinned = [doc for doc in docs if _chunk_id(doc) in pinned_ids]
+    if requested_ids:
+        requested_set = set(requested_ids)
+        while remaining_pinned:
+            uncovered = requested_set - covered_requirements
+            coverage_counts = [
+                len(uncovered.intersection(_matched_requirement_ids(doc)))
+                for doc in remaining_pinned
+            ]
+            if not coverage_counts or max(coverage_counts) == 0:
+                break
+            best_index = max(
+                range(len(remaining_pinned)),
+                key=lambda index: (coverage_counts[index], -index),
+            )
+            add(remaining_pinned.pop(best_index))
+            if len(selected) >= max_docs:
+                return selected
+    else:
+        for doc in remaining_pinned:
+            add(doc)
+            if len(selected) >= max_docs:
+                return selected
+        remaining_pinned = []
+
+    # 先为每个需求保留至少一个有明确检索归因的高排名候选。
     for requirement_id in requested_ids:
         if requirement_id in covered_requirements:
             continue
@@ -210,15 +249,17 @@ def select_verification_docs(
             matched_ids = _matched_requirement_ids(doc)
             if requirement_id not in matched_ids:
                 continue
-            selected.append(doc)
-            selected_ids.add(id(doc))
-            covered_requirements.update(matched_ids)
-            source = _source_key(doc)
-            if source:
-                seen_sources.add(source)
+            add(doc)
             if len(selected) >= max_docs:
                 return selected
             break
+
+    for doc in remaining_pinned:
+        if id(doc) in selected_ids:
+            continue
+        add(doc)
+        if len(selected) >= max_docs:
+            return selected
 
     # 需求覆盖之后再优先扩大来源多样性。
     for doc in docs:
@@ -227,10 +268,7 @@ def select_verification_docs(
         source = _source_key(doc)
         if source and source in seen_sources:
             continue
-        selected.append(doc)
-        selected_ids.add(id(doc))
-        if source:
-            seen_sources.add(source)
+        add(doc)
         if len(selected) >= max_docs:
             return selected
     for doc in docs:

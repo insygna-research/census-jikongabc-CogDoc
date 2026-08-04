@@ -97,6 +97,19 @@ def _requirement_is_covered(
     return False
 
 
+# 计算一个有界上下文对全部 gold requirements 的覆盖比例。
+def requirement_coverage_rate(
+    retrieved: Sequence[Mapping[str, Any]],
+    requirements: Sequence[Mapping[str, Any]],
+) -> float:
+    if not requirements:
+        return 0.0
+    covered = sum(
+        _requirement_is_covered(retrieved, requirement) for requirement in requirements
+    )
+    return covered / len(requirements)
+
+
 def _requirement_mask(
     item: Mapping[str, Any], requirements: Sequence[Mapping[str, Any]]
 ) -> int:

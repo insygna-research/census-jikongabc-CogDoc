@@ -1,5 +1,5 @@
 import pytest
-from cogdoc.tools.chunk_identity import build_chunk_id
+from cogdoc.tools.chunk_identity import build_chunk_id, build_parent_chunk_id
 from cogdoc.tools.chunk_identity import (
     DEFAULT_CHUNK_CONTEXT_CHARS,
     CHUNK_IDENTITY_VERSION,
@@ -48,6 +48,18 @@ def test_chunk_identity_version_includes_chunking_parameters():
     assert f"ov{DEFAULT_CHUNK_CHAR_OVERLAP}" in CHUNK_IDENTITY_VERSION
     assert f"min{MIN_CHUNK_CHARS}" in CHUNK_IDENTITY_VERSION
     assert f"ctx{DEFAULT_CHUNK_CONTEXT_CHARS}" in CHUNK_IDENTITY_VERSION
+    assert "parent_child_section_index" in CHUNK_IDENTITY_VERSION
+
+
+# 验证章节父块使用文件身份和章节序号构造稳定标识。
+def test_parent_chunk_id_contract_uses_source_identity_and_section_index():
+    assert (
+        build_parent_chunk_id(SOURCE_SHA, "paper.pdf", 3)
+        == f"sha256:{SOURCE_SHA}:src:paper.pdf:section:3"
+    )
+
+    with pytest.raises(ValueError, match="section_index"):
+        build_parent_chunk_id(SOURCE_SHA, "paper.pdf", -1)
 
 
 # 验证 chunk id requires source sha256。
@@ -151,3 +163,109 @@ def test_long_text_without_punctuation_still_respects_max_size():
 
     assert chunks
     assert all(len(chunk["text"]) <= 50 for chunk in chunks)
+
+
+# 验证章节边界成为硬切分边界，并为每个 child 写入稳定父级结构元数据。
+def test_chunker_writes_parent_child_structure_without_crossing_sections():
+    introduction = "1 Introduction\n" + "背景信息用于说明研究问题和范围。" * 10
+    methods = "2 Methods\n" + "方法信息用于说明训练流程和参数。" * 10
+    chunks = chunk_paper(
+        [_page(1, f"{introduction}\n\n{methods}")],
+        source_sha256=SOURCE_SHA,
+        chunk_char_size=90,
+        chunk_char_overlap=20,
+        chunk_context_chars=120,
+    )
+
+    assert chunks
+    assert all(
+        not ("Introduction" in chunk["text"] and "Methods" in chunk["text"])
+        for chunk in chunks
+    )
+    grouped: dict[str, list[dict]] = {}
+    for chunk in chunks:
+        grouped.setdefault(chunk["meta"]["parent_chunk_id"], []).append(chunk)
+    assert len(grouped) == 2
+    assert {chunk["meta"]["section_path"] for chunk in chunks} == {
+        "Introduction",
+        "Methods",
+    }
+    assert all(
+        [doc["meta"]["child_index_in_parent"] for doc in siblings]
+        == list(range(len(siblings)))
+        for siblings in grouped.values()
+    )
+    introduction_chunks = [
+        chunk for chunk in chunks if chunk["meta"]["section_title"] == "Introduction"
+    ]
+    assert all(
+        "Methods" not in chunk["meta"].get("context", "")
+        for chunk in introduction_chunks
+    )
+
+
+# 无可靠标题的旧式文档不伪造父级结构，运行时会使用邻块兼容路径。
+def test_chunker_keeps_unstructured_documents_without_parent_metadata():
+    chunks = chunk_paper(
+        [_page(1, "这是连续的普通正文，用于验证保守结构识别。" * 12)],
+        source_sha256=SOURCE_SHA,
+        chunk_char_size=100,
+        chunk_char_overlap=0,
+    )
+
+    assert chunks
+    assert all("parent_chunk_id" not in chunk["meta"] for chunk in chunks)
+
+
+# 结构硬边界不能让短 preamble 或短章节从索引中消失。
+def test_chunker_preserves_short_structured_sections_and_preamble():
+    text = (
+        "Cover\n\n"
+        "1 Introduction\nTiny result.\n\n"
+        "2 Methods\n" + "方法信息用于说明训练流程和参数。" * 8
+    )
+    chunks = chunk_paper(
+        [_page(1, text)],
+        source_sha256=SOURCE_SHA,
+        chunk_char_size=90,
+        chunk_char_overlap=20,
+        chunk_context_chars=120,
+    )
+
+    assert any(chunk["text"] == "Cover" for chunk in chunks)
+    assert any("Tiny result." in chunk["text"] for chunk in chunks)
+    short_intro = next(
+        chunk
+        for chunk in chunks
+        if chunk["meta"].get("section_title") == "Introduction"
+    )
+    assert short_intro["meta"]["child_index_in_parent"] == 0
+    assert short_intro["meta"]["section_path"] == "Introduction"
+    preamble = next(chunk for chunk in chunks if chunk["text"] == "Cover")
+    assert preamble["meta"]["section_level"] == 0
+    assert preamble["meta"]["child_index_in_parent"] == 0
+
+
+# 没有结构标题的短文本继续使用旧 MIN_CHUNK_CHARS 过滤行为。
+def test_chunker_keeps_legacy_minimum_for_short_unstructured_text():
+    chunks = chunk_paper(
+        [_page(1, "Tiny unstructured text.")],
+        source_sha256=SOURCE_SHA,
+        chunk_char_size=90,
+        chunk_char_overlap=0,
+    )
+
+    assert chunks == []
+
+
+@pytest.mark.parametrize("overlap", [80, 120])
+def test_chunker_rejects_overlap_not_smaller_than_chunk_size(overlap):
+    with pytest.raises(
+        ValueError, match="chunk_char_overlap must be smaller than chunk_char_size"
+    ):
+        chunk_paper(
+            [_page(1, "1 Introduction\n" + "正文内容足够长。" * 20)],
+            source_sha256=SOURCE_SHA,
+            chunk_char_size=80,
+            chunk_char_overlap=overlap,
+        )

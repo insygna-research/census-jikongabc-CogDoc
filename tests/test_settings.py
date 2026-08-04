@@ -20,6 +20,11 @@ def test_settings_defaults_match_current_runtime_contract():
     assert settings.ollama_model_name == "qwen2.5:7b"
     assert settings.qa_retrieval_top_k == 9
     assert settings.qa_rerank_top_n == 3
+    assert settings.qa_parent_context_enabled is True
+    assert settings.qa_parent_context_max_chunks == 5
+    assert settings.qa_parent_context_max_chars == 3600
+    assert settings.qa_evidence_pack_max_docs == 8
+    assert settings.qa_evidence_pack_max_chars == 7200
     assert settings.qa_abstain_enabled is True
     assert settings.qa_abstain_max_vector_distance == 0.86
     assert settings.qa_abstain_min_bm25_score == 10.0
@@ -73,6 +78,11 @@ def test_settings_reads_environment_overrides(monkeypatch):
     monkeypatch.setenv("COGDOC_DOC_DIR", "papers")
     monkeypatch.setenv("LLM_MODEL_NAME", "custom-model")
     monkeypatch.setenv("QA_RETRIEVAL_TOP_K", "11")
+    monkeypatch.setenv("QA_PARENT_CONTEXT_ENABLED", "false")
+    monkeypatch.setenv("QA_PARENT_CONTEXT_MAX_CHUNKS", "7")
+    monkeypatch.setenv("QA_PARENT_CONTEXT_MAX_CHARS", "4200")
+    monkeypatch.setenv("QA_EVIDENCE_PACK_MAX_DOCS", "10")
+    monkeypatch.setenv("QA_EVIDENCE_PACK_MAX_CHARS", "8400")
     monkeypatch.setenv("QA_ABSTAIN_MAX_VECTOR_DISTANCE", "0.75")
     monkeypatch.setenv("COGDOC_MEMORY_SEMANTIC_ENABLED", "false")
     monkeypatch.setenv("COGDOC_MEMORY_RETRIEVAL_SHORT_LIMIT", "6")
@@ -91,6 +101,11 @@ def test_settings_reads_environment_overrides(monkeypatch):
     assert settings.cogdoc_doc_dir == "papers"
     assert settings.llm_model_name == "custom-model"
     assert settings.qa_retrieval_top_k == 11
+    assert settings.qa_parent_context_enabled is False
+    assert settings.qa_parent_context_max_chunks == 7
+    assert settings.qa_parent_context_max_chars == 4200
+    assert settings.qa_evidence_pack_max_docs == 10
+    assert settings.qa_evidence_pack_max_chars == 8400
     assert settings.qa_abstain_max_vector_distance == 0.75
     assert settings.memory_semantic_enabled is False
     assert settings.memory_retrieval_short_limit == 6

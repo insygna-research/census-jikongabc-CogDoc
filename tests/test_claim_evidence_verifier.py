@@ -14,6 +14,7 @@ from cogdoc.agents.claim_evidence_verifier import (
     ClaimRepair,
     ClaimRepairAgent,
     block_unfaithful_answer,
+    documents_for_state,
     extract_claim_units,
     make_claim_audit_exemption,
 )
@@ -59,6 +60,103 @@ def _state(answer: str, *, doc: dict | None = None) -> dict:
         "reranked_docs": [doc or _doc()],
         "is_local": False,
     }
+
+
+def test_summary_documents_use_exact_section_evidence_not_same_page_siblings():
+    seen = _doc("可见证据", chunk_id="chunk:guide:seen")
+    unseen = _doc("同页但生成器未见", chunk_id="chunk:guide:unseen")
+
+    docs = documents_for_state(
+        {
+            "task_type": "summary",
+            "answer": "报名截止日期是 8 月 30 日。[guide.pdf:P2]",
+            "summary_docs": [seen, unseen],
+            "summary_section_results": [
+                {
+                    "section_id": "rules",
+                    "title": "规则",
+                    "content": "报名截止日期是 8 月 30 日。[guide.pdf:P2]",
+                    "evidence": [{"chunk_id": "chunk:guide:seen"}],
+                }
+            ],
+        }
+    )
+
+    assert [doc["meta"]["chunk_id"] for doc in docs] == ["chunk:guide:seen"]
+
+
+def test_compare_documents_use_exact_cell_evidence_not_same_page_siblings():
+    seen = _doc("可见证据", chunk_id="chunk:guide:seen")
+    unseen = _doc("同页但生成器未见", chunk_id="chunk:guide:unseen")
+
+    docs = documents_for_state(
+        {
+            "task_type": "compare",
+            "answer": "方案要求线上报名。[guide.pdf:P2]",
+            "compare_docs_by_source": {"guide.pdf": [seen, unseen]},
+            "document_profiles": [
+                {
+                    "source": "guide.pdf",
+                    "cells": [
+                        {
+                            "dimension_id": "rules",
+                            "source": "guide.pdf",
+                            "content": "方案要求线上报名。[guide.pdf:P2]",
+                            "evidence": [{"chunk_id": "chunk:guide:seen"}],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert [doc["meta"]["chunk_id"] for doc in docs] == ["chunk:guide:seen"]
+
+
+def test_legacy_summary_evidence_does_not_expand_ambiguous_page_citation():
+    first = _doc("同页片段一", chunk_id="chunk:guide:first")
+    second = _doc("同页片段二", chunk_id="chunk:guide:second")
+
+    docs = documents_for_state(
+        {
+            "task_type": "summary",
+            "answer": "报名要求见文档。[guide.pdf:P2]",
+            "summary_docs": [first, second],
+            # 旧状态没有 section evidence，页码无法证明生成器看过哪个 child。
+            "summary_section_results": [
+                {
+                    "section_id": "rules",
+                    "title": "规则",
+                    "content": "报名要求见文档。[guide.pdf:P2]",
+                }
+            ],
+        }
+    )
+
+    assert docs == []
+
+
+def test_legacy_summary_uses_unique_aggregate_evidence_chunk_id():
+    seen = _doc("可见证据", chunk_id="chunk:guide:seen")
+    unseen = _doc("同页但未记录", chunk_id="chunk:guide:unseen")
+
+    docs = documents_for_state(
+        {
+            "task_type": "summary",
+            "answer": "报名要求见文档。[guide.pdf:P2]",
+            "summary_docs": [seen, unseen],
+            "summary_section_results": [
+                {
+                    "section_id": "rules",
+                    "title": "规则",
+                    "content": "报名要求见文档。[guide.pdf:P2]",
+                }
+            ],
+            "evidence": [{"chunk_id": "chunk:guide:seen"}],
+        }
+    )
+
+    assert [doc["meta"]["chunk_id"] for doc in docs] == ["chunk:guide:seen"]
 
 
 def _assessment(
@@ -175,6 +273,42 @@ def test_claim_audit_accepts_supported_claim_with_cited_evidence(monkeypatch):
         "unsupported_claim_rate": 0.0,
     }
     assert audit["claims"][0]["supporting_chunk_ids"] == ["chunk:guide:2"]
+
+
+def test_summary_claim_audit_rejects_unseen_same_page_chunk(monkeypatch):
+    seen = _doc("报名截止日期是 8 月 30 日。", chunk_id="chunk:guide:seen")
+    unseen = _doc("报名截止日期是 9 月 30 日。", chunk_id="chunk:guide:unseen")
+    _stub_verifier(
+        monkeypatch,
+        _assessment(
+            verdict="supported",
+            evidence_chunk_ids=["chunk:guide:unseen"],
+        ),
+    )
+
+    result = ClaimEvidenceVerifierAgent.audit(
+        {
+            "task_type": "summary",
+            "query": "报名截止日期是什么时候？",
+            "answer": "报名截止日期是 9 月 30 日。[guide.pdf:P2]",
+            "critique": "",
+            "summary_docs": [seen, unseen],
+            "summary_section_results": [
+                {
+                    "section_id": "rules",
+                    "title": "规则",
+                    "content": "报名截止日期是 9 月 30 日。[guide.pdf:P2]",
+                    "evidence": [{"chunk_id": "chunk:guide:seen"}],
+                }
+            ],
+            "is_local": False,
+        }
+    )
+
+    claim = result["claim_audit"]["claims"][0]
+    assert result["claim_audit_passed"] is False
+    assert claim["cited_chunk_ids"] == ["chunk:guide:seen"]
+    assert claim["supporting_chunk_ids"] == []
 
 
 def test_claim_audit_does_not_treat_marker_plus_facts_as_safe_abstention(monkeypatch):

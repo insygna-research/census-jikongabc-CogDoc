@@ -4,6 +4,8 @@ from typing import Any
 
 SAFE_RETRIEVAL_METADATA_KEYS = {
     "search_channel",
+    "context_anchor_chunk_id",
+    "context_expansion",
     "knowledge_score",
     "retrieval_score",
     "rerank_score",
@@ -23,7 +25,35 @@ SAFE_RETRIEVAL_METADATA_KEYS = {
     "best_query_rank",
     "original_query_hit",
     "retrieval_round",
+    "evidence_text_start",
+    "evidence_text_end",
+    "evidence_trimmed_overlap_chars",
 }
+
+_STRUCTURE_STRING_META_FIELDS = (
+    "parent_chunk_id",
+    "section_title",
+    "section_path",
+)
+_STRUCTURE_INT_META_FIELDS = (
+    "section_level",
+    "child_index_in_parent",
+)
+
+
+def copy_optional_structure_metadata(
+    source: Mapping[str, Any], target: dict[str, Any]
+) -> None:
+    """Copy explicitly present Parent–Child fields into persisted metadata."""
+
+    for field in _STRUCTURE_STRING_META_FIELDS:
+        value = source.get(field)
+        if value is not None:
+            target[field] = str(value)
+    for field in _STRUCTURE_INT_META_FIELDS:
+        value = source.get(field)
+        if value is not None:
+            target[field] = int(value)
 
 
 # 提取安全检索元数据。

@@ -3,6 +3,7 @@ from cogdoc.agents import compare_generator, compare_profile
 from cogdoc.agents.claim_evidence_verifier import (
     CLAIM_AUDIT_EXEMPTION_GUIDANCE,
     CLAIM_AUDIT_EXEMPTION_UPSTREAM_ERROR,
+    documents_for_state,
 )
 from cogdoc.graph import workflow
 from cogdoc.graph.subgraphs import compare
@@ -375,6 +376,54 @@ def test_compare_table_node_builds_dimension_blocks_and_conclusion(monkeypatch):
     assert "- **b.pdf**：方法 B。[b.pdf:P2]" in result["answer"]
     assert "## 简短结论" in result["answer"]
     assert "引用校验警告" not in result["answer"]
+
+
+def test_compare_claim_documents_exclude_unseen_same_page_child():
+    seen = _doc("a.pdf", 1, 0)
+    unseen = _doc("a.pdf", 1, 1)
+    other = _doc("b.pdf", 2, 0)
+    state = {
+        "task_type": "compare",
+        "compare_sources": ["a.pdf", "b.pdf"],
+        "compare_docs_by_source": {
+            "a.pdf": [seen, unseen],
+            "b.pdf": [other],
+        },
+        "compare_dimensions": _dimensions()[:1],
+        "document_profiles": [
+            {
+                "source": "a.pdf",
+                "cells": [
+                    {
+                        "dimension_id": "method",
+                        "source": "a.pdf",
+                        "content": "方法 A。[a.pdf:P1]",
+                        "evidence": [{"chunk_id": "chunk:a.pdf:0"}],
+                    }
+                ],
+            },
+            {
+                "source": "b.pdf",
+                "cells": [
+                    {
+                        "dimension_id": "method",
+                        "source": "b.pdf",
+                        "content": "方法 B。[b.pdf:P2]",
+                        "evidence": [{"chunk_id": "chunk:b.pdf:0"}],
+                    }
+                ],
+            },
+        ],
+        "is_local": True,
+    }
+
+    final = compare_table_node(state)
+    docs = documents_for_state({**state, **final})
+
+    assert [doc["meta"]["chunk_id"] for doc in docs] == [
+        "chunk:a.pdf:0",
+        "chunk:b.pdf:0",
+    ]
 
 
 # 验证 compare table node records conclusion failure 场景。

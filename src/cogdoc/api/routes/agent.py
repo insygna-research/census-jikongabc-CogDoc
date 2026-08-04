@@ -205,6 +205,11 @@ def _retrieve_hit(rank: int, doc: Mapping[str, Any]) -> RetrieveHit:
     return RetrieveHit(
         rank=rank,
         chunk_id=str(meta.get("chunk_id", "")),
+        parent_chunk_id=str(meta.get("parent_chunk_id", "") or ""),
+        section_title=str(meta.get("section_title", "") or ""),
+        section_path=str(meta.get("section_path", "") or ""),
+        section_level=meta.get("section_level"),
+        child_index_in_parent=meta.get("child_index_in_parent"),
         source_type=str(meta.get("source_type", "document") or "document"),
         knowledge_id=str(meta.get("knowledge_id", "") or ""),
         chunk_index=meta.get("chunk_index"),

@@ -18,6 +18,7 @@ from cogdoc.tools.eval.retrieval_metrics import (
     percentile,
     recall_at_k,
     reciprocal_rank,
+    requirement_coverage_rate,
 )
 
 
@@ -110,6 +111,19 @@ def test_requirement_coverage_supports_source_gold_and_hard_negatives():
     assert metrics["requirement_recall@2"] == 1.0
     assert metrics["hard_negative_rejection@1"] == 0.0
     assert metrics["hard_negative_rejection@2"] == 0.0
+
+
+def test_requirement_coverage_rate_measures_bounded_generation_context():
+    assert (
+        requirement_coverage_rate(
+            [{"chunk_id": "answer-sibling", "source": "policy.pdf"}],
+            [
+                {"requirement_id": "r1", "acceptable_chunk_ids": ["answer-sibling"]},
+                {"requirement_id": "r2", "acceptable_chunk_ids": ["missing"]},
+            ],
+        )
+        == 0.5
+    )
 
 
 # 验证同一需求的多个可接受块不会重复抬高 nDCG。
@@ -360,6 +374,11 @@ def test_retrieval_run_eval_reports_layers_and_latency(monkeypatch):
             "evidence_supported": supported,
             "evidence_verification_reason": "not_required",
             "evidence_verified_chunk_ids": [],
+            "generation_context_items": (
+                [{"chunk_id": "a-child", "source": "a.pdf"}] if supported else []
+            ),
+            "parent_context_expanded_count": 1 if supported else 0,
+            "neighbor_context_expanded_count": 0,
         }
 
     monkeypatch.setattr(
@@ -374,6 +393,12 @@ def test_retrieval_run_eval_reports_layers_and_latency(monkeypatch):
                 "query": "answerable",
                 "expected_sources": ["a.pdf"],
                 "layer": "single-source",
+                "gold_requirements": [
+                    {
+                        "requirement_id": "r1",
+                        "acceptable_chunk_ids": ["a-child"],
+                    }
+                ],
             },
             {"query": "none", "expected_sources": [], "layer": "no-answer"},
         ],
@@ -390,6 +415,9 @@ def test_retrieval_run_eval_reports_layers_and_latency(monkeypatch):
     assert report["aggregate"]["no_answer_first_stage_abstention_rate"] == 1.0
     assert report["config"]["verify_evidence"] is True
     assert report["aggregate"]["latency_p95_ms"] >= 0.0
+    assert report["rows"][0]["metrics"]["generation_requirement_coverage"] == 1.0
+    assert report["rows"][0]["parent_context_expanded_count"] == 1
+    assert report["aggregate"]["parent_context_trigger_rate"] == 0.5
     assert report["by_layer"]["single-source"]["count"] == 1
     assert report["by_layer"]["no-answer"]["count"] == 1
 
@@ -407,6 +435,8 @@ def test_retrieve_result_adaptive_second_round_without_model_verifier(monkeypatc
         qa_adaptive_retrieval_max_top_k=12,
         qa_retrieval_max_queries=7,
         qa_rerank_top_n=1,
+        qa_evidence_pack_max_docs=8,
+        qa_evidence_pack_max_chars=7200,
         hybrid_rrf_k=60,
     )
     requirements = [
@@ -517,6 +547,8 @@ def test_retrieve_result_carries_verified_docs_into_second_round(monkeypatch):
         qa_adaptive_retrieval_max_top_k=12,
         qa_retrieval_max_queries=7,
         qa_rerank_top_n=2,
+        qa_evidence_pack_max_docs=8,
+        qa_evidence_pack_max_chars=7200,
         qa_evidence_verify_max_docs=4,
         hybrid_rrf_k=60,
     )
@@ -638,7 +670,7 @@ def test_retrieve_result_carries_verified_docs_into_second_round(monkeypatch):
     monkeypatch.setattr(
         evidence_verifier,
         "select_verification_docs",
-        lambda docs, max_docs, requirement_ids=None: list(docs),
+        lambda docs, max_docs, requirement_ids=None, pinned_chunk_ids=None: list(docs),
     )
     monkeypatch.setattr(evidence_verifier.EvidenceVerifierAgent, "verify", verify)
 
@@ -658,3 +690,326 @@ def test_retrieve_result_carries_verified_docs_into_second_round(monkeypatch):
     assert result["sources"] == ["a.pdf", "b.pdf"]
     assert [item["chunk_id"] for item in result["items"]] == ["c1", "c2"]
     assert result["evidence_verified_chunk_ids"] == ["c1", "c2"]
+
+
+# Parent sibling 必须在离线 verifier 调用前进入闭集，顺序与线上 QA 一致。
+def test_retrieve_result_hydrates_parent_context_before_verifier(monkeypatch):
+    from cogdoc import state_runtime
+    from cogdoc.agents import evidence_verifier
+    from cogdoc.config.settings import Settings
+    from cogdoc.graph.subgraphs import qa
+    from cogdoc.tools.retriever import confidence
+
+    settings = Settings(
+        _env_file=None,
+        qa_adaptive_retrieval_enabled=False,
+        qa_retrieval_max_queries=1,
+        qa_rerank_top_n=1,
+        qa_evidence_verify_max_docs=3,
+        qa_parent_context_max_chunks=3,
+        qa_parent_context_max_chars=1000,
+    )
+
+    def child(index):
+        return {
+            "text": f"child-{index}",
+            "meta": {
+                "chunk_id": f"c{index}",
+                "source": "paper.pdf",
+                "page": 1,
+                "page_start": 1,
+                "page_end": 1,
+                "chunk_index": index,
+                "parent_chunk_id": "parent-1",
+                "section_title": "Methods",
+                "section_path": "Methods",
+                "section_level": 1,
+                "child_index_in_parent": index,
+            },
+        }
+
+    chunks = [child(index) for index in range(3)]
+
+    class Engine:
+        def search(self, query, top_k):
+            return [child(1)]
+
+        def load_source_chunks(self, source):
+            assert source == "paper.pdf"
+            return chunks
+
+    class Knowledge:
+        def search(self, kb_id, query, top_k):
+            return []
+
+    class Feedback:
+        def boosts_for_query(self, kb_id, query):
+            return {}
+
+    @contextmanager
+    def lease(_kb_id):
+        yield
+
+    verifier_calls = []
+
+    def verify(state):
+        chunk_ids = [doc["meta"]["chunk_id"] for doc in state["verification_docs"]]
+        verifier_calls.append(chunk_ids)
+        return {
+            "evidence_verification_required": True,
+            "evidence_supported": True,
+            "evidence_verification_reason": "右侧 sibling 包含答案",
+            "evidence_verified_chunk_ids": ["c2"],
+            "evidence_requirement_assessments": [
+                {
+                    "requirement_id": "r1",
+                    "verdict": "supported",
+                    "evidence_chunk_ids": ["c2"],
+                    "reason": "直接证据",
+                }
+            ],
+            "missing_evidence_requirement_ids": [],
+            "retrieval_abstained": False,
+            "retrieval_abstain_reason": "evidence_supported",
+        }
+
+    engine = Engine()
+    monkeypatch.setattr(eval_retrieval, "get_settings", lambda: settings)
+    monkeypatch.setattr(qa, "get_settings", lambda: settings)
+    monkeypatch.setattr(qa, "kb_read_lease", lease)
+    monkeypatch.setattr(qa.RetrieverFactory, "get_engine", lambda _kb_id: engine)
+    monkeypatch.setattr("cogdoc.service.kb_readers.kb_read_lease", lease)
+    monkeypatch.setattr(
+        state_runtime,
+        "default_state_runtime",
+        lambda: SimpleNamespace(
+            derived_knowledge_retriever=Knowledge(),
+            retrieval_feedback_store=Feedback(),
+        ),
+    )
+    monkeypatch.setattr(
+        confidence,
+        "assess_retrieval_support",
+        lambda docs, _settings: SimpleNamespace(
+            supported=True,
+            score=1.0,
+            reason="supported",
+            signals={},
+        ),
+    )
+    monkeypatch.setattr(
+        evidence_verifier, "should_verify_evidence", lambda state, settings: True
+    )
+    monkeypatch.setattr(evidence_verifier.EvidenceVerifierAgent, "verify", verify)
+
+    result = eval_retrieval.retrieve_result(
+        "训练阶段是什么？",
+        "kb",
+        3,
+        False,
+        verify_evidence=True,
+        evidence_requirements=[
+            {
+                "requirement_id": "r1",
+                "question": "训练阶段是什么？",
+                "retrieval_query": "训练阶段",
+                "recovery_query": "训练阶段细节",
+            }
+        ],
+    )
+
+    assert verifier_calls == [["c1", "c0", "c2"]]
+    assert [item["chunk_id"] for item in result["generation_context_items"]] == [
+        "c0",
+        "c1",
+        "c2",
+    ]
+    assert result["evidence_pack_input_count"] == 3
+    assert result["evidence_pack_kept_count"] == 3
+    assert result["evidence_pack_dropped_count"] == 0
+    packed_ids = {item["chunk_id"] for item in result["evidence_pack_context_items"]}
+    assert set(verifier_calls[0]) <= packed_ids
+    assert result["evidence_supported"] is True
+
+
+# Anchor 硬约束本身超出 pack 预算时必须在模型 verifier 前安全拒答。
+def test_retrieve_result_fails_closed_before_verifier_when_pack_is_over_budget(
+    monkeypatch,
+):
+    from cogdoc import state_runtime
+    from cogdoc.agents import evidence_verifier
+    from cogdoc.config.settings import Settings
+    from cogdoc.graph.subgraphs import qa
+    from cogdoc.tools.retriever import confidence
+
+    settings = Settings(
+        _env_file=None,
+        qa_adaptive_retrieval_enabled=True,
+        qa_adaptive_retrieval_max_retries=1,
+        qa_retrieval_max_queries=1,
+        qa_rerank_top_n=2,
+        qa_evidence_pack_max_docs=1,
+        qa_evidence_pack_max_chars=1000,
+    )
+
+    class Engine:
+        def search(self, query, top_k):
+            return [
+                {
+                    "text": f"hard evidence {index}",
+                    "meta": {
+                        "chunk_id": f"c{index}",
+                        "source": f"source-{index}.pdf",
+                    },
+                }
+                for index in range(2)
+            ]
+
+    class Knowledge:
+        def search(self, kb_id, query, top_k):
+            return []
+
+    class Feedback:
+        def boosts_for_query(self, kb_id, query):
+            return {}
+
+    @contextmanager
+    def lease(_kb_id):
+        yield
+
+    verifier_calls = []
+
+    def fail_verify(state):
+        verifier_calls.append(state)
+        raise AssertionError("hard-over-budget pack must not reach verifier")
+
+    monkeypatch.setattr(eval_retrieval, "get_settings", lambda: settings)
+    monkeypatch.setattr(qa.RetrieverFactory, "get_engine", lambda _kb_id: Engine())
+    monkeypatch.setattr("cogdoc.service.kb_readers.kb_read_lease", lease)
+    monkeypatch.setattr(
+        state_runtime,
+        "default_state_runtime",
+        lambda: SimpleNamespace(
+            derived_knowledge_retriever=Knowledge(),
+            retrieval_feedback_store=Feedback(),
+        ),
+    )
+    monkeypatch.setattr(
+        confidence,
+        "assess_retrieval_support",
+        lambda docs, _settings: SimpleNamespace(
+            supported=True,
+            score=1.0,
+            reason="supported",
+            signals={},
+        ),
+    )
+    monkeypatch.setattr(
+        evidence_verifier, "should_verify_evidence", lambda state, settings: True
+    )
+    monkeypatch.setattr(evidence_verifier.EvidenceVerifierAgent, "verify", fail_verify)
+
+    result = eval_retrieval.retrieve_result(
+        "需要精确核验的事实是什么？",
+        "kb",
+        2,
+        False,
+        verify_evidence=True,
+    )
+
+    assert verifier_calls == []
+    assert result["supported"] is False
+    assert result["reason"] == "evidence_pack_hard_budget_exceeded"
+    assert result["evidence_verification_required"] is False
+    assert result["retrieval_retry_count"] == 0
+    assert result["evidence_pack_input_count"] == 2
+    assert result["evidence_pack_kept_count"] == 2
+    assert result["evidence_pack_over_budget"] is True
+    assert result["generation_context_items"] == []
+    assert len(result["evidence_pack_context_items"]) == 2
+
+
+# Pack 容量与覆盖变化是诊断数据，报告应保留但不得自动进入历史 baseline gate。
+def test_run_eval_reports_pack_diagnostics_without_baseline_gating(monkeypatch):
+    def fake_retrieve(
+        query,
+        doc_id,
+        top_k,
+        rerank,
+        *,
+        verify_evidence=False,
+        is_local_verifier=False,
+        rewritten_queries=None,
+        evidence_requirements=None,
+    ):
+        return {
+            "sources": ["policy.pdf", "appendix.pdf"],
+            "items": [
+                {"chunk_id": "kept", "source": "policy.pdf"},
+                {"chunk_id": "dropped", "source": "appendix.pdf"},
+            ],
+            "supported": True,
+            "first_stage_supported": True,
+            "confidence": 1.0,
+            "reason": "supported",
+            "signals": {},
+            "evidence_verification_required": False,
+            "evidence_supported": True,
+            "evidence_verification_reason": "not_required",
+            "evidence_verified_chunk_ids": [],
+            "generation_context_items": [{"chunk_id": "kept", "source": "policy.pdf"}],
+            "evidence_pack_input_items": [
+                {"chunk_id": "kept", "source": "policy.pdf"},
+                {"chunk_id": "dropped", "source": "appendix.pdf"},
+            ],
+            "evidence_pack_context_items": [
+                {"chunk_id": "kept", "source": "policy.pdf"}
+            ],
+            "evidence_pack_input_count": 2,
+            "evidence_pack_kept_count": 1,
+            "evidence_pack_dropped_count": 1,
+            "evidence_pack_input_chars": 120,
+            "evidence_pack_kept_chars": 60,
+            "evidence_pack_overlap_removed_chars": 12,
+            "evidence_pack_anchor_count": 1,
+            "evidence_pack_pinned_count": 0,
+            "evidence_pack_drop_reason_counts": {"max_docs": 1},
+            "evidence_pack_over_budget": False,
+        }
+
+    monkeypatch.setattr(eval_retrieval, "retrieve_result", fake_retrieve)
+    report = eval_retrieval.run_eval(
+        [
+            {
+                "query": "比较两项要求",
+                "expected_sources": ["policy.pdf"],
+                "gold_requirements": [
+                    {
+                        "requirement_id": "r1",
+                        "acceptable_chunk_ids": ["kept"],
+                    },
+                    {
+                        "requirement_id": "r2",
+                        "acceptable_chunk_ids": ["dropped"],
+                    },
+                ],
+            }
+        ],
+        [1, 2],
+        False,
+    )
+
+    row = report["rows"][0]
+    assert row["evidence_pack_input_count"] == 2
+    assert row["evidence_pack_kept_count"] == 1
+    assert row["evidence_pack_input_chars"] == 120
+    assert row["evidence_pack_kept_chars"] == 60
+    assert row["evidence_pack_overlap_removed_chars"] == 12
+    assert row["evidence_pack_drop_reason_counts"] == {"max_docs": 1}
+    assert row["evidence_pack_requirement_coverage_pre"] == 1.0
+    assert row["evidence_pack_requirement_coverage_post"] == 0.5
+    assert report["aggregate"]["evidence_pack_dropped_count"] == 1.0
+    assert not any(
+        metric.startswith("evidence_pack_")
+        for metric in report["baseline_gated_metrics"]
+    )
