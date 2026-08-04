@@ -10,7 +10,6 @@ from cogdoc.api.schemas import (
     IndexJob,
     KnowledgeBase,
     KnowledgeBaseCreate,
-    ChunkPreview,
     SourceChunksResponse,
     SourceListResponse,
     build_error_response,
@@ -77,10 +76,14 @@ def _delete_kb(
                 )
             except Exception as exc:
                 raise KBCleanupError(f"KB 派生/反馈状态删除失败: {kb_id}") from exc
-            registry.delete(kb_id)
             # 连带清掉该库的会话历史，否则同名新库复用 kb_id 会捡到旧对话。
-            if session_store is not None:
-                session_store.clear_kb(kb_id)
+            try:
+                if session_store is not None:
+                    session_store.clear_kb(kb_id)
+            except Exception as exc:
+                # registry 保留到所有幂等状态清理完成后再删，失败时 DELETE 可重试。
+                raise KBCleanupError(f"KB 会话状态删除失败: {kb_id}") from exc
+            registry.delete(kb_id)
     finally:
         try:
             delete_trace_files(doc_id=kb_id)

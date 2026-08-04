@@ -71,6 +71,27 @@ def test_evidence_rejected_event_maps_to_node_sse_frame():
     assert '"supported": false' in frame
 
 
+# 验证自适应补检索进度不会在 SSE 转换层被静默丢弃。
+def test_retrieval_retry_event_maps_to_node_sse_frame():
+    frame = _event_to_frame(
+        ChatEvent(
+            "retrieval_retry",
+            {
+                "retry_count": 1,
+                "reason": "missing_requirements",
+                "missing_requirement_ids": ["r2"],
+            },
+        ),
+        doc_id="kb",
+        session_id="s1",
+    )
+
+    assert frame is not None
+    assert "event: node" in frame
+    assert '"stage": "retrieval_retry"' in frame
+    assert '"retry_count": 1' in frame
+
+
 # 验证 chat endpoint maps response and trace header 场景。
 @pytest.mark.anyio
 async def test_chat_endpoint_maps_response_and_trace_header(monkeypatch):
@@ -343,6 +364,46 @@ async def test_chat_stream_emits_sse_frames_and_writes_session(monkeypatch):
     display = store.get_display("kb", "s1")
     assert display[1]["trace_id"] == "trace-sse"
     assert display[1]["query"] == "问题"
+
+
+# 验证注入流式 runner 的畸形 audit 不会在 final 帧前被指标/摘要转换打断。
+@pytest.mark.anyio
+async def test_malformed_claim_audit_does_not_break_stream_final(monkeypatch):
+    import cogdoc.api.app as app_module
+
+    monkeypatch.setattr(app_module, "configure_logging", lambda: None)
+    result = _result("最终答案", "trace-malformed-sse")
+    result.raw_output["claim_audit"] = {
+        "status": "failed",
+        "counts": {"claim_count": "bad", "supported": float("inf")},
+        "metrics": {"claim_support_rate": float("nan")},
+        "repair": {"attempt_count": "bad"},
+        "verifier": {"duration_ms": "bad"},
+    }
+
+    def fake_stream(doc_id, query, is_local, chat_history, forced_task):
+        yield ChatEvent(
+            "request_started", {"trace_id": result.trace_id, "doc_id": doc_id}
+        )
+        yield ChatEvent("final", {"result": result, "output": result.raw_output})
+
+    store = SessionStore()
+    app = create_app(chat_stream_runner=fake_stream, session_store=store)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            response = await client.post(
+                "/v1/chat/stream",
+                json={"query": "问题", "doc_id": "kb", "session_id": "s1"},
+            )
+
+    assert response.status_code == 200
+    assert "event: final" in response.text
+    assert '"claim_count": 0' in response.text
+    assert '"duration_ms": null' in response.text
+    assert store.get_history("kb", "s1") == result.chat_messages
 
 
 # 验证 chat stream maps error event and skips session 场景。

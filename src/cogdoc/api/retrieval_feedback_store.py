@@ -55,6 +55,18 @@ def _feedback_weight(feedback: str, rating: int | None = None) -> tuple[int, flo
     return 0, 0.0
 
 
+# 只把明确归因于检索的负反馈用于惩罚引用分块，避免错罚正确证据。
+def _attributed_feedback_weight(payload: dict[str, Any]) -> tuple[int, float]:
+    if payload.get("skip_retrieval_feedback") is True:
+        return 0, 0.0
+    user_score, weight_delta = _feedback_weight(
+        str(payload.get("feedback") or ""), payload.get("rating")
+    )
+    if weight_delta < 0 and payload.get("feedback_type") != "bad_retrieval":
+        return 0, 0.0
+    return user_score, weight_delta
+
+
 # 从反馈载荷抽取被评价的分块。
 def _target_chunks(payload: dict[str, Any]) -> list[dict[str, str]]:
     targets = []
@@ -168,9 +180,7 @@ class RetrievalFeedbackStore:
         query_text = _required_text(payload, "query")
         if not kb_id or not query_text:
             return []
-        user_score, weight_delta = _feedback_weight(
-            str(payload.get("feedback") or ""), payload.get("rating")
-        )
+        user_score, weight_delta = _attributed_feedback_weight(payload)
         if weight_delta == 0:
             return []
         targets = _target_chunks(payload)
@@ -427,9 +437,7 @@ class SqliteRetrievalFeedbackStore(RetrievalFeedbackStore):
         query_text = _required_text(payload, "query")
         if not kb_id or not query_text:
             return []
-        user_score, weight_delta = _feedback_weight(
-            str(payload.get("feedback") or ""), payload.get("rating")
-        )
+        user_score, weight_delta = _attributed_feedback_weight(payload)
         if weight_delta == 0:
             return []
         targets = _target_chunks(payload)

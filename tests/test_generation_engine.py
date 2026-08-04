@@ -1,5 +1,6 @@
 import pytest
 from collections import OrderedDict
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from cogdoc.config.settings import get_settings
 from cogdoc.service.kb_epoch import EpochStore
@@ -10,6 +11,22 @@ from cogdoc.tools.retriever.hybrid import HybridRetriever, IndexCorruptError
 from cogdoc.tools.retriever.vector_retriever import EmbeddingModelMismatchError
 from cogdoc.agents.qa_generator import Generator
 from cogdoc.graph.subgraphs import qa
+
+
+class _NoRetrievalFeedback:
+    def boosts_for_query(self, kb_id, query):
+        return {}
+
+
+def _runtime(knowledge_retriever, retrieval_feedback_store=None):
+    return SimpleNamespace(
+        derived_knowledge_retriever=knowledge_retriever,
+        retrieval_feedback_store=(retrieval_feedback_store or _NoRetrievalFeedback()),
+    )
+
+
+def _runtime_config(runtime):
+    return {"configurable": {"state_runtime": runtime}}
 
 
 # 构造状态。
@@ -121,9 +138,12 @@ def test_retrieve_node_merges_approved_knowledge(monkeypatch):
             return [knowledge_doc]
 
     monkeypatch.setattr(qa.RetrieverFactory, "get_engine", lambda doc_id: Engine())
-    monkeypatch.setattr(qa, "_derived_knowledge_retriever", Knowledge())
+    runtime = _runtime(Knowledge())
 
-    result = qa.retrieve_node({"query": "报名要求", "doc_id": "kb"})
+    result = qa.retrieve_node(
+        {"query": "报名要求", "doc_id": "kb"},
+        _runtime_config(runtime),
+    )
 
     assert [doc["meta"]["chunk_id"] for doc in result["retrieved_docs"]] == [
         "chunk:a:1",
@@ -151,10 +171,12 @@ def test_retrieve_node_applies_retrieval_feedback_boost(monkeypatch):
             return {"c2": 0.5, "c1": -0.2}
 
     monkeypatch.setattr(qa.RetrieverFactory, "get_engine", lambda doc_id: Engine())
-    monkeypatch.setattr(qa, "_derived_knowledge_retriever", Knowledge())
-    monkeypatch.setattr(qa, "_retrieval_feedback_store", Feedback())
+    runtime = _runtime(Knowledge(), Feedback())
 
-    result = qa.retrieve_node({"query": "报名要求", "doc_id": "kb"})
+    result = qa.retrieve_node(
+        {"query": "报名要求", "doc_id": "kb"},
+        _runtime_config(runtime),
+    )
 
     assert [doc["meta"]["chunk_id"] for doc in result["retrieved_docs"]] == [
         "c2",
@@ -174,11 +196,48 @@ def test_retrieve_node_ignores_retrieval_feedback_errors(monkeypatch):
         def boosts_for_query(self, kb_id, query):
             raise ValueError("broken")
 
-    monkeypatch.setattr(qa, "_retrieval_feedback_store", BrokenFeedback())
-
-    result = qa._apply_retrieval_feedback("kb", "问题", docs)
+    result = qa._apply_retrieval_feedback("kb", "问题", docs, BrokenFeedback())
 
     assert result == docs
+
+
+# 验证同一编译图按请求隔离状态运行时。
+def test_retrieve_node_isolates_injected_state_runtimes(monkeypatch):
+    class Engine:
+        def search(self, query, top_k):
+            return []
+
+    class Knowledge:
+        def __init__(self, knowledge_id):
+            self.knowledge_id = knowledge_id
+
+        def search(self, kb_id, query, top_k):
+            return [
+                {
+                    "text": self.knowledge_id,
+                    "meta": {
+                        "chunk_id": f"knowledge:{self.knowledge_id}",
+                        "knowledge_id": self.knowledge_id,
+                        "source_type": "derived_knowledge",
+                        "source": f"knowledge:{self.knowledge_id}",
+                    },
+                }
+            ]
+
+    monkeypatch.setattr(qa.RetrieverFactory, "get_engine", lambda doc_id: Engine())
+    state = {"query": "同一问题", "doc_id": "kb"}
+
+    result_a = qa.retrieve_node(
+        state,
+        _runtime_config(_runtime(Knowledge("A"))),
+    )
+    result_b = qa.retrieve_node(
+        state,
+        _runtime_config(_runtime(Knowledge("B"))),
+    )
+
+    assert [doc["meta"]["knowledge_id"] for doc in result_a["retrieved_docs"]] == ["A"]
+    assert [doc["meta"]["knowledge_id"] for doc in result_b["retrieved_docs"]] == ["B"]
 
 
 # 集合编号哈希命名。

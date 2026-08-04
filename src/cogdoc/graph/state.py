@@ -27,6 +27,8 @@ class DocMeta(TypedDict):
     score: float
     origin: str
     context: NotRequired[str]
+    source_type: NotRequired[str]
+    knowledge_id: NotRequired[str]
 
 
 # retrieval 只保存本次检索产生的动态指标。
@@ -38,6 +40,14 @@ class RetrievalMetrics(TypedDict, total=False):
     search_channel: str
     rewrite_query: str
     parent_chunk_id: str
+    query_fusion_score: float
+    query_hit_count: int
+    matched_queries: List[str]
+    matched_channels: List[str]
+    matched_requirement_ids: List[str]
+    best_query_rank: int
+    original_query_hit: bool
+    retrieval_round: int
 
 
 # RetrievedDoc 是检索、重排和生成节点共享的文档结构。
@@ -74,6 +84,23 @@ class Evidence(TypedDict, total=False):
     rerank_score: Optional[float]
     rewrite_query: Optional[str]
     text_preview: str
+    retrieval: Dict[str, Any]
+
+
+# EvidenceRequirementPlan 是问题改写阶段生成、服务端分配稳定标识的原子证据需求。
+class EvidenceRequirementPlan(TypedDict):
+    requirement_id: str
+    question: str
+    retrieval_query: str
+    recovery_query: str
+
+
+# EvidenceRequirementAssessment 保存生成前证据校验器的逐需求闭集判断。
+class EvidenceRequirementAssessment(TypedDict):
+    requirement_id: str
+    verdict: str
+    evidence_chunk_ids: List[str]
+    reason: str
 
 
 # SummarySectionPlan 定义单文档摘要的固定章节。
@@ -127,6 +154,7 @@ class GraphState(TypedDict):
     top_k: NotRequired[int]
 
     rewritten_queries: NotRequired[List[str]]
+    evidence_requirements: NotRequired[List[EvidenceRequirementPlan]]
     rewrite_similarity_threshold: NotRequired[float]
     retrieved_docs: NotRequired[List[RetrievedDoc]]
     reranked_docs: NotRequired[List[RetrievedDoc]]
@@ -141,8 +169,32 @@ class GraphState(TypedDict):
     evidence_supported: NotRequired[bool]
     evidence_verification_reason: NotRequired[str]
     evidence_verified_chunk_ids: NotRequired[List[str]]
+    evidence_requirement_assessments: NotRequired[List[EvidenceRequirementAssessment]]
+    missing_evidence_requirement_ids: NotRequired[List[str]]
     evidence_verifier_error: NotRequired[str]
+    retrieval_retry_count: NotRequired[int]
+    retrieval_round: NotRequired[int]
+    retrieval_top_k_used: NotRequired[int]
+    retrieval_query_count: NotRequired[int]
+    retrieval_ranking_count: NotRequired[int]
+    retrieval_channel_counts: NotRequired[Dict[str, int]]
+    retrieval_carryover_count: NotRequired[int]
+    retrieval_feedback_error: NotRequired[str]
+    retrieval_retry_reason: NotRequired[str]
+    adaptive_retrieval_retry_pending: NotRequired[bool]
     context: NotRequired[str]
+
+    # 生成后逐声明证据审计，与生成前 evidence verifier 分属两道门禁。
+    claim_audit_required: NotRequired[bool]
+    claim_audit_passed: NotRequired[bool]
+    claim_audit: NotRequired[Dict[str, Any]]
+    claim_verifier_error: NotRequired[str]
+    claim_repair_count: NotRequired[int]
+    claim_repair_error: NotRequired[str]
+    claim_repair_citation_valid: NotRequired[bool]
+    claim_repair_critique: NotRequired[str]
+    # 仅程序确定性生成的引导/错误答案可携带；原因码与完整答案绑定。
+    claim_audit_exemption: NotRequired[Dict[str, str]]
 
     answer: NotRequired[str]
     critique: NotRequired[str]

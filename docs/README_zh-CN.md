@@ -12,11 +12,15 @@
 
 - **带可验证引用的问答** — 生成被约束在召回的文档块内；捏造的文件/页码标签会被 Rust 校验器抓出，并在自愈循环里重新生成。
 
+- **可选的逐声明语义门禁** — 物理引用校验通过后，可由独立校验器逐条核对事实声明与其显式引用的证据；系统只做有限次数修复，仍无法确认支持度时以稳定拒答 fail-closed。
+
+- **感知需求的证据门禁** — 多部分问题会拆成最多 3 个原子证据需求，检索时保留显式归因，再对闭集 chunk 逐项校验；默认仅允许一轮有界恢复检索，仍不完整则 fail-closed 拒答。
+
 - **单文档结构化摘要** — 固定章节，引用从 chunk 元数据确定性绑定。
 
 - **多文档对比** — 在固定维度上逐文档建 profile，按维度渲染带引用的对比块。
 
-- **混合检索、native 打分** — 向量（Chroma + 多语言 BGE-M3）与 BM25 两路召回由 Rust RRF kernel 融合，已审核派生知识会作为额外证据源一起检索；分词与 BM25 均为 native——中文走 `jieba-rs`，英文做小写化 + Snowball 词干化 + 停用词过滤，中英文都召得回。
+- **混合检索、query-level 融合** — 每条原问题、改写查询和需求专用查询都会检索 PDF 向量+BM25 混合 channel 与已审核派生知识 channel；产生的 query/channel 排名等权进入确定性 RRF，requirement quota 防止后出现的聚焦查询在重排前被饿死。分词与 BM25 均为 native——中文走 `jieba-rs`，英文做小写化 + Snowball 词干化 + 停用词过滤。
 
 - **内容寻址的增量缓存** — 逐文件 SHA-256 manifest 加带版本的 chunk 身份契约：未变化的文件直接复用已建索引，只有 PDF 内容或切块方案真正变化时才增量重建。
 
@@ -26,7 +30,7 @@
 
 - **派生知识审核闭环** — 支持手动新增知识、保存已校验答案、把纠错/无依据反馈转成待审核知识卡片；每条知识可绑定来源、检测冲突、扫描过期、创建修订版本，并支持批量通过/驳回、归档和删除。
 
-- **反馈分析与检索调权** — 赞踩、纠错、评分、问题类型和 evidence 上下文按 `trace_id` 落盘；坏样本进入离线质量台账，反馈会被结构化分析为建议动作，检索调权记录可启用或回滚。
+- **反馈分析与归因检索调权** — 赞踩、纠错、评分、问题类型和 evidence 上下文按 `trace_id` 落盘；正向信号可提升被引用 chunk，负向信号只有在 `feedback_type=bad_retrieval` 时才惩罚它们。`skip_retrieval_feedback=true` 可让单条反馈不参与调权，所有调权记录仍可审核、可回滚。
 
 - **Trace 可观测、审核队列与 webhook** — 每次请求可导出安全 JSON trace，包含请求配置、节点耗时、改写、证据预览与错误摘要；网页端只展示当前对话的 trace，并把待审核/过期知识、反馈分析、检索调权聚合成审核队列，也可在新待审核知识产生时投递 webhook。
 
@@ -170,7 +174,7 @@ Streamlit 前端只是 FastAPI 服务上的瘦客户端——你也可以直接�
 
 - **确定性内核** — 自研 [Rust](https://www.rust-lang.org/) 扩展（[PyO3](https://pyo3.rs/) + [maturin](https://www.maturin.rs/)）扛下 `jieba-rs` 中英分词、BM25、RRF 融合、SHA-256 manifest 与引用校验，全部 native、独立单测，不随 Agent / Prompt 漂移。
 - **检索** — `bge-m3` 多语言向量召回 + BM25 关键词召回，Rust RRF 融合后再用 `bge-reranker-v2-m3` 精排；PDF 向量和已通过派生知识向量都落 [Chroma](https://www.trychroma.com/)，PDF 解析走 PyMuPDF。
-- **编排** — [LangGraph](https://langchain-ai.github.io/langgraph/) 把路由 → 改写 → 检索 → 生成 → 引用自愈串成可循环的状态图。
+- **编排** — [LangGraph](https://langchain-ai.github.io/langgraph/) 把路由 → 任务子图 → 物理引用自愈 → 可选父图声明审计 / 有限修复 / 拒答串成可循环状态图。
 - **模型** — OpenAI 兼容双后端、一键热切：云端 DeepSeek，本地 Ollama `qwen2.5:7b`。
 - **服务与可观测** — FastAPI 提供 SSE 流式接口、可选 API key 鉴权和令牌桶限流；会话、入库任务、反馈、审核队列和派生知识都本地持久化；JSON trace 同时服务于网页 Trace 面板和独立 Debug 控制台。
 
@@ -218,6 +222,10 @@ flowchart TD
         QA["QA 子图: rewrite / verify / retrieve / rerank / generate / 引用自愈"]
         SUMMARY["Summary 子图: loader / plan / sections / global"]
         COMPARE["Compare 子图: loader / profile / table / citation"]
+        CLAIMAUDIT["声明校验器: 语义证据审计"]
+        CLAIMREPAIR["声明修复器: 有限修复 / 引用复检"]
+        CLAIMBLOCK["Fail-closed 拒答"]
+        CLAIMFINAL["已审计最终答案 / 稳定拒答"]
     end
 
     subgraph BACKENDS["模型与原生后端"]
@@ -243,12 +251,26 @@ flowchart TD
     ROUTER --> SUMMARY
     ROUTER --> COMPARE
 
+    QA --> CLAIMAUDIT
+    SUMMARY --> CLAIMAUDIT
+    COMPARE --> CLAIMAUDIT
+    CLAIMAUDIT -->|不支持| CLAIMREPAIR
+    CLAIMREPAIR -->|引用合法| CLAIMAUDIT
+    CLAIMREPAIR -->|引用非法且仍有预算| CLAIMREPAIR
+    CLAIMAUDIT -->|通过或关闭| CLAIMFINAL
+    CLAIMAUDIT -->|异常或次数耗尽| CLAIMBLOCK
+    CLAIMREPAIR -->|异常或次数耗尽| CLAIMBLOCK
+    CLAIMBLOCK --> CLAIMFINAL
+
     QA --> LLM
     SUMMARY --> LLM
     COMPARE --> LLM
+    CLAIMAUDIT --> LLM
+    CLAIMREPAIR --> LLM
     QA --> RUST
     SUMMARY --> RUST
     COMPARE --> RUST
+    CLAIMREPAIR --> RUST
     QA --> EMB
     SUMMARY --> EMB
     COMPARE --> EMB
@@ -268,9 +290,9 @@ flowchart TD
     style SAFETY fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
     style GRAPH fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
     style BACKENDS fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
-    class CLI,DEBUG,WEB,APISTART,ROUTES,ACCESS,ROUTER,QA,SUMMARY,COMPARE node
+    class CLI,DEBUG,WEB,APISTART,ROUTES,ACCESS,ROUTER,QA,SUMMARY,COMPARE,CLAIMAUDIT,CLAIMREPAIR,CLAIMFINAL node
     class SERVICE,CHAT,INGEST,REVIEW core
-    class PROCLOCK,JOURNAL,KBLOCK guard
+    class PROCLOCK,JOURNAL,KBLOCK,CLAIMBLOCK guard
     class LLM,RUST,EMB native
 ```
 
@@ -483,10 +505,15 @@ chunk_id = sha256:{source_sha256}:src:{source_name}:p{page_start}-p{page_end}:c{
 ## 查询链路
 
 - **意图路由** — `RouterAgent` 要求 LLM 返回结构化 `task_type ∈ {qa, summary, compare, unknown}`，任何解析异常都按关键词规则回退。`qa`、`summary`、`compare` 都已接到真实子图。
-- **改写 + 漂移守卫** — `QueryRewriteAgent` 生成 1–3 条关键词查询（pydantic 结构化输出）。`RewriteVerifyAgent` 一次批量 embed `[原问题] + 改写`，保留 `cosine >= rewrite_similarity_threshold`（默认 `0.5`）的改写，把保留/丢弃写入 `steps_trace`；若全被丢弃则只用原问题。
-- **混合检索 + RRF** — 每条 query 下 PDF 两路各超召 `top_k * 3`（QA 用 `top_k = 9` → 每路 27）；`rrf_fusion_native`（Rust，`k = 60`）计算 `score(d) = Σ_c 1 / (k + rank_c(d))`，合并共享同一 `chunk_id` 的命中，并按分数降序、身份键升序排序保证确定性。已通过派生知识会按原问题/改写问题单独检索并并入同一证据池，随后应用反馈生成的检索调权，再进入重排。
-- **重排** — `BGEReranker`（`bge-reranker-v2-m3`）对 `(原问题, doc)` 打分并取 `top_n = 3`；改写不会影响最终排序。
-- **生成 + 引用自愈** — `Generator`（OpenAI 兼容；云端 `deepseek-chat` 或本地 `qwen2.5:7b`，`temperature = 0.2`）把文档包装为 `<Document source=… page=… chunk_id=…>` 并强制 `[source:Pn]` 标签。`validate_citations_native`（Rust）返回结构化的 `missing_citations` / `invalid_sources` / `invalid_pages`；`citation_node` 把失败转成 critique，循环 `generate → citation` 至 `max_iteration_count`（默认 `2`）。只有通过校验的回答才会打印。
+- **改写 + 证据需求规划** — `QueryRewriteAgent` 生成 1–3 条关键词查询，同时起草最多 3 个 `{question, retrieval_query, recovery_query}` 原子需求；服务端确定性分配 `r1..r3`，空规划或模型失败时回退为一个原问题需求。`RewriteVerifyAgent` 用一次 embedding 批处理执行两层语义守卫：先用含近期历史的原问题校验 requirement question，再用该 requirement 校验主/恢复查询。漂移的 requirement 被丢弃，漂移的聚焦查询回退到 requirement question，全部丢弃时回退原问题需求；原有改写保留/丢弃行为和 `steps_trace` 不变。
+- **带归因的 query-level RRF** — 原问题、改写和 requirement 查询都会检索 PDF 混合引擎与已审核派生知识。每个 query/channel 排名等权贡献 `score(d) = Σ_q,c 1 / (k + rank_q,c(d))`（`k = 60`），候选按稳定 `chunk_id` 去重，同分按身份键确定性打破。融合元数据保留命中的 queries、channels、requirement IDs、命中数、原问题是否命中、最佳排名和检索轮次，不再把归因压缩为一条 rewrite。
+- **Requirement quota + 重排** — 进入 `BGEReranker`（`bge-reranker-v2-m3`）前，有界候选选择器会为每个 requirement 至少保留一条有归因候选，再按融合顺序补足剩余预算。证据校验候选也先覆盖 requirement，再做来源多样化，避免强势的第一条查询饿死后续需求命中。最终重排仍对 `(原问题, doc)` 打分，rewrite 不会直接偏置 cross-encoder 分数。
+- **闭集证据校验 + 有界自适应恢复** — 开启证据校验后，符合二阶段条件的精确事实问题和所有多 requirement 问题，生成前都必须对每个需求给出一份 `supported` / `missing` / `contradictory` 结论，且只能使用给定 requirement ID 和 chunk ID。需求 ID 遗漏/重复/未知、伪造 chunk、未支持需求或无证据冲突都不能放行。若缺口可恢复，CogDoc 默认只重试一次：缺失 requirement 的 `recovery_query` 会紧随原问题优先执行，检索深度按有上限倍数扩大，融合/重排后重新校验。重试数、查询预算和 `top_k` 全部有界，verifier 异常不会重试；最终仍有 requirement 无有效支持时跳过生成，以稳定拒答 fail-closed。
+- **归因反馈权重** — 正向反馈（点赞或高于中性的评分）可提升其引用/evidence chunk。点踩、纠错和低于中性的评分只有在明确标记 `feedback_type=bad_retrieval` 时才生成负检索权重；其他答案质量问题不会误罚可能正确的证据。`skip_retrieval_feedback=true` 会让该条反馈的正负调权全部跳过。
+- **生成 + 引用自愈** — `Generator`（OpenAI 兼容；云端 `deepseek-chat` 或本地 `qwen2.5:7b`，`temperature = 0.2`）把文档包装为 `<Document source=… page=… chunk_id=…>` 并强制 `[source:Pn]` 标签。`validate_citations_native`（Rust）返回结构化的 `missing_citations` / `invalid_sources` / `invalid_pages`；`citation_node` 把失败转成 critique，循环 `generate → citation` 至 `max_iteration_count`（默认 `2`）。只有通过物理引用校验的回答才会离开任务子图。
+- **父图声明审计与有限修复（可选）** — 设置 `CLAIM_VERIFICATION_ENABLED=true` 后，QA、Summary、Compare 会在各自的物理引用校验之后进入父图 `claim_audit_node`。`ClaimEvidenceVerifierAgent` 把候选答案拆成事实声明，分批只依据每条声明显式引用的证据判定 `supported`、`unsupported` 或 `insufficient`。失败后进入 `claim_repair_node`；修订答案必须先通过确定性引用复检，再重新执行语义审计。修复次数由 `CLAIM_VERIFICATION_MAX_REPAIR_ATTEMPTS` 限定（默认 `1`）。校验器异常、修复器异常、修复后引用在次数耗尽时仍非法，或语义审计最终仍失败，都会通过 `claim_block_node` fail-closed：用稳定拒答替换候选答案，并清空其引用/evidence。语义门禁默认关闭，便于部署先建立经人工复核的基线再启用。
+
+  开启门禁后，候选模型 token 在审计完成前都不可信，因此 `/v1/chat/stream` 会缓冲候选文本，不向客户端泄露临时答案；节点进度事件仍会流式发送。父图后处理完成（通过、有意 `not_run` 或产生 fail-closed 拒答）后，服务会把最终答案作为单个 token 事件发送，随后照常发送 `final` 事件。
 
 **Summary 子图** — `document_loader` 选定一个点名文档（若语料库只有一篇则可自动选中；多文档歧义 query 返回可操作提示），`section_planner` 默认固定为背景与目标、方案与流程、规则与要求、价值与产出、限制与注意事项五个章节（也可由 state 传入自定义标题），`section_summary` 逐章节生成一段短摘要（模型只写正文，`[source:Pn]` 由程序按所用 chunk 确定性绑定），`global_summary` 整合答案并复跑引用校验。无依据章节不带引用、不带 evidence。
 
@@ -614,6 +641,17 @@ python scripts/migrate_state.py --verify-only   # 校验导入结果
 | `QA_EVIDENCE_VERIFY_MAX_DOCS` | `3` | 证据校验器最多使用的来源去重文本块数 |
 | `QA_EVIDENCE_VERIFY_MAX_CHARS_PER_DOC` | `1600` | 每个校验文本块的字符上限 |
 | `QA_EVIDENCE_VERIFY_BORDERLINE_MIN_SCORE` | `0.75` | 允许二阶段校验尝试救回的一阶段最低支持度 |
+| `QA_RETRIEVAL_MAX_QUERIES` | `7` | 归一化/去重后，每轮原问题、改写、requirement 与恢复查询的总数上限 |
+| `QA_ADAPTIVE_RETRIEVAL_ENABLED` | `true` | 是否允许对不完整的 requirement 证据做有界恢复检索 |
+| `QA_ADAPTIVE_RETRIEVAL_MAX_RETRIES` | `1` | 恢复轮次上限（`0` 关闭重试；校验范围 `0..2`） |
+| `QA_ADAPTIVE_RETRIEVAL_TOP_K_MULTIPLIER` | `2.0` | 每轮恢复检索应用的检索深度倍数 |
+| `QA_ADAPTIVE_RETRIEVAL_MAX_TOP_K` | `36` | 自适应扩大深度后的 `top_k` 硬上限 |
+| `CLAIM_VERIFICATION_ENABLED` | `false` | 开启生成后的逐声明语义门禁；开启后采用 fail-closed |
+| `CLAIM_VERIFICATION_MAX_CLAIMS` | `40` | 每个答案最多可审计的声明片段数；超限内容不会静默放行 |
+| `CLAIM_VERIFICATION_MAX_CLAIMS_PER_BATCH` | `8` | 单次校验器调用最多发送的声明数 |
+| `CLAIM_VERIFICATION_MAX_DOCS_PER_BATCH` | `12` | 单次校验/修复调用最多可见的证据块数 |
+| `CLAIM_VERIFICATION_MAX_CHARS_PER_DOC` | `1600` | 声明校验与修复时每个证据块的字符上限 |
+| `CLAIM_VERIFICATION_MAX_REPAIR_ATTEMPTS` | `1` | 拒答前允许的有限修复次数（`0` 表示不修复） |
 | `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | 本地 OpenAI 兼容 Ollama endpoint |
 | `OLLAMA_MODEL_NAME` | `qwen2.5:7b` | 本地模型名 |
 | `OLLAMA_TIMEOUT_SECONDS` | `180` | 本地模型请求超时 |
@@ -626,7 +664,7 @@ python scripts/migrate_state.py --verify-only   # 校验导入结果
 | `OLLAMA_<NODE>_MODEL_NAME` | 未设置 | 节点级本地模型覆盖 |
 | `HF_TOKEN` | 未设置 | 可选 Hugging Face Hub token |
 
-`<NODE>` 可取 `ROUTER`、`QUERY_REWRITER`、`SOURCE_RESOLVER`、`EVIDENCE_VERIFIER`、`QA_GENERATOR`、`SUMMARY_GENERATOR`、`COMPARE_PROFILE` 或 `COMPARE_CONCLUSION`。例如，可设置 `LLM_EVIDENCE_VERIFIER_BACKEND=local` 和 `OLLAMA_EVIDENCE_VERIFIER_MODEL_NAME=<校验模型>`，让证据校验与云端答案生成使用不同模型。引用格式及来源/页码合法性仍由 Rust 确定性校验，不交给 LLM。
+`<NODE>` 可取 `ROUTER`、`QUERY_REWRITER`、`SOURCE_RESOLVER`、`EVIDENCE_VERIFIER`、`CLAIM_VERIFIER`、`CLAIM_REPAIRER`、`QA_GENERATOR`、`SUMMARY_GENERATOR`、`COMPARE_PROFILE` 或 `COMPARE_CONCLUSION`。例如，可让答案生成继续使用云端，同时设置 `LLM_CLAIM_VERIFIER_BACKEND=local` 和 `OLLAMA_CLAIM_VERIFIER_MODEL_NAME=<校验模型>`；若修复也走本地，再设置 `LLM_CLAIM_REPAIRER_BACKEND=local` 和 `OLLAMA_CLAIM_REPAIRER_MODEL_NAME=<修复模型>`。对应的云端模型覆盖为 `LLM_CLAIM_VERIFIER_MODEL_NAME` 和 `LLM_CLAIM_REPAIRER_MODEL_NAME`。引用格式及来源/页码合法性仍由 Rust 确定性校验；claim verifier 额外提供可选的模型语义支持度判断。
 
 环境要求：Python 3.11+（在 3.13 上开发；扩展目标 3.8+）、带 `cargo` 的 Rust 工具链（edition 2024，经 [rustup](https://rustup.rs/)）、[maturin](https://www.maturin.rs/)。可选：[Ollama](https://ollama.com/) 用于本地模型。完整可调项见 `.env.example`（检索 `top_k`、重排 `top_n`、RRF `k`、CUDA 显存下限、评测集路径等）。
 
@@ -664,7 +702,44 @@ python scripts/migrate_state.py --verify-only   # 校验导入结果
 
 真实检索配置要求 `eval/retrieval_eval.jsonl` 至少包含 100 条已复核问题：单源 40 条、多源 20 条、困难 20 条、无答案 20 条。`make eval-retrieval-baseline` 记录复核后的参考运行；`make eval-retrieval-gate` 对比相关性基线，并执行本地 `eval/retrieval_gate.json` 中的绝对阈值，文件结构参考 `eval/retrieval_gate.example.json`。报告会给出整体和分层的 MRR/Recall/Hit、平均延迟与 P95 延迟；模型加载和首轮初始化会单独记为 warmup，不计入稳态延迟。`answerable_acceptance_rate` 和 `no_answer_abstention_rate` 直接衡量确定性一阶段门禁。被一阶段放行的精确事实问题，以及支持度高于 `QA_EVIDENCE_VERIFY_BORDERLINE_MIN_SCORE` 的边界候选，会在生成前进入结构化证据充分性校验。无答案样本还会报告 `no_answer_false_positive@k`，该指标只表示检索器是否返回候选，不代表任一门禁已放行，也不能等同于生成答案已产生事实错误。默认的向量距离/BM25 阈值由本地已复核集标定，更换语料或嵌入模型后应重新标定。
 
+### 感知 requirement 的检索评测数据
+
+检索 JSONL 仍使用 `query`、`expected_sources` 以及可选 `doc_id` / `layer`，并可增加以下字段：
+
+- `rewritten_queries`：可选、经复核的 rewrite 输入，用于真实检索运行。
+- `evidence_requirements`：最多 3 个运行时查询计划，每项包含 `requirement_id`、`question`、`retrieval_query` 和 `recovery_query`。它们驱动带 requirement 归因的检索和有界恢复路径；`--verify-evidence` 会额外执行结构化闭集判断。
+- `gold_requirements`：只供 evaluator 使用的标准答案。每项给出 `requirement_id`，并至少提供 `acceptable_chunk_ids` 或 `acceptable_sources` 之一；优先标注 chunk，因为命中正确 PDF 里的错误文本块不应算作证据覆盖。
+- `hard_negative_chunk_ids`：可选的已知干扰 chunk，用于衡量拒绝能力。
+
+下面是一个为便于阅读而格式化的 JSONL 对象（写入数据集时应放在同一物理行）：
+
+```json
+{
+  "id": "policy-dates-and-fees",
+  "query": "截止日期和费用分别是什么？",
+  "doc_id": "policy",
+  "layer": "multi-source",
+  "expected_sources": ["dates.pdf", "fees.pdf"],
+  "rewritten_queries": ["申请截止日期", "申请费用"],
+  "evidence_requirements": [
+    {"requirement_id": "r1", "question": "截止日期是什么？", "retrieval_query": "申请截止日期", "recovery_query": "提交关闭日期"},
+    {"requirement_id": "r2", "question": "费用是多少？", "retrieval_query": "申请费用", "recovery_query": "报名成本"}
+  ],
+  "gold_requirements": [
+    {"requirement_id": "r1", "acceptable_chunk_ids": ["deadline-chunk"]},
+    {"requirement_id": "r2", "acceptable_chunk_ids": ["fee-chunk"]}
+  ],
+  "hard_negative_chunk_ids": ["old-policy-chunk"]
+}
+```
+
+有标注时，报告会新增 `requirement_recall@k`、`all_requirements_covered@k` 和二值相关性 `evidence_ndcg@k`；chunk 级 gold 还会启用 `chunk_precision@k`，hard negative 会启用 `hard_negative_rejection@k`。执行 verifier 时新增 `requirement_full_coverage_rate`；执行 adaptive recovery 时新增 `adaptive_retry_trigger_rate`，对确实重试的样本还会计算 `adaptive_rescue_rate`。`retrieval_query_count` 用于暴露查询预算成本。其中 trigger rate 和 query count 是发布期诊断指标，不进入默认 baseline gate；覆盖、排序、干扰拒绝与救回指标在出现时可进入基线门禁。
+
+每条报告行还会保存 `retrieved_items`、`evidence_requirement_assessments`、`missing_evidence_requirement_ids`、`retrieval_retry_count`、`adaptive_retrieval_rescued`、`retrieval_query_count`、`retrieval_ranking_count`、`retrieval_carryover_count` 以及分 channel 计数 `retrieval_channel_counts`，因此可以把回归定位到规划、融合、校验或恢复阶段，而不是只从最终来源列表反推。
+
 `make eval` 对本地检索集做临时评测；干净 checkout 没有本地集时会回退到 `eval/retrieval_eval.example.jsonl`。`make eval-coverage` 不触碰索引，只检查 smoke 覆盖配置。组合评测需要真实检索时运行 `make eval-suite-run-retrieval`。`make eval-quality` 会统计路由准确率、引用准确率和覆盖 QA、Summary、Compare、多轮、无答案、反馈层级的人工忠实性台账；`make eval-quality-coverage` 还会对必需 case type 和推荐 layer 执行覆盖门禁。点踩/纠错会在 `bad_cases.jsonl` 写入 `eval_draft`，方便复核后提升到质量评测集。只想检查质量覆盖时运行 `python scripts/eval_quality.py --coverage-only`。`--coverage-only` 有意不允许与 `--check-coverage`、`--json`、`--baseline` 同时使用。
+
+质量用例还可以直接携带运行时 `claim_audit`，或放在 `output.claim_audit`、`trace.output.claim_audit`。报告会从逐条声明明细重新计算支持率、引用覆盖率、unsupported/insufficient 比率、修复成功率、审计可观测率与 verifier 延迟，不信任上游预先汇总的 counts；这些发布期诊断指标有意不加入默认 baseline gate。通用评分层同时支持确定性的 `claim_audit_assertion`：缺少审计证据时返回 `NOT_OBSERVABLE`，完成领域标定后可用可配置的支持率、引用覆盖与状态阈值把它提升为严格门禁。
 
 运行 `python scripts/eval_retrieval.py --rerank --verify-evidence` 可把云端证据校验纳入最终放行率/拒答率统计；加 `--local-verifier` 则使用 Ollama。该模式会发起模型调用，因此有意不纳入默认检索门禁。
 
@@ -677,7 +752,7 @@ python scripts/migrate_state.py --verify-only   # 校验导入结果
 - **OCR 是默认关闭的 Tesseract MVP。** 仅支持本机已安装的语言包，不提供托管 OCR provider；识别质量取决于扫描质量、语言选择和 DPI。
 - Summary 与 Compare 是固定 schema MVP：云端模式会并发执行相互独立的章节/维度 LLM cell，并保持输出顺序稳定；本地 Ollama 模式为避免内存压力仍走串行。默认章节/维度集合固定，除非通过 graph state 传入自定义配置。
 - 本地 Compare 有意限制为 2 篇文档、4 个核心维度，并跳过额外结论生成，以降低 Ollama 内存压力。
-- Citation 校验只证明引用的 `source` 和 `page` 物理合法，不证明整句话语义完全正确，也不强制每句都带引用。
+- 语义门禁关闭（默认）时，Citation 校验只证明引用的 `source` / `page` 或知识 ID 物理合法，不证明周围声明获得语义支持，也不保证每条事实句都有引用。开启 `CLAIM_VERIFICATION_ENABLED` 后，QA、Summary、Compare 会增加模型驱动的声明/证据门禁；遇到 `unsupported` / `insufficient` 声明或校验/修复异常时 fail-closed，但仍应使用领域人工基线做标定。
 - Rewrite 相似度阈值默认 `0.5`，后续应基于真实数据标定。
 - 本地模型下载依赖网络或已有 Hugging Face 缓存。
 

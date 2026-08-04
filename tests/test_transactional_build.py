@@ -1,7 +1,6 @@
 import os
 import pytest
-import threading
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 from cogdoc.service.kb_epoch import EpochStore
 from cogdoc.service.kb_state import (
     KBState,
@@ -20,7 +19,6 @@ from cogdoc.service.ingest_service import (
     IndexInconsistencyError,
 )
 from cogdoc.tools.retriever.hybrid import HybridRetriever
-from cogdoc.tools.retriever.base_retriever import NullRetriever
 
 
 # 构造状态。
@@ -177,6 +175,37 @@ def test_transactional_build_commits_generation(tmp_path, monkeypatch):
     assert result.chunk_count == 1
 
 
+# 验证 transactional build 把同一派生知识存储传给提交后复核。
+def test_transactional_build_propagates_knowledge_store(tmp_path, monkeypatch):
+    kb_id = "kb-runtime-store"
+    _patch_transactional(monkeypatch, tmp_path, kb_id, [])
+    knowledge_store = object()
+    captured = []
+
+    def capture_review(
+        kb,
+        bindings,
+        state=None,
+        chunks=None,
+        knowledge_store=None,
+    ):
+        captured.append((kb, knowledge_store))
+
+    monkeypatch.setattr(
+        ingest_service,
+        "_mark_stale_derived_knowledge_quiet",
+        capture_review,
+    )
+
+    build_kb_index_transactional(
+        kb_id,
+        "/src",
+        knowledge_store=knowledge_store,
+    )
+
+    assert captured == [(kb_id, knowledge_store)]
+
+
 # 验证 transactional build calls index on staging。
 def test_transactional_build_calls_index_on_staging(tmp_path, monkeypatch):
     kb_id = "kb-idx"
@@ -270,8 +299,6 @@ def test_transactional_build_cleans_staging_on_failure(tmp_path, monkeypatch):
 def test_transactional_build_stale_cleans_and_reraises(tmp_path, monkeypatch):
     kb_id = "kb-stale"
     state, staging = _patch_transactional(monkeypatch, tmp_path, kb_id, [])
-
-    original_switch = state.switch_active
 
     # 构造或驱动 staleswitch 测试场景。
     def stale_switch(gid):

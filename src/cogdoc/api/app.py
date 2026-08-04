@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from functools import partial
 from typing import Callable
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -8,22 +9,13 @@ from cogdoc.api.access_control import (
     TokenBucketRateLimiter,
     build_rate_limiter,
 )
-from cogdoc.api.derived_knowledge_store import (
-    DerivedKnowledgeStore,
-    SqliteDerivedKnowledgeStore,
-)
-from cogdoc.api.feedback_analysis_store import (
-    FeedbackAnalysisStore,
-    SqliteFeedbackAnalysisStore,
-)
-from cogdoc.api.feedback_store import FeedbackStore, SqliteFeedbackStore
+from cogdoc.api.derived_knowledge_store import DerivedKnowledgeStore
+from cogdoc.api.feedback_analysis_store import FeedbackAnalysisStore
+from cogdoc.api.feedback_store import FeedbackStore
 from cogdoc.api.ingest import IndexJobManager, KnowledgeBaseRegistry
 from cogdoc.api.metrics import Metrics, MetricsMiddleware
 from cogdoc.api.persistence import SqliteJobStore, SqliteSessionStore
-from cogdoc.api.retrieval_feedback_store import (
-    RetrievalFeedbackStore,
-    SqliteRetrievalFeedbackStore,
-)
+from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
 from cogdoc.api.routes import (
     agent_router,
     chat_router,
@@ -50,6 +42,7 @@ from cogdoc.service.process_lock import (
     strict_single_process,
 )
 from cogdoc.service.sweeper import BackgroundSweeper
+from cogdoc.state_runtime import StateRuntime
 
 
 ChatRunner = Callable[..., ChatResult]
@@ -57,36 +50,19 @@ ChatRunner = Callable[..., ChatResult]
 
 # 创建反馈存储。
 def _default_feedback_store():
-    settings = get_settings()
-    if settings.cogdoc_state_backend == "sqlite":
-        return SqliteFeedbackStore(
-            db_path=settings.state_db_path,
-            export_jsonl=False,
-        )
-    if settings.cogdoc_feedback_store.strip().lower() == "sqlite":
-        return SqliteFeedbackStore()
-    return FeedbackStore()
+    return StateRuntime.default_feedback_store()
 
 
 def _default_feedback_analysis_store():
-    settings = get_settings()
-    if settings.cogdoc_state_backend == "sqlite":
-        return SqliteFeedbackAnalysisStore(settings.state_db_path)
-    return FeedbackAnalysisStore()
+    return StateRuntime.default_feedback_analysis_store()
 
 
 def _default_knowledge_store():
-    settings = get_settings()
-    if settings.cogdoc_state_backend == "sqlite":
-        return SqliteDerivedKnowledgeStore(settings.state_db_path)
-    return DerivedKnowledgeStore()
+    return StateRuntime.default_knowledge_store()
 
 
 def _default_retrieval_feedback_store():
-    settings = get_settings()
-    if settings.cogdoc_state_backend == "sqlite":
-        return SqliteRetrievalFeedbackStore(settings.state_db_path)
-    return RetrievalFeedbackStore()
+    return StateRuntime.default_retrieval_feedback_store()
 
 
 # 构建未捕获异常响应。
@@ -114,9 +90,11 @@ def create_app(
     feedback_analysis_store: FeedbackAnalysisStore | None = None,
     knowledge_store: DerivedKnowledgeStore | None = None,
     retrieval_feedback_store: RetrievalFeedbackStore | None = None,
+    state_runtime: StateRuntime | None = None,
     webhook_dispatcher: WebhookDispatcher | None = None,
     derived_knowledge_index_refresher: Callable | None = None,
     derived_knowledge_index_statuser: Callable | None = None,
+    close_state_runtime_on_shutdown: bool | None = None,
     api_keys: set[str] | None = None,
     rate_limiter: TokenBucketRateLimiter | None = None,
     offload_workers: int | None = None,
@@ -224,6 +202,29 @@ def create_app(
                     level=logging.ERROR,
                     error_class=type(exc).__name__,
                 )
+            try:
+                should_close_runtime = getattr(
+                    app.state,
+                    "close_state_runtime_on_shutdown",
+                    False,
+                )
+                if should_close_runtime and drained:
+                    app.state.state_runtime.close()
+                elif should_close_runtime:
+                    log_event(
+                        "shutdown",
+                        "state_runtime_close_deferred_threads_alive",
+                        {},
+                        level=logging.WARNING,
+                    )
+            except Exception as exc:
+                log_event(
+                    "shutdown",
+                    "state_runtime_close_failed",
+                    {},
+                    level=logging.ERROR,
+                    error_class=type(exc).__name__,
+                )
             # 仅在后台线程确已排空时才显式释放进程锁，否则留给进程退出自动释放。
             if drained:
                 release_single_instance_lock(lock_fh)
@@ -242,29 +243,67 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.lifecycle_status = "created"
+    store_overrides = (
+        feedback_store,
+        feedback_analysis_store,
+        knowledge_store,
+        retrieval_feedback_store,
+    )
+    if state_runtime is not None and any(store is not None for store in store_overrides):
+        raise ValueError("state_runtime cannot be combined with individual store overrides")
+    runtime = state_runtime or StateRuntime.from_settings(
+        feedback_store=feedback_store,
+        feedback_analysis_store=feedback_analysis_store,
+        knowledge_store=knowledge_store,
+        retrieval_feedback_store=retrieval_feedback_store,
+    )
+    app.state.state_runtime = runtime
+    app.state.close_state_runtime_on_shutdown = (
+        state_runtime is None
+        if close_state_runtime_on_shutdown is None
+        else bool(close_state_runtime_on_shutdown)
+    )
     # 运行器和存储可注入，便于脱离真实图与持久态测试交付层。
-    app.state.chat_runner = chat_runner or run_chat_sync
-    app.state.chat_stream_runner = chat_stream_runner or run_chat
+    app.state.chat_runner = chat_runner or partial(
+        run_chat_sync,
+        state_runtime=runtime,
+    )
+    app.state.chat_stream_runner = chat_stream_runner or partial(
+        run_chat,
+        state_runtime=runtime,
+    )
     app.state.session_store = session_store or SessionStore()
+    # 入库注册表/任务管理器可注入，便于测试用假入库函数。
+    app.state.kb_registry = kb_registry or KnowledgeBaseRegistry()
+    # 知识库存在性检查用于写入防复活，注入版由测试自行控制。
+    if index_jobs is None:
+        app.state.index_jobs = IndexJobManager(
+            kb_exists=app.state.kb_registry.exists,
+            knowledge_store=runtime.knowledge_store,
+        )
+    else:
+        bind_knowledge_store = getattr(index_jobs, "bind_knowledge_store", None)
+        if callable(bind_knowledge_store):
+            try:
+                bind_knowledge_store(runtime.knowledge_store)
+            except Exception:
+                if state_runtime is None:
+                    try:
+                        runtime.close()
+                    except Exception:
+                        pass
+                raise
+        app.state.index_jobs = index_jobs
     # 有界线程池限制本地算力并发，缓解高并发下精排/嵌入的坏邻居效应。
     app.state.offload_executor = ThreadPoolExecutor(
         max_workers=offload_workers or get_settings().cogdoc_offload_workers,
         thread_name_prefix="cogdoc-offload",
     )
-    # 入库注册表/任务管理器可注入，便于测试用假入库函数。
-    app.state.kb_registry = kb_registry or KnowledgeBaseRegistry()
-    # 知识库存在性检查用于写入防复活，注入版由测试自行控制。
-    app.state.index_jobs = index_jobs or IndexJobManager(
-        kb_exists=app.state.kb_registry.exists
-    )
-    app.state.feedback_store = feedback_store or _default_feedback_store()
-    app.state.feedback_analysis_store = (
-        feedback_analysis_store or _default_feedback_analysis_store()
-    )
-    app.state.knowledge_store = knowledge_store or _default_knowledge_store()
-    app.state.retrieval_feedback_store = (
-        retrieval_feedback_store or _default_retrieval_feedback_store()
-    )
+    # 旧 app.state 属性保留为 runtime store 的身份别名，兼容路由与注入测试。
+    app.state.feedback_store = runtime.feedback_store
+    app.state.feedback_analysis_store = runtime.feedback_analysis_store
+    app.state.knowledge_store = runtime.knowledge_store
+    app.state.retrieval_feedback_store = runtime.retrieval_feedback_store
     app.state.webhook_dispatcher = webhook_dispatcher or WebhookDispatcher()
 
     # 访问控制留空则鉴权关闭，限流默认按配置令牌桶。
@@ -272,8 +311,17 @@ def create_app(
     app.state.derived_knowledge_index_auto_refresh = (
         settings.cogdoc_derived_knowledge_index_auto_refresh
     )
-    app.state.derived_knowledge_index_refresher = derived_knowledge_index_refresher
-    app.state.derived_knowledge_index_statuser = derived_knowledge_index_statuser
+    app.state.derived_knowledge_index_refresher = (
+        derived_knowledge_index_refresher
+        or runtime.refresh_derived_knowledge_index
+    )
+    app.state.derived_knowledge_index_statuser = (
+        derived_knowledge_index_statuser
+        or runtime.derived_knowledge_index_status
+    )
+    app.state.derived_knowledge_index_error_recorder = (
+        runtime.record_derived_knowledge_index_error
+    )
     resolved_keys = settings.api_key_set if api_keys is None else api_keys
     resolved_limiter = rate_limiter or build_rate_limiter(
         settings.rate_limit_per_minute, settings.rate_limit_burst
@@ -307,11 +355,15 @@ def create_app(
 _settings = get_settings()
 _db_path = _settings.state_db_path
 _kb_registry = KnowledgeBaseRegistry()
+_state_runtime = StateRuntime.from_settings(_settings)
 app = create_app(
+    state_runtime=_state_runtime,
+    close_state_runtime_on_shutdown=True,
     session_store=SqliteSessionStore(_db_path, memory_policy=_settings.memory_policy),
     kb_registry=_kb_registry,
     index_jobs=IndexJobManager(
         job_store=SqliteJobStore(_db_path, reconcile_on_init=False),
         kb_exists=_kb_registry.exists,
+        knowledge_store=_state_runtime.knowledge_store,
     ),
 )

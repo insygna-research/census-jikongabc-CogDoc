@@ -1,5 +1,5 @@
 {"query": "示例：A 文档的主题相关问题", "expected_sources": ["doc_a.pdf"], "doc_id": "demo_kb", "layer": "single-source"}
 {"query": "示例：B 文档的主题相关问题", "expected_sources": ["doc_b.pdf"], "doc_id": "demo_kb", "layer": "single-source"}
-{"query": "示例：需要跨多篇文档命中的问题", "expected_sources": ["doc_a.pdf", "doc_b.pdf"], "doc_id": "demo_kb", "layer": "multi-source"}
+{"query": "示例：比较 A、B 文档各自的结论", "expected_sources": ["doc_a.pdf", "doc_b.pdf"], "doc_id": "demo_kb", "layer": "multi-source", "evidence_requirements": [{"requirement_id": "r1", "question": "A 文档的结论是什么？", "retrieval_query": "A 文档 结论", "recovery_query": "doc_a 核心发现"}, {"requirement_id": "r2", "question": "B 文档的结论是什么？", "retrieval_query": "B 文档 结论", "recovery_query": "doc_b 核心发现"}], "gold_requirements": [{"requirement_id": "r1", "acceptable_sources": ["doc_a.pdf"]}, {"requirement_id": "r2", "acceptable_sources": ["doc_b.pdf"]}], "hard_negative_chunk_ids": []}
 {"query": "示例：需要细粒度条件匹配才能定位来源的问题", "expected_sources": ["doc_a.pdf"], "doc_id": "demo_kb", "layer": "hard"}
 {"query": "示例：知识库没有说明的问题", "expected_sources": [], "doc_id": "demo_kb", "layer": "no-answer"}

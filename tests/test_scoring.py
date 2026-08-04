@@ -1,5 +1,3 @@
-import json
-
 from cogdoc.tools.eval.scoring import (
     LLMJudge,
     aggregate_case,
@@ -55,6 +53,135 @@ def test_missing_required_evidence_is_not_observable():
     assert report["quality_score"] is None
     assert report["decision"] == "NEEDS_REVIEW"
     assert report["evaluators"][0]["status"] == "NOT_OBSERVABLE"
+
+
+def test_claim_audit_assertion_recomputes_details_through_all_aliases():
+    audit = {
+        "status": "passed",
+        "claims": [
+            {
+                "claim_id": "c1",
+                "verdict": "supported",
+                "cited_chunk_ids": ["chunk-1"],
+                "supporting_chunk_ids": ["chunk-1"],
+            },
+            {
+                "claim_id": "c2",
+                "verdict": "unsupported",
+                "cited_chunk_ids": [],
+                "supporting_chunk_ids": [],
+            },
+            {
+                "claim_id": "c3",
+                "verdict": "not_factual",
+                "cited_chunk_ids": [],
+                "supporting_chunk_ids": [],
+            },
+        ],
+        # 故意伪造汇总，assertion 必须忽略它们。
+        "counts": {"claim_count": 100, "supported": 100},
+        "metrics": {"claim_support_rate": 1.0, "citation_coverage": 1.0},
+    }
+    evaluator = {
+        "type": "claim_audit_assertion",
+        "requires": ["claim_audit"],
+        "config": {
+            "min_claim_support_rate": 0.5,
+            "min_citation_coverage": 0.5,
+            "max_unsupported_claim_rate": 0.5,
+        },
+    }
+    trials = [
+        {"claim_audit": audit},
+        {"output": {"claim_audit": audit}},
+        {"trace": {"output": {"claim_audit": audit}}},
+    ]
+
+    for trial in trials:
+        report = evaluate_trial(
+            {"execution_status": "SUCCESS", **trial},
+            [evaluator],
+        )
+        result = report["evaluators"][0]
+        assert result["status"] == "PASS"
+        assert result["details"]["counts"] == {
+            "claim_count": 2,
+            "supported": 1,
+            "unsupported": 1,
+            "insufficient": 0,
+            "cited": 1,
+            "not_factual": 1,
+        }
+        assert result["details"]["metrics"]["claim_support_rate"] == 0.5
+        assert result["details"]["metrics"]["citation_coverage"] == 0.5
+
+
+def test_claim_audit_assertion_is_not_observable_when_audit_or_claims_missing():
+    for trial, missing in [
+        ({}, "claim_audit"),
+        ({"claim_audit": {"status": "passed"}}, "claim_audit.claims"),
+    ]:
+        report = evaluate_trial(
+            {"execution_status": "SUCCESS", **trial},
+            [{"type": "claim_audit_assertion"}],
+        )
+
+        result = report["evaluators"][0]
+        assert result["status"] == "NOT_OBSERVABLE"
+        assert result["missing_evidence"] == [missing]
+        assert report["quality_score"] is None
+        assert report["decision"] == "NEEDS_REVIEW"
+
+
+def test_claim_audit_assertion_defaults_to_strict_supported_and_cited_gate():
+    report = evaluate_trial(
+        {
+            "execution_status": "SUCCESS",
+            "claim_audit": {
+                "status": "failed",
+                "claims": [
+                    {
+                        "claim_id": "c1",
+                        "verdict": "insufficient",
+                        "cited_chunk_ids": ["chunk-1"],
+                    }
+                ],
+            },
+        },
+        [{"type": "claim_audit_assertion"}],
+    )
+
+    result = report["evaluators"][0]
+    assert result["status"] == "FAIL"
+    assert result["details"]["metrics"]["insufficient_claim_rate"] == 1.0
+    assert result["details"]["checks"]["status_allowed"] is False
+    assert result["details"]["checks"]["support_rate"] is False
+    assert report["decision"] == "FAIL"
+
+
+def test_claim_audit_assertion_downgrades_inconsistent_supported_evidence():
+    report = evaluate_trial(
+        {
+            "execution_status": "SUCCESS",
+            "claim_audit": {
+                "status": "passed",
+                "claims": [
+                    {
+                        "claim_id": "c1",
+                        "verdict": "supported",
+                        "cited_chunk_ids": ["chunk-1"],
+                        "supporting_chunk_ids": ["fabricated-chunk"],
+                    }
+                ],
+            },
+        },
+        [{"type": "claim_audit_assertion"}],
+    )
+
+    result = report["evaluators"][0]
+    assert result["status"] == "FAIL"
+    assert result["details"]["counts"]["supported"] == 0
+    assert result["details"]["counts"]["insufficient"] == 1
 
 
 def test_case_counts_execution_failures_and_mutually_exclusive_buckets():

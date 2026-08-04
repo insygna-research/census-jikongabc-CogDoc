@@ -38,13 +38,14 @@ from cogdoc.service.process_lock import (
     release_single_instance_lock,
     strict_single_process,
 )
+from cogdoc.state_runtime import StateRuntime
 from cogdoc.tools.embedder import Embedder
 from cogdoc.tools.manifest import (
     load_index_manifest,
     manifests_match,
     stamp_chunk_identity_contract,
 )
-from cogdoc.tools.reranker import BGEReranker, skipped_cpu_rerank_docs
+from cogdoc.tools.reranker import BGEReranker
 from cogdoc.tools.rust_core_loader import ensure_rust_core
 
 rust_core = None
@@ -126,8 +127,9 @@ def safe_print_on_interrupt(message: str) -> None:
 # 定义DebugSession。
 class DebugSession:
     # 独立 debug 控制台的 trace 命令和展示逻辑。
-    def __init__(self):
+    def __init__(self, state_runtime: StateRuntime | None = None):
         self.last_trace: dict | None = None
+        self.state_runtime = state_runtime
 
     # 格式化耗时。
     def format_duration(self, duration_ms) -> str:
@@ -472,6 +474,7 @@ class DebugSession:
             chat_history=chat_history,
             forced_task=forced_task,
             session_id=session_id,
+            state_runtime=self.state_runtime,
         ):
             if render_event is not None:
                 rendered = render_event(event)
@@ -589,7 +592,11 @@ def warm_up_runtime(engine) -> None:
 
 
 # 构建索引。
-def build_index(doc_id: str, doc_dir: str):
+def build_index(
+    doc_id: str,
+    doc_dir: str,
+    knowledge_store=None,
+):
     # 索引缺失或过期时全量重建。
     if not os.path.exists(doc_dir):
         os.makedirs(doc_dir)
@@ -599,7 +606,14 @@ def build_index(doc_id: str, doc_dir: str):
         return
 
     print("📚 检测到静态索引缺失或过期，开始构建知识库多轨索引...")
-    result = build_kb_index_transactional(doc_id, doc_dir)
+    if knowledge_store is None:
+        result = build_kb_index_transactional(doc_id, doc_dir)
+    else:
+        result = build_kb_index_transactional(
+            doc_id,
+            doc_dir,
+            knowledge_store=knowledge_store,
+        )
     if result.document_count == 0:
         print(f"⚠️ 提示: 目录 【{doc_dir}】 当前为空，未检测到任何 PDF 文件。")
         return
@@ -688,29 +702,41 @@ def print_retrieve_debug_output(
 
 
 # 执行检索调试。
-def run_retrieve_debug(doc_id: str, query: str) -> None:
+def run_retrieve_debug(
+    doc_id: str,
+    query: str,
+    *,
+    state_runtime: StateRuntime | None = None,
+) -> None:
+    from cogdoc.api.routes.agent import _run_retrieve
+    from cogdoc.api.schemas import RetrieveRequest
+
     settings = get_settings()
-    engine = RetrieverFactory.get_engine(doc_id)
-    top_k = settings.qa_retrieval_top_k
-    docs = engine.search(query=query, top_k=top_k)
+    top_k = min(max(int(settings.qa_retrieval_top_k), 1), 50)
+    top_n = min(max(int(settings.qa_rerank_top_n), 1), 50)
+    docs = _run_retrieve(
+        RetrieveRequest(
+            doc_id=doc_id,
+            query=query,
+            top_k=top_k,
+            rerank=True,
+            rerank_top_n=top_n,
+        ),
+        state_runtime=state_runtime,
+    )
     if not docs:
         print_retrieve_debug_output(query, [], False, "-")
         return
     target_device = BGEReranker.default_device()
-    max_candidates = max(settings.qa_rerank_max_candidates, settings.qa_rerank_top_n)
-    candidate_docs = docs[:max_candidates] if max_candidates > 0 else docs
-    if target_device == "cpu" and not settings.qa_rerank_on_cpu:
-        selected = skipped_cpu_rerank_docs(candidate_docs, settings.qa_rerank_top_n)
-        print_retrieve_debug_output(query, selected, False, target_device)
-        print("ℹ️ CPU 重排默认关闭；如需强制 CPU 精排，请设置 QA_RERANK_ON_CPU=true。")
-        return
-    reranked_docs = BGEReranker.rerank(
-        query=query,
-        docs=candidate_docs,
-        top_n=settings.qa_rerank_top_n,
-        device=target_device,
+    reranked = any(
+        isinstance(doc, dict)
+        and isinstance(doc.get("retrieval"), dict)
+        and doc["retrieval"].get("rerank_score") is not None
+        for doc in docs
     )
-    print_retrieve_debug_output(query, reranked_docs, True, target_device)
+    print_retrieve_debug_output(query, docs, reranked, target_device)
+    if target_device == "cpu" and not settings.qa_rerank_on_cpu:
+        print("ℹ️ CPU 重排默认关闭；如需强制 CPU 精排，请设置 QA_RERANK_ON_CPU=true。")
 
 
 # 输出final摘要output。
@@ -966,6 +992,8 @@ def main():
     args = parser.parse_args()
 
     configure_logging()
+    state_runtime = StateRuntime.from_settings()
+    atexit.register(state_runtime.close)
     TARGET_DOC_ID = args.kb
     TARGET_DOC_DIR = _resolve_source_dir(TARGET_DOC_ID)
 
@@ -997,7 +1025,11 @@ def main():
     if not index_is_current:
         print(f"⚠️ 预检提示: 知识库 【{TARGET_DOC_ID}】 的本地索引缺失或已过期。")
         try:
-            build_index(TARGET_DOC_ID, TARGET_DOC_DIR)
+            build_index(
+                TARGET_DOC_ID,
+                TARGET_DOC_DIR,
+                knowledge_store=state_runtime.knowledge_store,
+            )
             # build 后重取引擎：transactional build 会 invalidate 旧缓存。
             engine = RetrieverFactory.get_engine(TARGET_DOC_ID)
             if not (
@@ -1021,7 +1053,7 @@ def main():
     is_local = True
     chat_history = []
     debug_session_id = uuid4().hex
-    debug_session = DebugSession()
+    debug_session = DebugSession(state_runtime=state_runtime)
 
     print("=" * 60)
     print(f"🔬 CogDoc Debug 控制台 | 隔离域: {TARGET_DOC_ID}")
@@ -1059,7 +1091,11 @@ def main():
 
     # 执行检索调试。
     def _retrieve_debug(query: str) -> None:
-        run_retrieve_debug(TARGET_DOC_ID, query)
+        run_retrieve_debug(
+            TARGET_DOC_ID,
+            query,
+            state_runtime=debug_session.state_runtime,
+        )
 
     while True:
         try:
@@ -1100,7 +1136,10 @@ def main():
         except Exception as e:
             print(f"⚠️ [控制台内部异常捕获]: {e}")
 
-    _release_runtime_lock(lock_fh)
+    try:
+        state_runtime.close()
+    finally:
+        _release_runtime_lock(lock_fh)
 
 
 if __name__ == "__main__":

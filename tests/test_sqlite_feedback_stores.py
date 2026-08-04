@@ -69,6 +69,7 @@ def _retrieval_payload() -> dict:
         "kb_id": "kb-1",
         "query": "  API   LIMIT  ",
         "feedback": "thumbs_down",
+        "feedback_type": "bad_retrieval",
         "trace_id": "trace-1",
         "citations": [
             {"chunk_id": "chunk-1", "source_type": "document"},
@@ -123,6 +124,78 @@ def test_sqlite_retrieval_feedback_store_parity_enable_and_shared_database(tmp_p
     reopened.clear_kb("kb-1")
     assert reopened.list(kb_id="kb-1") == []
     reopened.close()
+
+
+def test_retrieval_feedback_attribution_is_consistent_across_backends(tmp_path):
+    stores = [
+        RetrievalFeedbackStore(path=str(tmp_path / "retrieval.jsonl")),
+        SqliteRetrievalFeedbackStore(str(tmp_path / "retrieval.db")),
+    ]
+    cases = [
+        ("unclassified-down", {"feedback": "thumbs_down"}, None),
+        (
+            "wrong-answer",
+            {"feedback": "thumbs_down", "feedback_type": "wrong_answer"},
+            None,
+        ),
+        (
+            "correction",
+            {"feedback": "correction", "feedback_type": "correction"},
+            None,
+        ),
+        (
+            "low-rating",
+            {"feedback": "thumbs_up", "feedback_type": "wrong_answer", "rating": 1},
+            None,
+        ),
+        (
+            "bad-retrieval",
+            {"feedback": "thumbs_down", "feedback_type": "bad_retrieval"},
+            -0.35,
+        ),
+        (
+            "bad-retrieval-correction",
+            {"feedback": "correction", "feedback_type": "bad_retrieval"},
+            -0.55,
+        ),
+        (
+            "bad-retrieval-low-rating",
+            {
+                "feedback": "thumbs_down",
+                "feedback_type": "bad_retrieval",
+                "rating": 1,
+            },
+            -0.24,
+        ),
+        ("thumbs-up", {"feedback": "thumbs_up"}, 0.2),
+        (
+            "high-rating",
+            {"feedback": "thumbs_up", "rating": 5},
+            0.24,
+        ),
+        (
+            "skipped",
+            {"feedback": "thumbs_up", "skip_retrieval_feedback": True},
+            None,
+        ),
+    ]
+
+    for store in stores:
+        observed = []
+        for name, feedback, expected_weight in cases:
+            records = store.record_from_feedback(
+                name,
+                {
+                    "kb_id": "kb",
+                    "query": name,
+                    "citations": [{"chunk_id": f"chunk-{name}"}],
+                    **feedback,
+                },
+            )
+            observed.append(records[0]["weight_delta"] if records else None)
+        assert observed == [expected for _, _, expected in cases]
+
+    stores[1].close()
 
 
 def test_feedback_sqlite_stores_share_public_connection_policy(tmp_path):

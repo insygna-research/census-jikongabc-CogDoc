@@ -4,6 +4,7 @@ from cogdoc.agents import evidence_verifier
 from cogdoc.agents.evidence_verifier import (
     EvidenceVerification,
     EvidenceVerifierAgent,
+    RequirementEvidenceAssessment,
     requires_evidence_verification,
     select_verification_docs,
     should_verify_evidence,
@@ -16,8 +17,13 @@ def _settings(**overrides):
     return Settings(_env_file=None, **overrides)
 
 
-def _doc(chunk_id: str, source: str, text: str = "evidence") -> dict:
-    return {
+def _doc(
+    chunk_id: str,
+    source: str,
+    text: str = "evidence",
+    matched_requirement_ids: list[str] | None = None,
+) -> dict:
+    doc = {
         "text": text,
         "meta": {
             "chunk_id": chunk_id,
@@ -26,6 +32,20 @@ def _doc(chunk_id: str, source: str, text: str = "evidence") -> dict:
             "page_start": 1,
             "page_end": 1,
         },
+    }
+    if matched_requirement_ids is not None:
+        doc["retrieval"] = {
+            "matched_requirement_ids": matched_requirement_ids,
+        }
+    return doc
+
+
+def _requirement(requirement_id: str, question: str) -> dict[str, str]:
+    return {
+        "requirement_id": requirement_id,
+        "question": question,
+        "retrieval_query": question,
+        "recovery_query": question,
     }
 
 
@@ -49,6 +69,19 @@ def test_select_verification_docs_diversifies_sources():
     selected = select_verification_docs(docs, 3)
 
     assert [doc["meta"]["chunk_id"] for doc in selected] == ["a1", "b1", "c1"]
+
+
+# 需求归因覆盖优先于通用来源多样化。
+def test_select_verification_docs_prioritizes_each_requirement():
+    docs = [
+        _doc("general", "a.pdf"),
+        _doc("r2-doc", "a.pdf", matched_requirement_ids=["r2"]),
+        _doc("r1-doc", "b.pdf", matched_requirement_ids=["r1"]),
+    ]
+
+    selected = select_verification_docs(docs, 2, ["r1", "r2"])
+
+    assert [doc["meta"]["chunk_id"] for doc in selected] == ["r1-doc", "r2-doc"]
 
 
 # 第一阶段放行和阈值附近的事实问题都进入二阶段，明显低分仍直接拒答。
@@ -81,6 +114,21 @@ def test_should_verify_supported_and_borderline_fact_queries():
             "retrieval_confidence": 0.5,
         },
         settings,
+    )
+
+
+# 多个原子需求即使不命中数值/日期标记，也必须逐项校验。
+def test_multiple_requirements_trigger_verification_without_fact_marker():
+    assert should_verify_evidence(
+        {
+            "query": "介绍两个方面",
+            "evidence_requirements": [
+                _requirement("r1", "第一个方面是什么？"),
+                _requirement("r2", "第二个方面是什么？"),
+            ],
+            "retrieval_first_stage_supported": True,
+        },
+        _settings(),
     )
 
 
@@ -143,6 +191,238 @@ def test_verifier_rejects_fabricated_chunk_id(monkeypatch):
     assert output["evidence_verified_chunk_ids"] == []
 
 
+# 逐需求结论完整且每项都引用闭集证据时才能放行。
+def test_verifier_accepts_complete_requirement_assessments(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(evidence_verifier, "get_settings", lambda: _settings())
+    monkeypatch.setattr(
+        evidence_verifier.Generator, "_get_client", lambda **kwargs: object()
+    )
+
+    def invoke(_llm, _schema, messages):
+        captured["messages"] = messages
+        return EvidenceVerification(
+            supported=True,
+            evidence_chunk_ids=["a1", "b1"],
+            reason="两项需求均有直接证据",
+            assessments=[
+                RequirementEvidenceAssessment(
+                    requirement_id="r1",
+                    verdict="supported",
+                    evidence_chunk_ids=["a1"],
+                    reason="A 证据完整",
+                ),
+                RequirementEvidenceAssessment(
+                    requirement_id="r2",
+                    verdict="supported",
+                    evidence_chunk_ids=["b1"],
+                    reason="B 证据完整",
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(evidence_verifier, "invoke_structured", invoke)
+    output = EvidenceVerifierAgent.verify(
+        {
+            "query": "A 和 B 分别是什么？",
+            "evidence_requirements": [
+                _requirement("r1", "A 是什么？"),
+                _requirement("r2", "B 是什么？"),
+            ],
+            "retrieval_first_stage_supported": True,
+            "verification_docs": [
+                _doc("a1", "a.pdf", matched_requirement_ids=["r1"]),
+                _doc("b1", "b.pdf", matched_requirement_ids=["r2"]),
+            ],
+        }
+    )
+
+    assert output["evidence_supported"] is True
+    assert output["missing_evidence_requirement_ids"] == []
+    assert output["evidence_verified_chunk_ids"] == ["a1", "b1"]
+    assert [
+        assessment["requirement_id"]
+        for assessment in output["evidence_requirement_assessments"]
+    ] == ["r1", "r2"]
+    assert '"requirement_id": "r1"' in captured["messages"][1]["content"]
+    assert '"matched_requirement_ids": ["r1"]' in captured["messages"][1]["content"]
+
+
+# 部分需求缺失时整体拒答，但保留已验证 chunk 与缺失 ID 供补检索。
+def test_verifier_reports_partial_missing_requirement(monkeypatch):
+    monkeypatch.setattr(evidence_verifier, "get_settings", lambda: _settings())
+    monkeypatch.setattr(
+        evidence_verifier.Generator, "_get_client", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(
+        evidence_verifier,
+        "invoke_structured",
+        lambda *_args, **_kwargs: EvidenceVerification(
+            supported=False,
+            evidence_chunk_ids=["a1"],
+            reason="B 证据缺失",
+            assessments=[
+                RequirementEvidenceAssessment(
+                    requirement_id="r1",
+                    verdict="supported",
+                    evidence_chunk_ids=["a1"],
+                    reason="A 已支持",
+                ),
+                RequirementEvidenceAssessment(
+                    requirement_id="r2",
+                    verdict="missing",
+                    evidence_chunk_ids=[],
+                    reason="未找到 B",
+                ),
+            ],
+        ),
+    )
+
+    output = EvidenceVerifierAgent.verify(
+        {
+            "query": "A 和 B",
+            "evidence_requirements": [
+                _requirement("r1", "A 是什么？"),
+                _requirement("r2", "B 是什么？"),
+            ],
+            "retrieval_first_stage_supported": True,
+            "verification_docs": [_doc("a1", "a.pdf")],
+        }
+    )
+
+    assert output["evidence_supported"] is False
+    assert output["missing_evidence_requirement_ids"] == ["r2"]
+    assert output["evidence_verified_chunk_ids"] == ["a1"]
+
+
+@pytest.mark.parametrize("malformed_kind", ["omitted", "unknown"])
+def test_verifier_rejects_omitted_or_unknown_requirement_id(
+    monkeypatch, malformed_kind
+):
+    assessments = [
+        RequirementEvidenceAssessment(
+            requirement_id="r1",
+            verdict="supported",
+            evidence_chunk_ids=["a1"],
+            reason="A 已支持",
+        )
+    ]
+    if malformed_kind == "unknown":
+        assessments.append(
+            RequirementEvidenceAssessment(
+                requirement_id="r999",
+                verdict="supported",
+                evidence_chunk_ids=["a1"],
+                reason="未知需求",
+            )
+        )
+    monkeypatch.setattr(evidence_verifier, "get_settings", lambda: _settings())
+    monkeypatch.setattr(
+        evidence_verifier.Generator, "_get_client", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(
+        evidence_verifier,
+        "invoke_structured",
+        lambda *_args, **_kwargs: EvidenceVerification(
+            supported=True,
+            evidence_chunk_ids=["a1"],
+            reason="声称完整",
+            assessments=assessments,
+        ),
+    )
+
+    output = EvidenceVerifierAgent.verify(
+        {
+            "query": "A 和 B",
+            "evidence_requirements": [
+                _requirement("r1", "A 是什么？"),
+                _requirement("r2", "B 是什么？"),
+            ],
+            "retrieval_first_stage_supported": True,
+            "verification_docs": [_doc("a1", "a.pdf")],
+        }
+    )
+
+    assert output["evidence_supported"] is False
+    assert output["missing_evidence_requirement_ids"] == ["r1", "r2"]
+
+
+# 逐需求评估引用伪造 chunk 时必须降级为 missing，不得只过滤后放行。
+def test_verifier_rejects_fabricated_requirement_chunk_id(monkeypatch):
+    monkeypatch.setattr(evidence_verifier, "get_settings", lambda: _settings())
+    monkeypatch.setattr(
+        evidence_verifier.Generator, "_get_client", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(
+        evidence_verifier,
+        "invoke_structured",
+        lambda *_args, **_kwargs: EvidenceVerification(
+            supported=True,
+            evidence_chunk_ids=[],
+            reason="声称有证据",
+            assessments=[
+                RequirementEvidenceAssessment(
+                    requirement_id="r1",
+                    verdict="supported",
+                    evidence_chunk_ids=["fabricated"],
+                    reason="伪造证据",
+                )
+            ],
+        ),
+    )
+
+    output = EvidenceVerifierAgent.verify(
+        {
+            "query": "A 是什么？",
+            "evidence_requirements": [_requirement("r1", "A 是什么？")],
+            "retrieval_first_stage_supported": True,
+            "verification_docs": [_doc("a1", "a.pdf")],
+        }
+    )
+
+    assert output["evidence_supported"] is False
+    assert output["missing_evidence_requirement_ids"] == ["r1"]
+    assert output["evidence_verified_chunk_ids"] == []
+    assert output["evidence_requirement_assessments"][0]["verdict"] == "missing"
+
+
+# contradictory 也是证据判断；没有闭集 chunk 支撑时不能成立。
+def test_contradictory_requirement_without_chunk_is_downgraded(monkeypatch):
+    monkeypatch.setattr(evidence_verifier, "get_settings", lambda: _settings())
+    monkeypatch.setattr(
+        evidence_verifier.Generator, "_get_client", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(
+        evidence_verifier,
+        "invoke_structured",
+        lambda *_args, **_kwargs: EvidenceVerification(
+            supported=False,
+            reason="声称冲突",
+            assessments=[
+                RequirementEvidenceAssessment(
+                    requirement_id="r1",
+                    verdict="contradictory",
+                    evidence_chunk_ids=[],
+                    reason="无证据的冲突",
+                )
+            ],
+        ),
+    )
+
+    output = EvidenceVerifierAgent.verify(
+        {
+            "query": "A 是什么？",
+            "evidence_requirements": [_requirement("r1", "A 是什么？")],
+            "retrieval_first_stage_supported": True,
+            "verification_docs": [_doc("a1", "a.pdf")],
+        }
+    )
+
+    assert output["evidence_supported"] is False
+    assert output["missing_evidence_requirement_ids"] == ["r1"]
+    assert output["evidence_requirement_assessments"][0]["verdict"] == "missing"
+
+
 # 校验器使用了 Top 3 之外的来源时，该 chunk 必须进入后续生成和引用上下文。
 def test_evidence_verify_node_merges_verified_docs_into_generation(monkeypatch):
     top_doc = _doc("a1", "a.pdf")
@@ -198,4 +478,28 @@ def test_verifier_error_preserves_first_stage_decision(
 
     assert output["evidence_supported"] is first_stage_supported
     assert output["retrieval_abstained"] is (not first_stage_supported)
+    assert output["evidence_verifier_error"] == "RuntimeError"
+
+
+# 已进入需求化闭集校验后，校验器异常必须 fail-closed。
+def test_requirement_verifier_error_fails_closed(monkeypatch):
+    monkeypatch.setattr(evidence_verifier, "get_settings", lambda: _settings())
+    monkeypatch.setattr(
+        evidence_verifier.Generator,
+        "_get_client",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+
+    output = EvidenceVerifierAgent.verify(
+        {
+            "query": "A 是什么？",
+            "evidence_requirements": [_requirement("r1", "A 是什么？")],
+            "retrieval_first_stage_supported": True,
+            "verification_docs": [_doc("a1", "a.pdf")],
+        }
+    )
+
+    assert output["evidence_supported"] is False
+    assert output["retrieval_abstained"] is True
+    assert output["missing_evidence_requirement_ids"] == ["r1"]
     assert output["evidence_verifier_error"] == "RuntimeError"

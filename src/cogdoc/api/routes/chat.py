@@ -100,6 +100,11 @@ async def chat(request_body: ChatRequest, request: Request, response: Response):
     request.app.state.metrics.chat_results.labels(
         result.task_type, str(result.is_valid).lower()
     ).inc()
+    request.app.state.metrics.observe_claim_audit(
+        result.task_type,
+        result.raw_output.get("claim_audit"),
+    )
+    request.app.state.metrics.observe_retrieval(result.task_type, result.raw_output)
     chat_response = chat_result_to_response(
         result,
         doc_id=request_body.doc_id,
@@ -175,12 +180,16 @@ _SSE_PROGRESS_TYPES = {
     "router_decided",
     "rewrite_queries",
     "retrieval_abstained",
+    "retrieval_retry",
     "evidence_verified",
     "evidence_rejected",
     "citation_passed",
     "citation_rejected",
     "compare_citation_passed",
     "compare_citation_rejected",
+    "claim_audit",
+    "claim_repair",
+    "claim_rejected",
 }
 _STREAM_DONE = object()
 
@@ -289,6 +298,13 @@ async def chat_stream(request_body: ChatRequest, request: Request):
             request.app.state.metrics.chat_results.labels(
                 result.task_type, str(result.is_valid).lower()
             ).inc()
+            request.app.state.metrics.observe_claim_audit(
+                result.task_type,
+                result.raw_output.get("claim_audit"),
+            )
+            request.app.state.metrics.observe_retrieval(
+                result.task_type, result.raw_output
+            )
             session_store.record(
                 doc_id,
                 session_id,

@@ -3,7 +3,7 @@ import hashlib
 import json
 import logging
 import os
-from typing import Any
+from typing import Any, Callable
 
 from cogdoc.api.derived_knowledge_store import DerivedKnowledgeStore
 from cogdoc.config.settings import get_settings
@@ -359,12 +359,19 @@ class DerivedKnowledgeRetriever:
         store: DerivedKnowledgeStore | None = None,
         *,
         index: DerivedKnowledgeIndex | None = None,
+        index_factory: Callable[[], DerivedKnowledgeIndex] | None = None,
         enable_index: bool | None = None,
     ):
+        if index is not None and index_factory is not None:
+            raise ValueError("index and index_factory cannot both be provided")
         self.store = store or DerivedKnowledgeStore()
+        self._index_factory = index_factory
         if index is not None:
             self._index = index
             self._index_enabled = True
+        elif index_factory is not None:
+            self._index = None
+            self._index_enabled = enable_index is not False
         elif enable_index is False or (enable_index is None and store is not None):
             self._index = None
             self._index_enabled = False
@@ -397,7 +404,11 @@ class DerivedKnowledgeRetriever:
         if not self._index_enabled:
             return None
         if self._index is None:
-            self._index = DerivedKnowledgeIndex(self.store)
+            self._index = (
+                self._index_factory()
+                if self._index_factory is not None
+                else DerivedKnowledgeIndex(self.store)
+            )
         return self._index
 
     def _lexical_search(self, kb_id: str, query: str, top_k: int) -> list[RetrievedDoc]:

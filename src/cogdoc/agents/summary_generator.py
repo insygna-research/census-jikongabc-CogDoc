@@ -5,6 +5,10 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from cogdoc.config.settings import get_settings
 from cogdoc.agents.answer_markers import CITATION_WARNING_HEADING
 from cogdoc.agents.citation_validator import CitationValidatorAgent
+from cogdoc.agents.claim_evidence_verifier import (
+    CLAIM_AUDIT_EXEMPTION_GUIDANCE,
+    make_claim_audit_exemption,
+)
 from cogdoc.agents.qa_generator import Generator
 from cogdoc.graph.state import (
     Evidence,
@@ -415,6 +419,10 @@ class GlobalSummaryAgent:
             return {
                 "answer": answer,
                 "messages": [{"role": "assistant", "content": answer}],
+                "claim_audit_exemption": make_claim_audit_exemption(
+                    answer,
+                    CLAIM_AUDIT_EXEMPTION_GUIDANCE,
+                ),
             }
 
         lines = [f"# {source} 结构化摘要"]

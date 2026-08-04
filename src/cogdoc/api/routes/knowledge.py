@@ -79,14 +79,27 @@ def _derived_knowledge_index_status(kb_id: str, store) -> dict:
 
 
 # 容错刷新派生知识索引。
-def _refresh_derived_knowledge_index_quiet(refresher, kb_id: str, store) -> None:
+def _refresh_derived_knowledge_index_quiet(
+    refresher,
+    kb_id: str,
+    store,
+    error_recorder=None,
+) -> None:
     try:
         refresher(kb_id, store)
     except Exception as exc:
         try:
-            from cogdoc.tools.retriever.derived_knowledge import DerivedKnowledgeIndex
+            if error_recorder is not None:
+                error_recorder(kb_id, type(exc).__name__)
+            else:
+                from cogdoc.tools.retriever.derived_knowledge import (
+                    DerivedKnowledgeIndex,
+                )
 
-            DerivedKnowledgeIndex(store).record_error(kb_id, type(exc).__name__)
+                DerivedKnowledgeIndex(store).record_error(
+                    kb_id,
+                    type(exc).__name__,
+                )
         except Exception:
             pass
         log_event(
@@ -119,6 +132,11 @@ def _queue_derived_knowledge_index_refresh(request: Request, kb_id: str | None) 
             refresher,
             kb_id,
             request.app.state.knowledge_store,
+            getattr(
+                request.app.state,
+                "derived_knowledge_index_error_recorder",
+                None,
+            ),
         )
     except RuntimeError as exc:
         log_event(

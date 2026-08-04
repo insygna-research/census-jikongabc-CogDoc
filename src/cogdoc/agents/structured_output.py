@@ -1,11 +1,14 @@
 import json
-from typing import Iterable, Type
+from typing import Iterable, TypeVar
+
 from pydantic import BaseModel
+
 from cogdoc.config.settings import get_settings
 
 
 STRUCTURED_OUTPUT_METHODS = ("json_mode", "json_schema", "function_calling", "raw_json")
 _METHOD_CACHE: dict[str, str] = {}
+StructuredModel = TypeVar("StructuredModel", bound=BaseModel)
 
 
 # 构造缓存密钥。
@@ -113,21 +116,27 @@ def _extract_json_object(text: str) -> str:
 
 
 # 解析 schema。
-def _parse_schema(schema: Type[BaseModel], payload: str | dict) -> BaseModel:
+def _parse_schema(
+    schema: type[StructuredModel], payload: str | dict
+) -> StructuredModel:
     if isinstance(payload, dict):
         return schema.model_validate(payload)
     return schema.model_validate_json(payload)
 
 
 # 调用原始输出JSON。
-def _invoke_raw_json(llm, schema: Type[BaseModel], messages: Iterable) -> BaseModel:
+def _invoke_raw_json(
+    llm, schema: type[StructuredModel], messages: Iterable
+) -> StructuredModel:
     response = llm.invoke(list(messages))
     content = _message_content(response)
     return _parse_schema(schema, _extract_json_object(content))
 
 
 # 调用结构化输出。
-def invoke_structured(llm, schema: Type[BaseModel], messages: Iterable) -> BaseModel:
+def invoke_structured(
+    llm, schema: type[StructuredModel], messages: Iterable
+) -> StructuredModel:
     # 统一兼容 OpenAI、DeepSeek、Ollama 等 OpenAI-compatible 后端的结构化输出差异。
     errors = []
     messages = list(messages)

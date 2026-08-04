@@ -198,29 +198,78 @@ class IndexJobManager:
         job_store: object | None = None,
         kb_exists: "Callable[[str], bool] | None" = None,
         journal: object | None = None,
+        knowledge_store: object | None = None,
     ):
         self._ingest_fn = ingest_fn
+        self._knowledge_store = knowledge_store
         self._source_dir_for = source_dir_for or get_settings().kb_source_dir
         self._store = job_store or InMemoryJobStore()
         self._kb_exists = kb_exists  # 防复活：KB 已删未重建时拒绝陈旧 mutation
         self._journal = (
             journal or shared_mutation_journal()
         )  # 源文件 mutation 崩溃恢复日志
-        # ingest_fn 是否支持 on_commit：支持则把 journal 提交点贴到索引提交点（switch_active）。
+        # 只向显式支持的 ingest_fn 注入提交回调与派生知识存储，兼容旧两参数函数。
         try:
-            self._ingest_takes_on_commit = (
-                "on_commit" in inspect.signature(ingest_fn).parameters
+            ingest_parameters = inspect.signature(ingest_fn).parameters
+            accepts_var_keyword = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in ingest_parameters.values()
+            )
+            self._ingest_takes_on_commit = self._accepts_keyword(
+                ingest_parameters,
+                "on_commit",
+                accepts_var_keyword=accepts_var_keyword,
+            )
+            self._ingest_takes_knowledge_store = self._accepts_keyword(
+                ingest_parameters,
+                "knowledge_store",
+                accepts_var_keyword=accepts_var_keyword,
             )
         except (TypeError, ValueError):
             self._ingest_takes_on_commit = False
+            self._ingest_takes_knowledge_store = False
         self._executors: dict[str, ThreadPoolExecutor] = {}
         self._retired_executors: set[ThreadPoolExecutor] = set()
+        self._retire_when_idle: set[str] = set()
         self._inflight: dict[
             str, int
         ] = {}  # 每 KB 在途命令数，0 且久未活动才可淘汰 executor
         self._last_active: dict[str, float] = {}
         self._ex_lock = Lock()
         self._closed = False
+
+    @staticmethod
+    def _accepts_keyword(
+        parameters,
+        name: str,
+        *,
+        accepts_var_keyword: bool,
+    ) -> bool:
+        parameter = parameters.get(name)
+        if parameter is None:
+            return accepts_var_keyword
+        return parameter.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+
+    def bind_knowledge_store(self, knowledge_store: object) -> None:
+        """Bind once to the app runtime store, rejecting split-brain wiring."""
+
+        if knowledge_store is None:
+            raise ValueError("knowledge_store is required")
+        with self._ex_lock:
+            if self._knowledge_store is None:
+                if any(self._inflight.values()):
+                    raise RuntimeError(
+                        "cannot bind knowledge_store while index jobs are running"
+                    )
+                self._knowledge_store = knowledge_store
+                return
+            if self._knowledge_store is not knowledge_store:
+                raise ValueError(
+                    "IndexJobManager knowledge_store does not match StateRuntime"
+                )
 
     # 返回执行器locked。
     def _get_executor_locked(self, kb_id: str) -> ThreadPoolExecutor:
@@ -359,14 +408,26 @@ class IndexJobManager:
 
         # 执行后台任务并完成收尾。
         def runner():
+            retire = None
             try:
                 return fn(*args)
             finally:
                 with self._ex_lock:
-                    # executor 已被 release（如删库内自释放）则不再回写，避免遗留陈旧计数。
                     if self._executors.get(kb_id) is ex:
                         self._inflight[kb_id] = max(0, self._inflight.get(kb_id, 1) - 1)
                         self._last_active[kb_id] = time.time()
+                        if (
+                            self._inflight[kb_id] == 0
+                            and kb_id in self._retire_when_idle
+                        ):
+                            self._retire_when_idle.discard(kb_id)
+                            self._executors.pop(kb_id, None)
+                            self._inflight.pop(kb_id, None)
+                            self._last_active.pop(kb_id, None)
+                            self._retired_executors.add(ex)
+                            retire = ex
+                if retire is not None:
+                    retire.shutdown(wait=False)
 
         return ex.submit(runner)
 
@@ -418,11 +479,16 @@ class IndexJobManager:
 
     # 释放执行器。
     def release_executor(self, kb_id: str) -> None:
-        # 释放槽位防上限耗尽；排队的陈旧命令仍跑但被 epoch/exists 守卫拦下，不写已删或重建的 KB。
+        # 任务内请求释放时不能立即 pop：同 executor 可能还排着第二个
+        # DELETE/CREATE。等整条队列归零后再退役，避免新旧 executor 并行改同一 KB。
         with self._ex_lock:
+            if self._inflight.get(kb_id, 0) > 0:
+                self._retire_when_idle.add(kb_id)
+                return
             ex = self._executors.pop(kb_id, None)
             self._inflight.pop(kb_id, None)
             self._last_active.pop(kb_id, None)
+            self._retire_when_idle.discard(kb_id)
             if ex is not None:
                 self._retired_executors.add(ex)
         if ex is not None:
@@ -445,6 +511,7 @@ class IndexJobManager:
                 ex = self._executors.pop(kb_id)
                 self._inflight.pop(kb_id, None)
                 self._last_active.pop(kb_id, None)
+                self._retire_when_idle.discard(kb_id)
                 evicted.append((kb_id, ex))
                 self._retired_executors.add(ex)
         for _, ex in evicted:
@@ -608,13 +675,17 @@ class IndexJobManager:
         except Exception:
             pass
         try:
+            ingest_kwargs = {}
             if self._ingest_takes_on_commit:
                 # 提交点贴死 switch_active：build 在提交前用 gen_id 回调 record_generation。
-                result = self._ingest_fn(kb_id, source_dir, on_commit=on_commit)
-            else:
-                result = self._ingest_fn(
-                    kb_id, source_dir
-                )  # 不支持回调的旧 fn：无 journal gen 记录
+                ingest_kwargs["on_commit"] = on_commit
+            if (
+                self._ingest_takes_knowledge_store
+                and self._knowledge_store is not None
+            ):
+                ingest_kwargs["knowledge_store"] = self._knowledge_store
+            # 不支持新参数的旧/测试 ingest_fn 保持原有两参数调用契约。
+            result = self._ingest_fn(kb_id, source_dir, **ingest_kwargs)
         except Exception as exc:
             # 构建未提交（active 仍是旧代）：返回 False 触发源文件回滚。
             self._fail_job(job_id, kb_id, exc)
@@ -685,6 +756,7 @@ class IndexJobManager:
             self._retired_executors.clear()
             self._inflight.clear()
             self._last_active.clear()
+            self._retire_when_idle.clear()
         # 锁外排空：wait=True 等在途 mutation 跑完再返回，保证 lifespan 释放进程锁前无后台写线程。 不持 _ex_lock 等待，否则 runner finally 取 _ex_lock 会与之死锁。
         for ex in executors:
             ex.shutdown(wait=wait)

@@ -5,6 +5,7 @@ from cogdoc.graph.subgraphs.qa import (
     abstain_node,
     evidence_check,
     rerank_node,
+    retrieval_retry_node,
     retrieval_check,
 )
 from cogdoc.tools.retriever.confidence import assess_retrieval_support
@@ -134,3 +135,134 @@ def test_abstain_node_returns_stable_answer_without_evidence():
     )
     assert evidence_check({"evidence_supported": True}) == "generate_node"
     assert evidence_check({"evidence_supported": False}) == "abstain_node"
+
+
+# 验证多需求覆盖不足会触发一次补检索，达到预算后稳定拒答。
+def test_requirement_coverage_retry_is_bounded(monkeypatch):
+    settings = _settings(
+        qa_adaptive_retrieval_enabled=True,
+        qa_adaptive_retrieval_max_retries=1,
+    )
+    monkeypatch.setattr(qa, "get_settings", lambda: settings)
+    requirements = [
+        {
+            "requirement_id": "r1",
+            "question": "A 的规则是什么",
+            "retrieval_query": "A 规则",
+            "recovery_query": "A 要求",
+        },
+        {
+            "requirement_id": "r2",
+            "question": "B 的规则是什么",
+            "retrieval_query": "B 规则",
+            "recovery_query": "B 要求",
+        },
+    ]
+    first_round = {
+        "evidence_requirements": requirements,
+        "retrieval_abstained": True,
+        "retrieval_abstain_reason": "below_threshold",
+        "retrieval_retry_count": 0,
+    }
+
+    assert retrieval_check(first_round) == "retrieval_retry_node"
+    retry = retrieval_retry_node(first_round)
+    assert retry["retrieval_retry_count"] == 1
+    assert retry["missing_evidence_requirement_ids"] == ["r1", "r2"]
+    assert (
+        retrieval_check({**first_round, **retry, "retrieval_abstained": True})
+        == "abstain_node"
+    )
+
+
+# 验证逐需求校验部分缺失进入补检索，校验器异常则不重复无效调用。
+def test_evidence_failure_retries_only_recoverable_requirement_gaps(monkeypatch):
+    monkeypatch.setattr(
+        qa,
+        "get_settings",
+        lambda: _settings(
+            qa_adaptive_retrieval_enabled=True,
+            qa_adaptive_retrieval_max_retries=1,
+        ),
+    )
+    state = {
+        "evidence_supported": False,
+        "evidence_requirements": [
+            {
+                "requirement_id": "r1",
+                "question": "A",
+                "retrieval_query": "A",
+                "recovery_query": "A 详情",
+            }
+        ],
+        "missing_evidence_requirement_ids": ["r1"],
+        "retrieval_retry_count": 0,
+    }
+
+    assert evidence_check(state) == "retrieval_retry_node"
+    assert evidence_check({**state, "evidence_verifier_error": "TimeoutError"}) == (
+        "abstain_node"
+    )
+
+
+# 验证补检索终轮未重新校验时不会泄漏上一轮 verifier 结论。
+def test_terminal_retry_rerank_clears_stale_verifier_assessments(monkeypatch):
+    settings = _settings(
+        qa_rerank_on_cpu=False,
+        qa_evidence_verify_enabled=True,
+        qa_adaptive_retrieval_enabled=True,
+        qa_adaptive_retrieval_max_retries=1,
+    )
+    monkeypatch.setattr(qa, "get_settings", lambda: settings)
+    monkeypatch.setattr(qa.BGEReranker, "default_device", lambda: "cpu")
+    monkeypatch.setattr(qa, "log_event", lambda *args, **kwargs: None)
+
+    output = rerank_node(
+        {
+            "query": "A 和 B 的规则分别是什么",
+            "doc_id": "kb",
+            "retrieval_retry_count": 1,
+            "retrieval_round": 1,
+            "retrieved_docs": [],
+            "evidence_requirements": [
+                {
+                    "requirement_id": "r1",
+                    "question": "A 的规则",
+                    "retrieval_query": "A 规则",
+                    "recovery_query": "A 要求",
+                },
+                {
+                    "requirement_id": "r2",
+                    "question": "B 的规则",
+                    "retrieval_query": "B 规则",
+                    "recovery_query": "B 要求",
+                },
+            ],
+            "evidence_verification_required": True,
+            "evidence_supported": False,
+            "evidence_verification_reason": "上一轮缺少 B",
+            "evidence_verified_chunk_ids": ["c1"],
+            "evidence_requirement_assessments": [
+                {
+                    "requirement_id": "r1",
+                    "verdict": "supported",
+                    "evidence_chunk_ids": ["c1"],
+                    "reason": "上一轮 A 已覆盖",
+                },
+                {
+                    "requirement_id": "r2",
+                    "verdict": "missing",
+                    "evidence_chunk_ids": [],
+                    "reason": "上一轮缺少 B",
+                },
+            ],
+            "missing_evidence_requirement_ids": ["r2"],
+        }
+    )
+
+    assert output["retrieval_abstained"] is True
+    assert output["evidence_verification_pending"] is False
+    assert output["evidence_verification_required"] is False
+    assert output["evidence_verification_reason"] == ""
+    assert output["evidence_verified_chunk_ids"] == []
+    assert output["evidence_requirement_assessments"] == []

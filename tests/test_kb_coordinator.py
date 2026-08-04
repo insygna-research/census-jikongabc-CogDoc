@@ -49,6 +49,75 @@ def test_default_ingest_fn_is_transactional():
     mgr.shutdown()
 
 
+# 验证任务管理器向支持该参数的入库函数注入派生知识存储。
+def test_index_job_manager_injects_knowledge_store():
+    seen = []
+    knowledge_store = object()
+
+    def ingest(kb_id, source_dir, *, knowledge_store=None):
+        seen.append(knowledge_store)
+        return MagicMock(document_count=0, chunk_count=0)
+
+    mgr = IndexJobManager(
+        ingest_fn=ingest,
+        source_dir_for=lambda kb: "/fake",
+        knowledge_store=knowledge_store,
+    )
+    mgr.submit("kb")
+    mgr.run_blocking("kb", lambda: None)
+    mgr.shutdown()
+
+    assert seen == [knowledge_store]
+
+
+# 验证 **kwargs 适配器会收到两类可选注入参数。
+def test_index_job_manager_injects_supported_var_keywords():
+    seen = []
+    knowledge_store = object()
+
+    def ingest(kb_id, source_dir, **kwargs):
+        seen.append(kwargs)
+        return MagicMock(document_count=0, chunk_count=0)
+
+    mgr = IndexJobManager(
+        ingest_fn=ingest,
+        source_dir_for=lambda kb: "/fake",
+        knowledge_store=knowledge_store,
+    )
+    mgr.submit("kb")
+    mgr.run_blocking("kb", lambda: None)
+    mgr.shutdown()
+
+    assert seen == [{"on_commit": None, "knowledge_store": knowledge_store}]
+
+
+# 验证 positional-only 同名参数不会被误当成可关键字注入。
+def test_index_job_manager_does_not_keyword_inject_positional_only_parameters():
+    seen = []
+    knowledge_store = object()
+
+    def ingest(
+        kb_id,
+        source_dir,
+        on_commit=None,
+        knowledge_store=None,
+        /,
+    ):
+        seen.append((on_commit, knowledge_store))
+        return MagicMock(document_count=0, chunk_count=0)
+
+    mgr = IndexJobManager(
+        ingest_fn=ingest,
+        source_dir_for=lambda kb: "/fake",
+        knowledge_store=knowledge_store,
+    )
+    mgr.submit("kb")
+    mgr.run_blocking("kb", lambda: None)
+    mgr.shutdown()
+
+    assert seen == [(None, None)]
+
+
 # 验证 run blocking serializes behind submitted job。
 def test_run_blocking_serializes_behind_submitted_job():
     # 同一 KB：先 submit 的 ingest 必须先完成，run_blocking 排在其后执行。
@@ -568,6 +637,80 @@ def test_release_executor_frees_slot():
     mgr.release_executor("kb-0")
     ex_new = mgr._get_executor("kb-new")
     assert ex_new is not None
+    mgr.shutdown()
+
+
+# 验证删库任务中请求退役时，必须先排空同 KB 的旧队列。
+def test_release_executor_defers_until_queued_delete_and_create_finish():
+    mgr = IndexJobManager(
+        ingest_fn=lambda kb, d: MagicMock(document_count=0, chunk_count=0)
+    )
+    first_running = threading.Event()
+    allow_first = threading.Event()
+    second_queued = threading.Event()
+    second_running = threading.Event()
+    allow_second = threading.Event()
+    create_queued = threading.Event()
+    create_ran = threading.Event()
+    order = []
+
+    def first_delete():
+        first_running.set()
+        assert allow_first.wait(2)
+        order.append("delete-1")
+        mgr.release_executor("kb")
+
+    def second_delete():
+        second_running.set()
+        assert allow_second.wait(2)
+        order.append("delete-2")
+        mgr.release_executor("kb")
+
+    def create_again():
+        order.append("create")
+        create_ran.set()
+
+    original_submit = mgr._submit_tracked
+
+    def tracked_submit(executor, kb_id, fn, *args):
+        future = original_submit(executor, kb_id, fn, *args)
+        if fn is second_delete:
+            second_queued.set()
+        elif fn is create_again:
+            create_queued.set()
+        return future
+
+    mgr._submit_tracked = tracked_submit
+    first_thread = threading.Thread(
+        target=lambda: mgr.run_blocking("kb", first_delete)
+    )
+    second_thread = threading.Thread(
+        target=lambda: mgr.run_blocking("kb", second_delete)
+    )
+    first_thread.start()
+    assert first_running.wait(2)
+    second_thread.start()
+    assert second_queued.wait(2)
+
+    allow_first.set()
+    first_thread.join(timeout=2)
+    assert not first_thread.is_alive()
+    assert second_running.wait(2)
+
+    create_thread = threading.Thread(
+        target=lambda: mgr.run_blocking("kb", create_again)
+    )
+    create_thread.start()
+    assert create_queued.wait(2)
+    assert create_ran.wait(0.05) is False
+
+    allow_second.set()
+    second_thread.join(timeout=2)
+    create_thread.join(timeout=2)
+    assert not second_thread.is_alive()
+    assert not create_thread.is_alive()
+    assert order == ["delete-1", "delete-2", "create"]
+    assert "kb" not in mgr._executors
     mgr.shutdown()
 
 

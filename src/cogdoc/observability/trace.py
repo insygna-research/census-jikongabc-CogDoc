@@ -1,4 +1,5 @@
 import json
+import math
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -9,6 +10,27 @@ from cogdoc.tools.retriever.metadata import safe_retrieval_metadata
 
 TRACE_SCHEMA_VERSION = "v1"
 TRACE_PREVIEW_CHARS = 120
+
+
+def _nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _finite_float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
 
 
 # 返回单调毫秒时间。
@@ -140,14 +162,107 @@ def build_trace_step(
             step["evidence_verifier_error"] = _preview(
                 output.get("evidence_verifier_error"), 80
             )
+        assessments = output.get("evidence_requirement_assessments")
+        if isinstance(assessments, list):
+            step["evidence_requirement_assessments"] = [
+                {
+                    "requirement_id": _preview(item.get("requirement_id"), 32),
+                    "verdict": _preview(item.get("verdict"), 32),
+                    "evidence_chunk_ids": [
+                        _preview(chunk_id, 120)
+                        for chunk_id in list(item.get("evidence_chunk_ids") or [])[:5]
+                    ],
+                    "reason": _preview(item.get("reason"), 200),
+                }
+                for item in assessments[:5]
+                if isinstance(item, Mapping)
+            ]
+            step["missing_evidence_requirement_ids"] = [
+                _preview(item, 32)
+                for item in list(output.get("missing_evidence_requirement_ids") or [])[
+                    :5
+                ]
+            ]
     if "evidence_verification_pending" in output:
         step["evidence_verification_pending"] = bool(
             output.get("evidence_verification_pending")
         )
+    if "retrieval_retry_count" in output:
+        step["retrieval_retry_count"] = _nonnegative_int(
+            output.get("retrieval_retry_count")
+        )
+        step["retrieval_retry_reason"] = _preview(
+            output.get("retrieval_retry_reason"), 80
+        )
+    if "retrieval_round" in output:
+        step["retrieval_round"] = _nonnegative_int(output.get("retrieval_round"))
+    if "retrieval_top_k_used" in output:
+        step["retrieval_top_k_used"] = _nonnegative_int(
+            output.get("retrieval_top_k_used")
+        )
+    if "retrieval_query_count" in output:
+        step["retrieval_query_count"] = _nonnegative_int(
+            output.get("retrieval_query_count")
+        )
+    if "retrieval_ranking_count" in output:
+        step["retrieval_ranking_count"] = _nonnegative_int(
+            output.get("retrieval_ranking_count")
+        )
+    channel_counts = output.get("retrieval_channel_counts")
+    if isinstance(channel_counts, Mapping):
+        step["retrieval_channel_counts"] = {
+            str(channel): _nonnegative_int(count)
+            for channel, count in channel_counts.items()
+        }
+    if "retrieval_carryover_count" in output:
+        step["retrieval_carryover_count"] = _nonnegative_int(
+            output.get("retrieval_carryover_count")
+        )
+    if "adaptive_retrieval_retry_pending" in output:
+        step["adaptive_retrieval_retry_pending"] = bool(
+            output.get("adaptive_retrieval_retry_pending")
+        )
+    if isinstance(output.get("claim_audit"), Mapping):
+        audit = output["claim_audit"]
+        step["claim_audit"] = {
+            "status": audit.get("status", "not_run"),
+            "reason_code": _preview(audit.get("reason_code"), 80),
+            "counts": _json_safe(dict(audit.get("counts") or {})),
+            "metrics": _json_safe(dict(audit.get("metrics") or {})),
+            "repair": _json_safe(dict(audit.get("repair") or {})),
+            "verifier": _json_safe(dict(audit.get("verifier") or {})),
+            "claim_previews": [
+                {
+                    "claim_id": _preview(claim.get("claim_id"), 32),
+                    "text": _preview(claim.get("text"), 160),
+                    "verdict": _preview(claim.get("verdict"), 32),
+                    "reason": _preview(claim.get("reason"), 200),
+                    "supporting_chunk_ids": [
+                        _preview(chunk_id, 120)
+                        for chunk_id in list(claim.get("supporting_chunk_ids") or [])[
+                            :5
+                        ]
+                    ],
+                }
+                for claim in list(audit.get("claims") or [])[:5]
+                if isinstance(claim, Mapping)
+            ],
+        }
     if output.get("rewritten_queries"):
         step["rewritten_queries"] = [
             _preview(query, 120)
             for query in list(output.get("rewritten_queries") or [])[:5]
+        ]
+    if output.get("evidence_requirements"):
+        step["evidence_requirements"] = [
+            {
+                "requirement_id": _preview(item.get("requirement_id"), 32),
+                "question": _preview(item.get("question"), 160),
+                "retrieval_query": _preview(item.get("retrieval_query"), 160),
+                "recovery_query": _preview(item.get("recovery_query"), 160),
+            }
+            for item in list(output.get("evidence_requirements") or [])[:5]
+            if isinstance(item, Mapping)
         ]
     if output.get("steps_trace"):
         step["steps_trace"] = [
@@ -162,6 +277,7 @@ def build_trace_step(
 
     count_fields = {
         "rewritten_queries": "rewritten_query_count",
+        "evidence_requirements": "evidence_requirement_count",
         "retrieved_docs": "retrieved_count",
         "reranked_docs": "reranked_count",
         "verification_docs": "verification_candidate_count",
@@ -205,7 +321,7 @@ def trace_path(trace_id: str, settings: Settings | None = None) -> Path:
 def _trace_matches_scope(
     payload: Mapping[str, Any], doc_id: str, session_id: str
 ) -> bool:
-    config = payload.get("config") if isinstance(payload.get("config"), Mapping) else {}
+    config = _mapping_or_empty(payload.get("config"))
     if doc_id and str(config.get("doc_id") or "") != doc_id:
         return False
     if session_id and str(config.get("session_id") or "") != session_id:
@@ -250,6 +366,49 @@ def summarize_trace_steps(steps: list[dict]) -> dict:
     }
 
 
+def _claim_audit_summary(output_payload: Mapping[str, Any] | None) -> dict | None:
+    if not isinstance(output_payload, Mapping):
+        return None
+    audit = output_payload.get("claim_audit")
+    if not isinstance(audit, Mapping):
+        return None
+    counts = _mapping_or_empty(audit.get("counts"))
+    metrics = _mapping_or_empty(audit.get("metrics"))
+    repair = _mapping_or_empty(audit.get("repair"))
+    verifier = _mapping_or_empty(audit.get("verifier"))
+    return {
+        "status": str(audit.get("status") or "not_run"),
+        "reason_code": _preview(audit.get("reason_code"), 80),
+        "counts": {
+            key: _nonnegative_int(counts.get(key, 0))
+            for key in (
+                "claim_count",
+                "supported",
+                "unsupported",
+                "insufficient",
+                "cited",
+                "skipped_statements",
+            )
+            if key in counts
+        },
+        "metrics": {
+            key: _finite_float_or_none(metrics.get(key))
+            for key in (
+                "claim_support_rate",
+                "citation_coverage",
+                "unsupported_claim_rate",
+            )
+            if key in metrics
+        },
+        "repair": {
+            "attempted": bool(repair.get("attempted", False)),
+            "attempt_count": _nonnegative_int(repair.get("attempt_count", 0)),
+            "succeeded": bool(repair.get("succeeded", False)),
+        },
+        "duration_ms": _finite_float_or_none(verifier.get("duration_ms")),
+    }
+
+
 # 构建跟踪导出载荷。
 def build_trace_payload(
     trace_id: str,
@@ -265,17 +424,29 @@ def build_trace_payload(
     execution_status: str | None = None,
 ) -> dict:
     resolved_status = execution_status or (
-        "SUCCESS" if status == "ok" else "TRACE_INCOMPLETE" if status == "degraded" else "TARGET_ERROR"
+        "SUCCESS"
+        if status == "ok"
+        else "TRACE_INCOMPLETE"
+        if status == "degraded"
+        else "TARGET_ERROR"
     )
     required_evidence = {"input", "output", "steps"}
     available_evidence = {
-        name for name, value in {
+        name
+        for name, value in {
             "input": input_payload,
             "output": output_payload,
             "steps": steps,
-        }.items() if value is not None and (value or name == "steps")
+        }.items()
+        if value is not None and (value or name == "steps")
     }
-    evidence_completeness = len(required_evidence & available_evidence) / len(required_evidence)
+    evidence_completeness = len(required_evidence & available_evidence) / len(
+        required_evidence
+    )
+    summary = summarize_trace_steps(steps)
+    claim_summary = _claim_audit_summary(output_payload)
+    if claim_summary is not None:
+        summary["claim_audit"] = claim_summary
     return {
         "schema_version": TRACE_SCHEMA_VERSION,
         "trace_id": trace_id,
@@ -288,7 +459,7 @@ def build_trace_payload(
         "output": _json_safe(dict(output_payload or {})),
         "evidence_completeness": evidence_completeness,
         "config": _json_safe(dict(config or {})),
-        "summary": summarize_trace_steps(steps),
+        "summary": summary,
         "error": _json_safe(dict(error or {})) or None,
         "steps": _json_safe(steps),
     }

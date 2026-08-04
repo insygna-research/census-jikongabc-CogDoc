@@ -1,4 +1,5 @@
 from cogdoc.agents import summary_generator
+from cogdoc.agents.claim_evidence_verifier import CLAIM_AUDIT_EXEMPTION_GUIDANCE
 from cogdoc.graph import workflow
 from cogdoc.graph.subgraphs import summary
 from cogdoc.graph.subgraphs.summary import (
@@ -94,6 +95,10 @@ def test_document_loader_returns_actionable_message_when_ambiguous(monkeypatch):
     assert result["summary_docs"] == []
     assert "明确指定" in result["answer"]
     assert "a.pdf" in result["answer"] and "b.pdf" in result["answer"]
+    assert result["claim_audit_exemption"] == {
+        "reason_code": CLAIM_AUDIT_EXEMPTION_GUIDANCE,
+        "answer": result["answer"],
+    }
     assert document_loader_check(result) == "__end__"
 
 

@@ -213,6 +213,7 @@ async def test_trace_endpoint_normalizes_legacy_trace(tmp_path, monkeypatch):
     assert body["schema_version"] == "v1"
     assert body["status"] == "ok"
     assert body["summary"]["step_count"] == 1
+    assert body["summary"]["claim_audit"] is None
 
 
 # 验证非法标识不会落到文件系统路径。

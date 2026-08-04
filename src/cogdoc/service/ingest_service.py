@@ -21,7 +21,7 @@ from cogdoc.service.kb_lifecycle import (
 from cogdoc.service.kb_locks import kb_write_lock
 from cogdoc.service.kb_readers import has_readers
 from cogdoc.service.purge_queue import shared_purge_queue
-from cogdoc.service.kb_state import KBState, StaleGenerationError
+from cogdoc.service.kb_state import KBState
 from cogdoc.tools.chunk_identity import CHUNK_IDENTITY_VERSION, build_chunk_id
 from cogdoc.tools.chunker import chunk_paper
 from cogdoc.tools.manifest import (
@@ -173,11 +173,17 @@ def _stale_bindings_from_document_changes(
 
 
 # 标记派生知识过期。
-def _mark_stale_derived_knowledge(kb_id: str, bindings: list[tuple[str, str]]) -> int:
+def _mark_stale_derived_knowledge(
+    kb_id: str,
+    bindings: list[tuple[str, str]],
+    knowledge_store: DerivedKnowledgeStore | None = None,
+) -> int:
     if not bindings:
         return 0
     marked = 0
-    store = DerivedKnowledgeStore()
+    store = (
+        knowledge_store if knowledge_store is not None else DerivedKnowledgeStore()
+    )
     for source, old_hash in bindings:
         marked += len(store.mark_stale_for_source(kb_id, source, old_hash))
     return marked
@@ -235,16 +241,25 @@ def _auto_rebind_updates(row: dict, chunks: list[dict]) -> dict | None:
 
 # 复核文档变化后的派生知识。
 def _review_changed_derived_knowledge(
-    kb_id: str, bindings: list[tuple[str, str]], chunks: list[dict] | None = None
+    kb_id: str,
+    bindings: list[tuple[str, str]],
+    chunks: list[dict] | None = None,
+    knowledge_store: DerivedKnowledgeStore | None = None,
 ) -> dict[str, int]:
     if not bindings:
         return {"stale": 0, "rebound": 0}
     if not chunks:
         return {
-            "stale": _mark_stale_derived_knowledge(kb_id, bindings),
+            "stale": _mark_stale_derived_knowledge(
+                kb_id,
+                bindings,
+                knowledge_store=knowledge_store,
+            ),
             "rebound": 0,
         }
-    store = DerivedKnowledgeStore()
+    store = (
+        knowledge_store if knowledge_store is not None else DerivedKnowledgeStore()
+    )
     grouped = _chunks_by_source(chunks)
     stale = 0
     rebound = 0
@@ -283,9 +298,15 @@ def _mark_stale_derived_knowledge_quiet(
     bindings: list[tuple[str, str]],
     state: dict | None = None,
     chunks: list[dict] | None = None,
+    knowledge_store: DerivedKnowledgeStore | None = None,
 ) -> None:
     try:
-        reviewed = _review_changed_derived_knowledge(kb_id, bindings, chunks)
+        reviewed = _review_changed_derived_knowledge(
+            kb_id,
+            bindings,
+            chunks,
+            knowledge_store=knowledge_store,
+        )
         if reviewed["stale"] or reviewed["rebound"]:
             log_event(
                 "ingest",
@@ -878,18 +899,31 @@ def _populate_staging(
 
 # 事务化构建知识库索引。
 def build_kb_index_transactional(
-    kb_id: str, source_dir: str, on_commit=None
+    kb_id: str,
+    source_dir: str,
+    on_commit=None,
+    *,
+    knowledge_store: DerivedKnowledgeStore | None = None,
 ) -> IngestResult:
     # 取知识库写锁串行化写操作，提交前回调失败会中止提交。
     with kb_write_lock(kb_id):
-        result = _build_transactional_locked(kb_id, source_dir, on_commit)
+        result = _build_transactional_locked(
+            kb_id,
+            source_dir,
+            on_commit,
+            knowledge_store=knowledge_store,
+        )
     _log_ocr_summary(result)
     return result
 
 
 # 在锁内事务化构建。
 def _build_transactional_locked(
-    kb_id: str, source_dir: str, on_commit=None
+    kb_id: str,
+    source_dir: str,
+    on_commit=None,
+    *,
+    knowledge_store: DerivedKnowledgeStore | None = None,
 ) -> IngestResult:
     state = KBState(kb_id)
     pdf_files = list_pdf_files(source_dir)
@@ -899,7 +933,13 @@ def _build_transactional_locked(
     )
 
     if not pdf_files:
-        return _transactional_empty(kb_id, state, on_commit, previous_documents)
+        return _transactional_empty(
+            kb_id,
+            state,
+            on_commit,
+            previous_documents,
+            knowledge_store=knowledge_store,
+        )
 
     rust_core = ensure_rust_core("scan_pdf_manifest_native")
     manifest = stamp_index_build_version(
@@ -957,7 +997,19 @@ def _build_transactional_locked(
     stale_bindings = _stale_bindings_from_document_changes(
         previous_documents, manifest.get("documents", [])
     )
-    _mark_stale_derived_knowledge_quiet(kb_id, stale_bindings, chunks=all_chunks)
+    if knowledge_store is None:
+        _mark_stale_derived_knowledge_quiet(
+            kb_id,
+            stale_bindings,
+            chunks=all_chunks,
+        )
+    else:
+        _mark_stale_derived_knowledge_quiet(
+            kb_id,
+            stale_bindings,
+            chunks=all_chunks,
+            knowledge_store=knowledge_store,
+        )
     try:
         save_index_manifest(manifest)
     except Exception:
@@ -977,6 +1029,8 @@ def _transactional_empty(
     state: KBState,
     on_commit=None,
     previous_documents: list[dict] | None = None,
+    *,
+    knowledge_store: DerivedKnowledgeStore | None = None,
 ) -> IngestResult:
     if previous_documents is None:
         active = state.active()
@@ -1000,7 +1054,14 @@ def _transactional_empty(
     except Exception:
         pass
     stale_bindings = _stale_bindings_from_document_changes(previous_documents, [])
-    _mark_stale_derived_knowledge_quiet(kb_id, stale_bindings)
+    if knowledge_store is None:
+        _mark_stale_derived_knowledge_quiet(kb_id, stale_bindings)
+    else:
+        _mark_stale_derived_knowledge_quiet(
+            kb_id,
+            stale_bindings,
+            knowledge_store=knowledge_store,
+        )
     try:
         _remove_manifest(kb_id)
     except Exception:

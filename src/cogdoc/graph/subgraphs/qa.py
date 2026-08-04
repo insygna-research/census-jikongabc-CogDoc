@@ -1,11 +1,14 @@
 import copy
 import logging
+import math
 from collections import OrderedDict
+from collections.abc import Mapping
 from threading import RLock
+from typing import Any
 from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, START, END
 from cogdoc.config.settings import get_settings
-from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
 from cogdoc.agents.evidence_verifier import (
     EvidenceVerifierAgent,
     select_verification_docs,
@@ -22,16 +25,25 @@ from cogdoc.tools.retriever.vector_retriever import (
     EmbeddingModelMismatchError,
 )
 from cogdoc.tools.retriever.bm25_retriever import BM25Retriever
-from cogdoc.tools.retriever.derived_knowledge import DerivedKnowledgeRetriever
 from cogdoc.tools.retriever.hybrid import HybridRetriever, IndexCorruptError
 from cogdoc.tools.retriever.metadata import safe_retrieval_metadata
 from cogdoc.tools.retriever.confidence import assess_retrieval_support
+from cogdoc.tools.retriever.fusion import select_rerank_candidates
 from cogdoc.tools.reranker import BGEReranker, skipped_cpu_rerank_docs
+from cogdoc.service.retrieval_pipeline import (
+    apply_retrieval_feedback,
+    build_retrieval_queries,
+    retrieve_candidate_pool,
+)
 from cogdoc.agents.answer_markers import NO_RELEVANT_CONTENT_ANSWER
 from cogdoc.agents.qa_generator import Generator
 from cogdoc.agents.query_rewriter import QueryRewriteAgent
 from cogdoc.agents.rewrite_verifier import RewriteVerifyAgent
 from cogdoc.agents.citation_validator import CitationValidatorAgent
+
+
+# 保留旧的模块内测试/扩展入口，实际实现已统一下沉到共享检索 pipeline。
+_apply_retrieval_feedback = apply_retrieval_feedback
 
 
 NEIGHBOR_CONTEXT_RADIUS = 1
@@ -42,8 +54,6 @@ CITATION_CORRECTION_PROMPT_TEMPLATE = (
     "请严格按照上述修正要求重新生成答案，确保每处引用的文件名和页码与 "
     "<Document> 标签属性完全吻合。"
 )
-_derived_knowledge_retriever = DerivedKnowledgeRetriever()
-_retrieval_feedback_store = RetrievalFeedbackStore()
 
 
 # 进程内按知识库和索引代缓存引擎，切代后失效缓存。
@@ -254,96 +264,120 @@ def _expand_with_neighbor_chunks(
     return list(expanded.values())
 
 
-# 应用检索反馈调权。
-def _apply_retrieval_feedback(
-    kb_id: str, query: str, docs: list[RetrievedDoc]
-) -> list[RetrievedDoc]:
-    if not docs or not query:
-        return docs
-    try:
-        boosts = _retrieval_feedback_store.boosts_for_query(kb_id, query)
-    except Exception as exc:
-        log_event(
-            "qa",
-            "retrieval_feedback_boost_failed",
-            {},
-            level=logging.WARNING,
-            kb_id=kb_id,
-            error_class=type(exc).__name__,
-        )
-        return docs
-    if not boosts:
-        return docs
-    adjusted = []
-    for idx, doc in enumerate(docs):
-        chunk_id = str(doc.get("meta", {}).get("chunk_id", "") or "")
-        boost = boosts.get(chunk_id, 0.0)
-        if boost:
-            doc = copy.deepcopy(doc)
-            retrieval = doc.setdefault("retrieval", {})
-            retrieval["feedback_boost"] = boost
-        adjusted.append((idx, boost, doc))
-    adjusted.sort(key=lambda item: (-item[1], item[0]))
-    return [doc for _, _, doc in adjusted]
+def _retrieval_top_k(retry_count: int) -> int:
+    settings = get_settings()
+    base = settings.qa_retrieval_top_k
+    if retry_count <= 0:
+        return base
+    scaled = math.ceil(
+        base * (settings.qa_adaptive_retrieval_top_k_multiplier**retry_count)
+    )
+    return min(scaled, max(base, settings.qa_adaptive_retrieval_max_top_k))
+
+
+def _evidence_requirement_ids(state: Mapping[str, Any]) -> list[str]:
+    return [
+        str(requirement.get("requirement_id") or "")
+        for requirement in list(state.get("evidence_requirements") or [])
+        if isinstance(requirement, dict) and requirement.get("requirement_id")
+    ]
+
+
+def _carry_verified_docs(
+    state: GraphState, current_docs: list[RetrievedDoc]
+) -> tuple[list[RetrievedDoc], int]:
+    if not state.get("retrieval_retry_count"):
+        return current_docs, 0
+    verified_ids = {
+        str(chunk_id)
+        for chunk_id in state.get("evidence_verified_chunk_ids", [])
+        if str(chunk_id)
+    }
+    if not verified_ids:
+        return current_docs, 0
+
+    seen_ids = {str(doc.get("meta", {}).get("chunk_id") or "") for doc in current_docs}
+    carryover: list[RetrievedDoc] = []
+    for doc in state.get("verification_docs", []):
+        chunk_id = str(doc.get("meta", {}).get("chunk_id") or "")
+        if chunk_id not in verified_ids or chunk_id in seen_ids:
+            continue
+        seen_ids.add(chunk_id)
+        carryover.append(copy.deepcopy(doc))
+    return carryover + current_docs, len(carryover)
 
 
 # 检索节点。
-def retrieve_node(state: GraphState) -> dict:
+def retrieve_node(
+    state: GraphState,
+    config: RunnableConfig | None = None,
+) -> dict:
     original_query = state.get("query", "")
     doc_id = state.get("doc_id", "default")
 
-    rewritten = state.get("rewritten_queries", [])
-    queries = [original_query] if original_query else []
-    for q in rewritten:
-        if q not in queries:
-            queries.append(q)
-
-    retrieved_docs = []
-    seen_chunk_keys = set()
     settings = get_settings()
+    retry_count = max(0, int(state.get("retrieval_retry_count", 0) or 0))
+    retrieval_top_k = _retrieval_top_k(retry_count)
+    queries = build_retrieval_queries(
+        original_query,
+        rewritten_queries=state.get("rewritten_queries", []),
+        evidence_requirements=state.get("evidence_requirements", []),
+        prioritized_requirement_ids=state.get("missing_evidence_requirement_ids", []),
+        max_queries=settings.qa_retrieval_max_queries,
+    )
+    configurable = (config or {}).get("configurable", {})
+    runtime = configurable.get("state_runtime")
+    if runtime is None:
+        from cogdoc.state_runtime import default_state_runtime
+
+        runtime = default_state_runtime()
     with kb_read_lease(doc_id):
         engine = RetrieverFactory.get_engine(doc_id)
-        for query in queries:
-            docs = engine.search(query=query, top_k=settings.qa_retrieval_top_k)
-            for doc in docs:
-                meta = doc["meta"]
-                # 检索去重只认稳定分块标识。
-                chunk_key = meta["chunk_id"]
-                if chunk_key not in seen_chunk_keys:
-                    seen_chunk_keys.add(chunk_key)
+        retrieval_result = retrieve_candidate_pool(
+            kb_id=doc_id,
+            original_query=original_query,
+            queries=queries,
+            top_k=retrieval_top_k,
+            engine=engine,
+            derived_knowledge_retriever=runtime.derived_knowledge_retriever,
+            retrieval_feedback_store=runtime.retrieval_feedback_store,
+            rrf_k=float(settings.hybrid_rrf_k),
+            retrieval_round=retry_count,
+        )
+    retrieved_docs, carryover_count = _carry_verified_docs(state, retrieval_result.docs)
 
-                    if query != original_query:
-                        doc_copy = copy.deepcopy(doc)
-                        doc_copy.setdefault("retrieval", {})["rewrite_query"] = query
-                    else:
-                        doc_copy = doc
-                    retrieved_docs.append(doc_copy)
-            knowledge_docs = _derived_knowledge_retriever.search(
-                doc_id, query, top_k=settings.qa_retrieval_top_k
-            )
-            for doc in knowledge_docs:
-                meta = doc["meta"]
-                chunk_key = meta["chunk_id"]
-                if chunk_key not in seen_chunk_keys:
-                    seen_chunk_keys.add(chunk_key)
-                    if query != original_query:
-                        doc_copy = copy.deepcopy(doc)
-                        doc_copy.setdefault("retrieval", {})["rewrite_query"] = query
-                    else:
-                        doc_copy = doc
-                    retrieved_docs.append(doc_copy)
-
-    retrieved_docs = _apply_retrieval_feedback(doc_id, original_query, retrieved_docs)
+    if retrieval_result.feedback_error:
+        log_event(
+            "qa",
+            "retrieval_feedback_boost_failed",
+            state,
+            level=logging.WARNING,
+            kb_id=doc_id,
+            error_class=retrieval_result.feedback_error,
+        )
 
     log_event(
         "qa",
         "qa_retrieve",
         state,
-        query_count=len(queries),
+        query_count=len(retrieval_result.queries),
+        ranking_count=retrieval_result.ranking_count,
+        channel_counts=retrieval_result.channel_counts,
         retrieved_count=len(retrieved_docs),
-        retrieval_top_k=settings.qa_retrieval_top_k,
+        verified_carryover_count=carryover_count,
+        retrieval_top_k=retrieval_top_k,
+        retrieval_round=retry_count,
     )
-    return {"retrieved_docs": retrieved_docs}
+    return {
+        "retrieved_docs": retrieved_docs,
+        "retrieval_round": retry_count,
+        "retrieval_top_k_used": retrieval_top_k,
+        "retrieval_query_count": len(retrieval_result.queries),
+        "retrieval_ranking_count": retrieval_result.ranking_count,
+        "retrieval_channel_counts": retrieval_result.channel_counts,
+        "retrieval_carryover_count": carryover_count,
+        "retrieval_feedback_error": retrieval_result.feedback_error,
+    }
 
 
 # 重排节点。
@@ -356,7 +390,16 @@ def rerank_node(state: GraphState) -> dict:
     target_device = BGEReranker.default_device()
 
     max_candidates = max(settings.qa_rerank_max_candidates, settings.qa_rerank_top_n)
-    candidate_docs = docs[:max_candidates] if max_candidates > 0 else docs
+    requirement_ids = _evidence_requirement_ids(state)
+    candidate_docs = (
+        select_rerank_candidates(
+            docs,
+            max_candidates=max_candidates,
+            requirement_ids=requirement_ids,
+        )
+        if max_candidates > 0
+        else docs
+    )
     rerank_skipped_reason = ""
     if target_device == "cpu" and not settings.qa_rerank_on_cpu:
         rerank_skipped_reason = "cpu_disabled"
@@ -371,8 +414,17 @@ def rerank_node(state: GraphState) -> dict:
             device=target_device,
         )
     reranked_docs = ranked_candidates[: settings.qa_rerank_top_n]
+    pinned_ids = set(state.get("evidence_verified_chunk_ids", []))
+    verification_candidates = sorted(
+        ranked_candidates,
+        key=lambda doc: (
+            str(doc.get("meta", {}).get("chunk_id") or "") not in pinned_ids
+        ),
+    )
     verification_docs = select_verification_docs(
-        ranked_candidates, settings.qa_evidence_verify_max_docs
+        verification_candidates,
+        settings.qa_evidence_verify_max_docs,
+        requirement_ids=requirement_ids,
     )
     support = assess_retrieval_support(reranked_docs, settings)
     decision_state = {
@@ -383,6 +435,11 @@ def rerank_node(state: GraphState) -> dict:
         "retrieval_abstain_reason": support.reason,
     }
     verification_pending = should_verify_evidence(decision_state, settings)
+    retry_pending = bool(
+        not support.supported
+        and not verification_pending
+        and _can_retry_retrieval(decision_state)
+    )
     # 下游沿用重排结果字段名，实际内容已包含相邻上下文扩展。
     expanded_docs = _expand_with_neighbor_chunks(doc_id, reranked_docs, state)
     log_event(
@@ -400,8 +457,11 @@ def rerank_node(state: GraphState) -> dict:
         retrieval_abstained=not support.supported,
         retrieval_abstain_reason=support.reason,
         evidence_verification_pending=verification_pending,
+        adaptive_retrieval_retry_pending=retry_pending,
+        retrieval_round=state.get("retrieval_round", 0),
+        requirement_count=len(requirement_ids),
     )
-    return {
+    result = {
         "reranked_docs": expanded_docs,
         "verification_docs": verification_docs,
         "retrieval_first_stage_supported": support.supported,
@@ -410,7 +470,21 @@ def rerank_node(state: GraphState) -> dict:
         "retrieval_abstain_reason": support.reason,
         "retrieval_signals": support.signals,
         "evidence_verification_pending": verification_pending,
+        "adaptive_retrieval_retry_pending": retry_pending,
     }
+    # 补检索终轮若因置信度过低不再进入 verifier，不能把上一轮逐需求结论
+    # 冒充为当前候选集的终态结论；缺失 ID 仍保留用于解释拒答与追踪。
+    if state.get("retrieval_retry_count", 0) and not verification_pending:
+        result.update(
+            {
+                "evidence_verification_required": False,
+                "evidence_supported": False,
+                "evidence_verification_reason": "",
+                "evidence_verified_chunk_ids": [],
+                "evidence_requirement_assessments": [],
+            }
+        )
+    return result
 
 
 # 对精确事实问题执行结构化证据充分性校验。
@@ -428,6 +502,11 @@ def evidence_verify_node(state: GraphState) -> dict:
                 generation_docs.append(copy.deepcopy(doc))
                 generation_ids.add(chunk_id)
         output["reranked_docs"] = generation_docs
+    retry_state: dict[str, Any] = dict(state)
+    retry_state.update(output)
+    output["adaptive_retrieval_retry_pending"] = bool(
+        not output.get("evidence_supported") and _can_retry_retrieval(retry_state)
+    )
     log_event(
         "qa",
         "qa_evidence_verify",
@@ -461,6 +540,7 @@ def abstain_node(state: GraphState) -> dict:
         "reranked_docs": [],
         "critique": "",
         "retrieval_abstained": True,
+        "adaptive_retrieval_retry_pending": False,
     }
 
 
@@ -468,6 +548,8 @@ def abstain_node(state: GraphState) -> dict:
 def retrieval_check(state: GraphState) -> str:
     if should_verify_evidence(state, get_settings()):
         return "evidence_verify_node"
+    if state.get("retrieval_abstained", False) and _can_retry_retrieval(state):
+        return "retrieval_retry_node"
     return (
         "abstain_node" if state.get("retrieval_abstained", False) else "generate_node"
     )
@@ -475,7 +557,65 @@ def retrieval_check(state: GraphState) -> str:
 
 # 根据二阶段证据结论选择生成或拒答。
 def evidence_check(state: GraphState) -> str:
-    return "generate_node" if state.get("evidence_supported", False) else "abstain_node"
+    if state.get("evidence_supported", False):
+        return "generate_node"
+    if _can_retry_retrieval(state):
+        return "retrieval_retry_node"
+    return "abstain_node"
+
+
+def _can_retry_retrieval(state: Mapping[str, Any]) -> bool:
+    settings = get_settings()
+    if not settings.qa_adaptive_retrieval_enabled:
+        return False
+    retry_count = max(0, int(state.get("retrieval_retry_count", 0) or 0))
+    if retry_count >= settings.qa_adaptive_retrieval_max_retries:
+        return False
+    if state.get("evidence_verifier_error"):
+        return False
+    requirement_ids = _evidence_requirement_ids(state)
+    missing_ids = {
+        str(item)
+        for item in list(state.get("missing_evidence_requirement_ids") or [])
+        if str(item)
+    }
+    return bool(missing_ids or len(requirement_ids) > 1)
+
+
+# 覆盖不足时只增加一次检索轮次；查询替换、深度扩大和候选预算均在 retrieve_node 内统一执行。
+def retrieval_retry_node(state: GraphState) -> dict:
+    retry_count = max(0, int(state.get("retrieval_retry_count", 0) or 0)) + 1
+    missing_ids = [
+        str(item)
+        for item in list(state.get("missing_evidence_requirement_ids") or [])
+        if str(item)
+    ]
+    if not missing_ids:
+        missing_ids = _evidence_requirement_ids(state)
+    reason = (
+        "missing_requirements"
+        if state.get("evidence_verification_required")
+        else str(state.get("retrieval_abstain_reason") or "coverage_incomplete")
+    )
+    log_event(
+        "qa",
+        "qa_adaptive_retrieval_retry",
+        state,
+        retry_count=retry_count,
+        retry_reason=reason,
+        missing_requirement_ids=missing_ids,
+        next_top_k=_retrieval_top_k(retry_count),
+    )
+    return {
+        "retrieval_retry_count": retry_count,
+        "retrieval_round": retry_count,
+        "retrieval_retry_reason": reason,
+        "missing_evidence_requirement_ids": missing_ids,
+        "evidence_verification_pending": False,
+        "evidence_verification_required": False,
+        "evidence_supported": False,
+        "adaptive_retrieval_retry_pending": False,
+    }
 
 
 # 生成节点。
@@ -582,6 +722,7 @@ sub_graph.add_node("verify_rewrite_node", verify_rewrite_node)
 sub_graph.add_node("retrieve_node", retrieve_node)
 sub_graph.add_node("rerank_node", rerank_node)
 sub_graph.add_node("evidence_verify_node", evidence_verify_node)
+sub_graph.add_node("retrieval_retry_node", retrieval_retry_node)
 sub_graph.add_node("abstain_node", abstain_node)
 sub_graph.add_node("generate_node", generate_node)
 sub_graph.add_node("citation_node", citation_node)
@@ -595,6 +736,7 @@ sub_graph.add_conditional_edges(
     retrieval_check,
     {
         "evidence_verify_node": "evidence_verify_node",
+        "retrieval_retry_node": "retrieval_retry_node",
         "abstain_node": "abstain_node",
         "generate_node": "generate_node",
     },
@@ -602,8 +744,13 @@ sub_graph.add_conditional_edges(
 sub_graph.add_conditional_edges(
     "evidence_verify_node",
     evidence_check,
-    {"abstain_node": "abstain_node", "generate_node": "generate_node"},
+    {
+        "retrieval_retry_node": "retrieval_retry_node",
+        "abstain_node": "abstain_node",
+        "generate_node": "generate_node",
+    },
 )
+sub_graph.add_edge("retrieval_retry_node", "retrieve_node")
 sub_graph.add_edge("abstain_node", END)
 sub_graph.add_edge("generate_node", "citation_node")
 

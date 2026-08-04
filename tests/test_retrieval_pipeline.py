@@ -1,0 +1,209 @@
+from cogdoc.service.retrieval_pipeline import (
+    DERIVED_KNOWLEDGE_CHANNEL,
+    HYBRID_CHANNEL,
+    RetrievalQuery,
+    build_retrieval_queries,
+    retrieve_candidate_pool,
+)
+
+
+def _doc(chunk_id: str) -> dict:
+    return {"text": chunk_id, "meta": {"chunk_id": chunk_id}}
+
+
+def _ids(docs) -> list[str]:
+    return [doc["meta"]["chunk_id"] for doc in docs]
+
+
+def test_build_queries_deduplicates_normalized_text_and_merges_roles():
+    queries = build_retrieval_queries(
+        "  SAME   Query ",
+        rewritten_queries=("same query", " Rewrite "),
+        evidence_requirements=(
+            {
+                "requirement_id": "r1",
+                "retrieval_query": "ＳＡＭＥ query",
+                "recovery_query": "recover one",
+            },
+            {
+                "requirement_id": "r2",
+                "retrieval_query": "Second query",
+                "recovery_query": "recover two",
+            },
+        ),
+    )
+
+    assert [query.text for query in queries] == [
+        "SAME Query",
+        "Second query",
+        "Rewrite",
+    ]
+    assert queries[0].is_original is True
+    assert queries[0].requirement_ids == ("r1",)
+    assert queries[1].requirement_ids == ("r2",)
+
+
+def test_prioritized_requirements_use_recovery_query_before_remaining_queries():
+    requirements = (
+        {
+            "requirement_id": "r1",
+            "retrieval_query": "first retrieval",
+            "recovery_query": "first recovery",
+        },
+        {
+            "requirement_id": "r2",
+            "retrieval_query": "second retrieval",
+            "recovery_query": "second recovery",
+        },
+        {
+            "requirement_id": "r3",
+            "retrieval_query": "third retrieval",
+            "recovery_query": "",
+        },
+    )
+
+    queries = build_retrieval_queries(
+        "original",
+        rewritten_queries=("rewrite",),
+        evidence_requirements=requirements,
+        prioritized_requirement_ids=("r3", "r2"),
+    )
+
+    assert [query.text for query in queries] == [
+        "original",
+        "third retrieval",
+        "second recovery",
+        "first retrieval",
+        "rewrite",
+    ]
+    assert [query.requirement_ids for query in queries[1:4]] == [
+        ("r3",),
+        ("r2",),
+        ("r1",),
+    ]
+
+
+class _Engine:
+    def __init__(self, results):
+        self.results = results
+        self.calls = []
+
+    def search(self, query, top_k):
+        self.calls.append((query, top_k))
+        return self.results.get(query, [])
+
+
+class _Knowledge:
+    def __init__(self, results):
+        self.results = results
+        self.calls = []
+
+    def search(self, kb_id, query, top_k):
+        self.calls.append((kb_id, query, top_k))
+        return self.results.get(query, [])
+
+
+class _Feedback:
+    def __init__(self, boosts=None):
+        self.boosts = boosts or {}
+        self.calls = []
+
+    def boosts_for_query(self, kb_id, query):
+        self.calls.append((kb_id, query))
+        return self.boosts
+
+
+def test_pipeline_retrieves_both_channels_and_fuses_provenance():
+    engine = _Engine(
+        {
+            "original": [_doc("shared"), _doc("document")],
+            "focused": [_doc("focused-document")],
+        }
+    )
+    knowledge = _Knowledge(
+        {
+            "original": [_doc("knowledge")],
+            "focused": [_doc("shared")],
+        }
+    )
+    feedback = _Feedback()
+    queries = [
+        RetrievalQuery("original", is_original=True),
+        RetrievalQuery("focused", requirement_ids=("r1",)),
+    ]
+
+    result = retrieve_candidate_pool(
+        engine,
+        knowledge,
+        feedback,
+        kb_id="kb",
+        original_query="original",
+        queries=queries,
+        top_k=3,
+        rrf_k=60,
+        retrieval_round=2,
+    )
+
+    assert result.queries == queries
+    assert result.ranking_count == 4
+    assert result.channel_counts == {
+        HYBRID_CHANNEL: 3,
+        DERIVED_KNOWLEDGE_CHANNEL: 2,
+    }
+    assert engine.calls == [("original", 3), ("focused", 3)]
+    assert knowledge.calls == [("kb", "original", 3), ("kb", "focused", 3)]
+    shared = next(doc for doc in result.docs if doc["meta"]["chunk_id"] == "shared")
+    assert shared["retrieval"]["matched_queries"] == ["original", "focused"]
+    assert shared["retrieval"]["matched_channels"] == [
+        HYBRID_CHANNEL,
+        DERIVED_KNOWLEDGE_CHANNEL,
+    ]
+    assert shared["retrieval"]["matched_requirement_ids"] == ["r1"]
+    assert shared["retrieval"]["retrieval_round"] == 2
+
+
+def test_pipeline_applies_existing_feedback_boost_ordering():
+    engine = _Engine({"query": [_doc("c1"), _doc("c2")]})
+    feedback = _Feedback({"c2": 0.5, "c1": -0.2})
+
+    result = retrieve_candidate_pool(
+        engine,
+        _Knowledge({}),
+        feedback,
+        kb_id="kb",
+        original_query="Original Query",
+        queries=[RetrievalQuery("query", is_original=True)],
+        top_k=3,
+        rrf_k=60,
+    )
+
+    assert _ids(result.docs) == ["c2", "c1"]
+    assert result.docs[0]["retrieval"]["feedback_boost"] == 0.5
+    assert result.docs[1]["retrieval"]["feedback_boost"] == -0.2
+    assert feedback.calls == [("kb", "Original Query")]
+    assert result.feedback_error == ""
+
+
+def test_pipeline_bypasses_feedback_failure_and_marks_result():
+    class BrokenFeedback:
+        def boosts_for_query(self, kb_id, query):
+            raise RuntimeError("storage unavailable")
+
+    result = retrieve_candidate_pool(
+        _Engine({"query": [_doc("c1"), _doc("c2")]}),
+        _Knowledge({}),
+        BrokenFeedback(),
+        kb_id="kb",
+        original_query="query",
+        queries=[RetrievalQuery("query", is_original=True)],
+        top_k=3,
+        rrf_k=60,
+    )
+
+    assert _ids(result.docs) == ["c1", "c2"]
+    assert result.feedback_error == "RuntimeError"
+    assert result.ranking_count == 1
+    assert result.channel_counts == {
+        HYBRID_CHANNEL: 2,
+        DERIVED_KNOWLEDGE_CHANNEL: 0,
+    }

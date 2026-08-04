@@ -1,5 +1,6 @@
 import asyncio
 import time
+from contextlib import nullcontext
 from types import SimpleNamespace
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -219,6 +220,7 @@ async def test_delete_recreated_kb_clears_review_state(tmp_path, monkeypatch):
                     "kb_id": "kb",
                     "query": "问题",
                     "feedback": "thumbs_down",
+                    "feedback_type": "bad_retrieval",
                     "citations": [{"chunk_id": "c1"}],
                 },
             )
@@ -268,6 +270,39 @@ async def test_delete_kb_cleanup_failure_keeps_kb(tmp_path, monkeypatch):
     assert resp.status_code == 500
     assert resp.json()["error_code"] == "KB_CLEANUP_FAILED"
     assert [kb["kb_id"] for kb in after.json()] == ["kb"]
+
+
+# 验证会话清理失败不撤销 registry，保留 DELETE 重试入口。
+def test_delete_kb_session_cleanup_failure_keeps_registry(monkeypatch):
+    import cogdoc.api.routes.documents as docs_module
+    from cogdoc.service.ingest_service import KBCleanupError
+
+    deleted = []
+    released = []
+    registry = SimpleNamespace(delete=lambda kb_id: deleted.append(kb_id))
+    jobs = SimpleNamespace(release_executor=lambda kb_id: released.append(kb_id))
+    sessions = SimpleNamespace(
+        clear_kb=lambda kb_id: (_ for _ in ()).throw(RuntimeError("session cleanup"))
+    )
+    monkeypatch.setattr(docs_module, "kb_write_lock", lambda kb_id: nullcontext())
+    monkeypatch.setattr(
+        docs_module,
+        "delete_kb_index_transactional",
+        lambda kb_id: None,
+    )
+    monkeypatch.setattr(docs_module, "mark_kb_deleted", lambda kb_id: None)
+    monkeypatch.setattr(docs_module, "delete_trace_files", lambda **kwargs: 0)
+
+    with pytest.raises(KBCleanupError, match="会话状态"):
+        docs_module._delete_kb(
+            "kb",
+            registry,
+            jobs,
+            session_store=sessions,
+        )
+
+    assert deleted == []
+    assert released == ["kb"]
 
 
 # 验证 create kb rejects overlong id。

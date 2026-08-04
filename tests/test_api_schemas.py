@@ -104,6 +104,141 @@ def test_chat_result_to_response_maps_stable_fields_without_raw_text():
     assert "steps" not in payload
     assert "trace_path" not in payload
     assert "不应进入 API 响应的全文" not in str(payload)
+    assert payload["claim_audit"] is None
+
+
+# 验证公开响应只暴露声明审计摘要，不泄漏逐条声明、理由或证据。
+def test_chat_result_to_response_exposes_only_safe_claim_audit_summary():
+    sensitive_claim = "敏感声明正文：报名费为 999 元"
+    sensitive_reason = "敏感逐条理由：金额与证据不一致"
+    sensitive_evidence = "敏感证据全文"
+    result = ChatResult(
+        answer="生成内容未通过校验。",
+        task_type="qa",
+        citations=[],
+        evidence=[],
+        critique="声明证据校验未通过",
+        is_valid=False,
+        trace_id="trace-audit",
+        request_id="trace-audit",
+        steps=[],
+        chat_messages=[],
+        raw_output={
+            "answer": "原始答案",
+            "claim_audit": {
+                "status": "rejected",
+                "reason_code": "claims_not_supported",
+                "claims": [
+                    {
+                        "claim_id": "c1",
+                        "text": sensitive_claim,
+                        "verdict": "unsupported",
+                        "reason": sensitive_reason,
+                        "evidence": sensitive_evidence,
+                    }
+                ],
+                "counts": {
+                    "claim_count": 1,
+                    "supported": 0,
+                    "unsupported": 1,
+                    "insufficient": 0,
+                    "cited": 0,
+                    "skipped_statements": 0,
+                },
+                "metrics": {
+                    "claim_support_rate": 0.0,
+                    "citation_coverage": 0.0,
+                    "unsupported_claim_rate": 1.0,
+                },
+                "repair": {
+                    "attempted": True,
+                    "attempt_count": 1,
+                    "succeeded": False,
+                    "private_note": sensitive_reason,
+                },
+                "verifier": {
+                    "duration_ms": 87.5,
+                    "reason": sensitive_reason,
+                    "evidence": sensitive_evidence,
+                },
+            },
+        },
+    )
+
+    payload = chat_result_to_response(result, doc_id="kb").model_dump()
+
+    assert payload["claim_audit"] == {
+        "status": "rejected",
+        "reason_code": "claims_not_supported",
+        "counts": result.raw_output["claim_audit"]["counts"],
+        "metrics": result.raw_output["claim_audit"]["metrics"],
+        "repair": {
+            "attempted": True,
+            "attempt_count": 1,
+            "succeeded": False,
+        },
+        "duration_ms": 87.5,
+    }
+    serialized = str(payload)
+    assert sensitive_claim not in serialized
+    assert sensitive_reason not in serialized
+    assert sensitive_evidence not in serialized
+    assert "claims" not in payload["claim_audit"]
+    assert "verifier" not in payload["claim_audit"]
+
+
+# 验证零事实声明的比率保持不可用，而不是伪装成零分或满分。
+def test_chat_result_to_response_preserves_none_rates_for_zero_claims():
+    result = ChatResult(
+        answer="仅包含标题。",
+        task_type="summary",
+        citations=[],
+        evidence=[],
+        critique="",
+        is_valid=True,
+        trace_id="trace-empty-audit",
+        request_id="trace-empty-audit",
+        steps=[],
+        chat_messages=[],
+        raw_output={
+            "claim_audit": {
+                "status": "passed",
+                "reason_code": "no_factual_statements",
+                "claims": [],
+                "counts": {
+                    "claim_count": 0,
+                    "supported": 0,
+                    "unsupported": 0,
+                    "insufficient": 0,
+                    "cited": 0,
+                    "skipped_statements": 0,
+                },
+                "metrics": {
+                    "claim_support_rate": None,
+                    "citation_coverage": None,
+                    "unsupported_claim_rate": None,
+                },
+                "repair": {
+                    "attempted": False,
+                    "attempt_count": 0,
+                    "succeeded": False,
+                },
+                "verifier": {"duration_ms": 0.0},
+            }
+        },
+    )
+
+    summary = chat_result_to_response(result, doc_id="kb").model_dump()[
+        "claim_audit"
+    ]
+
+    assert summary["counts"]["claim_count"] == 0
+    assert summary["metrics"] == {
+        "claim_support_rate": None,
+        "citation_coverage": None,
+        "unsupported_claim_rate": None,
+    }
+    assert summary["duration_ms"] == 0.0
 
 
 # 验证未知任务类型会归一化。
@@ -165,4 +300,5 @@ def test_trace_response_uses_stable_contract():
     assert payload["trace_id"] == "trace-1"
     assert payload["summary"]["step_count"] == 1
     assert payload["summary"]["error_count"] == 0
+    assert payload["summary"]["claim_audit"] is None
     assert payload["steps"][0]["node_name"] == "intent_router"

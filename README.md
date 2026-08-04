@@ -12,11 +12,15 @@ A local RAG knowledge-base console for individuals and teams, built on **LangGra
 
 - **Grounded QA with verified citations** — generation is constrained to retrieved document blocks; fabricated file/page tags are caught by a Rust validator and re-generated in a self-heal loop.
 
+- **Optional claim-level semantic gate** — after physical citation validation, an independent verifier can audit each factual claim against only its cited evidence, attempt a bounded repair, and fail closed to a stable refusal if support still cannot be established.
+
+- **Requirement-aware evidence gate** — multi-part questions are decomposed into at most three atomic evidence requirements, retrieved with explicit provenance, checked one by one against a closed set of chunks, and given one bounded recovery round by default before a fail-closed refusal.
+
 - **Structured single-document summary** — fixed sections, deterministic citations bound from chunk metadata.
 
 - **Multi-document comparison** — per-document profiles across fixed dimensions, rendered as cited dimension-by-dimension blocks.
 
-- **Hybrid retrieval, native scoring** — Vector (Chroma + multilingual BGE-M3) and BM25 recall fused by a Rust RRF kernel, with approved derived knowledge searched as an additional evidence source; tokenization and BM25 are native — Chinese via `jieba-rs`, English lowercased + Snowball-stemmed + stopword-filtered, so both languages retrieve well.
+- **Hybrid retrieval, query-level fusion** — each original, rewritten, and requirement-specific query searches the PDF vector+BM25 hybrid channel and the approved-derived-knowledge channel; the resulting query/channel rankings are fused with equally weighted deterministic RRF, and a requirement quota prevents late focused queries from being starved before rerank. Tokenization and BM25 are native — Chinese via `jieba-rs`, English lowercased + Snowball-stemmed + stopword-filtered.
 
 - **Content-addressed incremental cache** — a per-file SHA-256 manifest plus a versioned chunk-identity contract: unchanged files reuse the existing index, and only a changed PDF or chunking scheme triggers an incremental rebuild.
 
@@ -26,7 +30,7 @@ A local RAG knowledge-base console for individuals and teams, built on **LangGra
 
 - **Derived knowledge review loop** — manually add knowledge, save validated answers, or turn corrections / no-evidence feedback into pending knowledge cards with source bindings, conflict groups, stale scans, revisions, batch approve/reject, and archive/delete flows.
 
-- **Feedback analysis and retrieval tuning** — thumbs-up/down, corrections, ratings, issue types, and evidence context are persisted by `trace_id`; bad cases feed the offline quality ledger, feedback is analyzed into recommended actions, and retrieval-weight records can be enabled or rolled back.
+- **Feedback analysis and attributed retrieval tuning** — thumbs-up/down, corrections, ratings, issue types, and evidence context are persisted by `trace_id`; positive signals may boost cited chunks, while negative signals penalize them only when `feedback_type=bad_retrieval`. `skip_retrieval_feedback=true` disables tuning for an entry, and every tuning record remains reviewable and rollbackable.
 
 - **Trace observability, review queue, and webhooks** — every request can export a safe JSON trace with config, node timings, rewrites, evidence previews, and errors; the web UI scopes traces to the current conversation, aggregates pending/stale knowledge and feedback into a review queue, and can emit webhook events for new pending knowledge.
 
@@ -215,7 +219,7 @@ Only after all three steps succeed should `.env` be changed to `COGDOC_STATE_BAC
 
 - **Deterministic core** — a custom [Rust](https://www.rust-lang.org/) extension ([PyO3](https://pyo3.rs/) + [maturin](https://www.maturin.rs/)) carries `jieba-rs` CN/EN tokenization, BM25, RRF fusion, SHA-256 manifest, and citation validation — all native, independently unit-tested, stable across agent/prompt churn.
 - **Retrieval** — `bge-m3` multilingual vector recall + BM25 keyword recall, fused by the Rust RRF kernel and reranked by `bge-reranker-v2-m3`; PDF vectors and approved derived-knowledge vectors live in [Chroma](https://www.trychroma.com/), PDFs are parsed by PyMuPDF.
-- **Orchestration** — [LangGraph](https://langchain-ai.github.io/langgraph/) wires routing → rewrite → retrieve → generate → citation self-heal into a loopable state graph.
+- **Orchestration** — [LangGraph](https://langchain-ai.github.io/langgraph/) wires routing → task subgraphs → physical citation self-heal → optional parent-graph claim audit / bounded repair / refusal into a loopable state graph.
 - **Models** — OpenAI-compatible dual backend, hot-swappable: cloud DeepSeek or local Ollama `qwen2.5:7b`.
 - **Serving and observability** — FastAPI with SSE streaming, optional API-key auth and token-bucket rate limiting; sessions, index jobs, feedback, review queues, and derived knowledge are persisted locally; JSON traces exported for the web Trace panel and standalone Debug console.
 
@@ -263,6 +267,10 @@ flowchart TD
         QA["QA subgraph: rewrite / verify / retrieve / rerank / generate / self-heal"]
         SUMMARY["Summary subgraph: loader / plan / sections / global"]
         COMPARE["Compare subgraph: loader / profile / table / citation"]
+        CLAIMAUDIT["Claim verifier: semantic evidence audit"]
+        CLAIMREPAIR["Claim repairer: bounded repair / citation recheck"]
+        CLAIMBLOCK["Fail-closed refusal"]
+        CLAIMFINAL["Audited final answer / stable refusal"]
     end
 
     subgraph BACKENDS["Model and native backends"]
@@ -288,12 +296,26 @@ flowchart TD
     ROUTER --> SUMMARY
     ROUTER --> COMPARE
 
+    QA --> CLAIMAUDIT
+    SUMMARY --> CLAIMAUDIT
+    COMPARE --> CLAIMAUDIT
+    CLAIMAUDIT -->|unsupported| CLAIMREPAIR
+    CLAIMREPAIR -->|citation valid| CLAIMAUDIT
+    CLAIMREPAIR -->|citation invalid; budget remains| CLAIMREPAIR
+    CLAIMAUDIT -->|pass or disabled| CLAIMFINAL
+    CLAIMAUDIT -->|error or attempts exhausted| CLAIMBLOCK
+    CLAIMREPAIR -->|error or attempts exhausted| CLAIMBLOCK
+    CLAIMBLOCK --> CLAIMFINAL
+
     QA --> LLM
     SUMMARY --> LLM
     COMPARE --> LLM
+    CLAIMAUDIT --> LLM
+    CLAIMREPAIR --> LLM
     QA --> RUST
     SUMMARY --> RUST
     COMPARE --> RUST
+    CLAIMREPAIR --> RUST
     QA --> EMB
     SUMMARY --> EMB
     COMPARE --> EMB
@@ -313,9 +335,9 @@ flowchart TD
     style SAFETY fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
     style GRAPH fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
     style BACKENDS fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
-    class CLI,DEBUG,WEB,APISTART,ROUTES,ACCESS,ROUTER,QA,SUMMARY,COMPARE node
+    class CLI,DEBUG,WEB,APISTART,ROUTES,ACCESS,ROUTER,QA,SUMMARY,COMPARE,CLAIMAUDIT,CLAIMREPAIR,CLAIMFINAL node
     class SERVICE,CHAT,INGEST,REVIEW core
-    class PROCLOCK,JOURNAL,KBLOCK guard
+    class PROCLOCK,JOURNAL,KBLOCK,CLAIMBLOCK guard
     class LLM,RUST,EMB native
 ```
 
@@ -528,10 +550,15 @@ chunk_id = sha256:{source_sha256}:src:{source_name}:p{page_start}-p{page_end}:c{
 ## Query Pipeline
 
 - **Intent routing** — `RouterAgent` asks the LLM for structured `task_type ∈ {qa, summary, compare, unknown}` and falls back to a keyword rule on any parse error. All of `qa`, `summary`, and `compare` are wired to real subgraphs.
-- **Rewrite + drift guard** — `QueryRewriteAgent` emits 1–3 keyword queries (pydantic structured output). `RewriteVerifyAgent` embeds `[original] + rewrites` in one batch, keeps those with `cosine >= rewrite_similarity_threshold` (default `0.5`), logs kept/dropped to `steps_trace`, and falls back to the original query alone if all are dropped.
-- **Hybrid retrieval + RRF** — per query, both PDF channels over-recall `top_k * 3` (QA uses `top_k = 9` → 27/channel); `rrf_fusion_native` (Rust, `k = 60`) computes `score(d) = Σ_c 1 / (k + rank_c(d))`, merges hits sharing a `chunk_id`, and sorts by score desc then identity key asc for determinism. Approved derived knowledge is searched per original/rewrite query and merged into the same evidence pool, then feedback-derived retrieval weights are applied before rerank.
-- **Rerank** — `BGEReranker` (`bge-reranker-v2-m3`) scores `(original_query, doc)` and keeps `top_n = 3`; rewrites never bias the final ranking.
-- **Generation + citation self-heal** — `Generator` (OpenAI-compatible; cloud `deepseek-chat` or local `qwen2.5:7b`, `temperature = 0.2`) wraps docs as `<Document source=… page=… chunk_id=…>` and forces `[source:Pn]` tags. `validate_citations_native` (Rust) returns structured `missing_citations` / `invalid_sources` / `invalid_pages`; `citation_node` turns failures into a critique and loops `generate → citation` up to `max_iteration_count` (default `2`). Only validated answers are printed.
+- **Rewrite + evidence-requirement planning** — `QueryRewriteAgent` emits 1–3 keyword queries plus at most three atomic drafts shaped as `{question, retrieval_query, recovery_query}`; the server assigns stable `r1..r3` IDs and falls back to one original-question requirement on empty/failed planning. `RewriteVerifyAgent` uses one embedding batch for two semantic guards: each requirement question is compared with the original question plus recent history, then its primary/recovery queries are compared with that requirement. A drifting requirement is dropped, a drifting focused query falls back to its requirement question, and an all-dropped plan falls back to the original requirement. The existing rewrite kept/dropped behavior and `steps_trace` remain intact.
+- **Query-level RRF with provenance** — every original, rewritten, and requirement query searches the hybrid PDF engine and approved derived knowledge. Each query/channel ranking contributes equally through `score(d) = Σ_q,c 1 / (k + rank_q,c(d))` (`k = 60`), candidates are deduplicated by stable `chunk_id`, and ties break by identity key. Fused metadata records matched queries, channels, requirement IDs, hit count, original-query participation, best rank, and retrieval round instead of collapsing provenance to one rewrite.
+- **Requirement quota + rerank** — before `BGEReranker` (`bge-reranker-v2-m3`), a bounded candidate selector reserves at least one attributed candidate per requirement, then fills the remaining budget in fused order. Evidence-verifier candidates use the same requirement-first rule before source diversification, preventing a strong first query from starving later requirement hits. Final reranking still scores `(original_query, doc)` and rewrites never directly bias the cross-encoder score.
+- **Closed-set evidence check + bounded adaptive recovery** — when evidence verification is enabled, eligible exact-fact questions and all multi-requirement questions must clear one assessment per requirement (`supported`, `missing`, or `contradictory`) against only the supplied requirement IDs and chunk IDs before generation. Missing/duplicate/unknown requirement IDs, fabricated chunks, unsupported requirements, and ungrounded contradictions cannot pass. If the gap is recoverable, CogDoc makes one retry by default: missing requirements' `recovery_query` values are prioritized immediately after the original query, retrieval depth grows by a capped multiplier, and the fused/reranked evidence is checked again. Retry count, query budget, and `top_k` are all bounded; verifier errors do not retry. If every requirement still lacks valid support, generation is skipped with a stable fail-closed refusal.
+- **Attributed feedback weights** — positive feedback (thumbs-up or an above-neutral rating) may boost its cited/evidence chunks. Thumbs-down, corrections, and below-neutral ratings create a negative retrieval weight only when explicitly classified as `feedback_type=bad_retrieval`; other answer-quality failures do not punish potentially correct evidence. `skip_retrieval_feedback=true` suppresses both positive and negative tuning for that entry.
+- **Generation + citation self-heal** — `Generator` (OpenAI-compatible; cloud `deepseek-chat` or local `qwen2.5:7b`, `temperature = 0.2`) wraps docs as `<Document source=… page=… chunk_id=…>` and forces `[source:Pn]` tags. `validate_citations_native` (Rust) returns structured `missing_citations` / `invalid_sources` / `invalid_pages`; `citation_node` turns failures into a critique and loops `generate → citation` up to `max_iteration_count` (default `2`). Only physically validated answers leave the task subgraphs.
+- **Parent-graph claim audit and bounded repair (opt-in)** — with `CLAIM_VERIFICATION_ENABLED=true`, QA, Summary, and Compare outputs enter `claim_audit_node` after their physical citation checks. `ClaimEvidenceVerifierAgent` splits the candidate into factual claims, batches them, and labels each `supported`, `unsupported`, or `insufficient` using only the evidence explicitly cited by that claim. A failure enters `claim_repair_node`; the revised answer must pass the deterministic citation checker and then a fresh semantic audit. Repair attempts are capped by `CLAIM_VERIFICATION_MAX_REPAIR_ATTEMPTS` (default `1`). A verifier error, repair error, invalid repaired citation after the limit, or exhausted semantic audit fails closed through `claim_block_node`, which replaces the candidate with a stable refusal and clears its citations/evidence. The semantic gate is disabled by default so deployments can establish a reviewed baseline before enabling it.
+
+  Candidate model tokens are untrusted while this gate is enabled, so `/v1/chat/stream` buffers them instead of exposing provisional text. Node progress events still stream; once parent post-processing completes (pass, an intentional `not_run`, or fail-closed refusal), the final answer is emitted as one token event followed by the normal `final` event.
 
 **Summary subgraph** — `document_loader` selects one named document (or the only document in the corpus; ambiguous multi-document queries get an actionable message), `section_planner` fixes the sections to background/goals, solution/process, rules/requirements, value/output, and limitations/notes unless custom titles are supplied in state, `section_summary` writes one short paragraph per section (model writes prose only; `[source:Pn]` tags are bound deterministically from the chunks it used), and `global_summary` assembles the answer and re-runs the citation checker. No-evidence sections carry no citation and no evidence.
 
@@ -614,6 +641,17 @@ CogDoc/
 | `QA_EVIDENCE_VERIFY_MAX_DOCS` | `3` | Maximum source-diversified chunks sent to the evidence verifier |
 | `QA_EVIDENCE_VERIFY_MAX_CHARS_PER_DOC` | `1600` | Per-chunk text limit for evidence verification |
 | `QA_EVIDENCE_VERIFY_BORDERLINE_MIN_SCORE` | `0.75` | Minimum first-stage support score eligible for verifier rescue |
+| `QA_RETRIEVAL_MAX_QUERIES` | `7` | Per-round cap across original, rewritten, requirement, and recovery queries after normalization/deduplication |
+| `QA_ADAPTIVE_RETRIEVAL_ENABLED` | `true` | Allow bounded recovery retrieval for incomplete requirement evidence |
+| `QA_ADAPTIVE_RETRIEVAL_MAX_RETRIES` | `1` | Maximum recovery rounds (`0` disables retries; validated range `0..2`) |
+| `QA_ADAPTIVE_RETRIEVAL_TOP_K_MULTIPLIER` | `2.0` | Retrieval-depth multiplier applied on each recovery round |
+| `QA_ADAPTIVE_RETRIEVAL_MAX_TOP_K` | `36` | Hard `top_k` ceiling after adaptive depth expansion |
+| `CLAIM_VERIFICATION_ENABLED` | `false` | Enable the post-generation claim-level semantic gate; enabled mode fails closed |
+| `CLAIM_VERIFICATION_MAX_CLAIMS` | `40` | Maximum auditable claim fragments per answer; overflow is not silently released |
+| `CLAIM_VERIFICATION_MAX_CLAIMS_PER_BATCH` | `8` | Maximum claims sent in one verifier call |
+| `CLAIM_VERIFICATION_MAX_DOCS_PER_BATCH` | `12` | Maximum evidence chunks visible to one verifier/repair call |
+| `CLAIM_VERIFICATION_MAX_CHARS_PER_DOC` | `1600` | Per-evidence-chunk character limit for claim verification and repair |
+| `CLAIM_VERIFICATION_MAX_REPAIR_ATTEMPTS` | `1` | Bounded repair attempts before the answer is rejected (`0` disables repair) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Local OpenAI-compatible Ollama endpoint |
 | `OLLAMA_MODEL_NAME` | `qwen2.5:7b` | Local model name |
 | `OLLAMA_TIMEOUT_SECONDS` | `180` | Local model request timeout |
@@ -626,7 +664,7 @@ CogDoc/
 | `OLLAMA_<NODE>_MODEL_NAME` | unset | Per-node local model override |
 | `HF_TOKEN` | unset | Optional Hugging Face Hub token |
 
-`<NODE>` can be `ROUTER`, `QUERY_REWRITER`, `SOURCE_RESOLVER`, `EVIDENCE_VERIFIER`, `QA_GENERATOR`, `SUMMARY_GENERATOR`, `COMPARE_PROFILE`, or `COMPARE_CONCLUSION`. For independent review, for example, set `LLM_EVIDENCE_VERIFIER_BACKEND=local` and `OLLAMA_EVIDENCE_VERIFIER_MODEL_NAME=<review-model>` while keeping answer generation on the cloud backend. Citation syntax and source/page membership remain deterministically validated by Rust rather than by an LLM.
+`<NODE>` can be `ROUTER`, `QUERY_REWRITER`, `SOURCE_RESOLVER`, `EVIDENCE_VERIFIER`, `CLAIM_VERIFIER`, `CLAIM_REPAIRER`, `QA_GENERATOR`, `SUMMARY_GENERATOR`, `COMPARE_PROFILE`, or `COMPARE_CONCLUSION`. For independent post-generation review, for example, keep answer generation on cloud while setting `LLM_CLAIM_VERIFIER_BACKEND=local` and `OLLAMA_CLAIM_VERIFIER_MODEL_NAME=<review-model>`; to repair locally too, set `LLM_CLAIM_REPAIRER_BACKEND=local` and `OLLAMA_CLAIM_REPAIRER_MODEL_NAME=<repair-model>`. The corresponding cloud model overrides are `LLM_CLAIM_VERIFIER_MODEL_NAME` and `LLM_CLAIM_REPAIRER_MODEL_NAME`. Citation syntax and source/page membership remain deterministically validated by Rust; the claim verifier adds the optional model-based semantic support decision.
 
 Requirements: Python 3.11+ (developed on 3.13; the extension targets 3.8+), a Rust toolchain with `cargo` (edition 2024, via [rustup](https://rustup.rs/)), and [maturin](https://www.maturin.rs/). Optional: [Ollama](https://ollama.com/) for local models. See `.env.example` for the full set of tunables (retrieval `top_k`, rerank `top_n`, RRF `k`, CUDA memory floors, eval set paths).
 
@@ -664,7 +702,44 @@ Offline evaluation uses local JSONL files under `eval/`. `make eval-suite` is th
 
 The real-retrieval profile expects at least 100 reviewed queries in `eval/retrieval_eval.jsonl`: 40 single-source, 20 multi-source, 20 hard, and 20 no-answer. `make eval-retrieval-baseline` records the reviewed reference run, while `make eval-retrieval-gate` compares relevance metrics with that baseline and enforces the absolute limits in the local `eval/retrieval_gate.json`; use `eval/retrieval_gate.example.json` as its schema. Reports include aggregate and per-layer MRR/Recall/Hit metrics, mean and P95 latency, and a separately reported warmup that is excluded from steady-state latency. `answerable_acceptance_rate` and `no_answer_abstention_rate` measure the deterministic first-stage evidence gate directly. Exact-fact questions that pass that gate, plus borderline candidates above `QA_EVIDENCE_VERIFY_BORDERLINE_MIN_SCORE`, receive a second structured evidence-sufficiency check before generation. No-answer rows also report `no_answer_false_positive@k`; that metric only says whether the retriever returned candidates, not whether either gate accepted them or the generated answer was false. The default distance/BM25 thresholds were calibrated on the local reviewed set and should be recalibrated when the corpus or embedding model changes.
 
+### Requirement-aware retrieval eval data
+
+Retrieval JSONL rows retain `query`, `expected_sources`, and optional `doc_id` / `layer`, and may now add the following fields:
+
+- `rewritten_queries`: optional reviewed rewrite inputs used by the real retrieval run.
+- `evidence_requirements`: up to three runtime query plans with `requirement_id`, `question`, `retrieval_query`, and `recovery_query`. These drive requirement-attributed retrieval and the bounded recovery path; `--verify-evidence` additionally runs the structured closed-set assessment.
+- `gold_requirements`: evaluator-only ground truth. Each row names a `requirement_id` and at least one `acceptable_chunk_ids` or `acceptable_sources` list; chunk annotations are preferred because a hit on the right PDF but wrong block should not count as evidence coverage.
+- `hard_negative_chunk_ids`: optional known distractor chunks used to measure rejection.
+
+One formatted JSONL object (write it on one physical line in the dataset) looks like this:
+
+```json
+{
+  "id": "policy-dates-and-fees",
+  "query": "What are the deadline and fee?",
+  "doc_id": "policy",
+  "layer": "multi-source",
+  "expected_sources": ["dates.pdf", "fees.pdf"],
+  "rewritten_queries": ["application deadline", "application fee"],
+  "evidence_requirements": [
+    {"requirement_id": "r1", "question": "What is the deadline?", "retrieval_query": "application deadline", "recovery_query": "submission closing date"},
+    {"requirement_id": "r2", "question": "What is the fee?", "retrieval_query": "application fee", "recovery_query": "registration cost"}
+  ],
+  "gold_requirements": [
+    {"requirement_id": "r1", "acceptable_chunk_ids": ["deadline-chunk"]},
+    {"requirement_id": "r2", "acceptable_chunk_ids": ["fee-chunk"]}
+  ],
+  "hard_negative_chunk_ids": ["old-policy-chunk"]
+}
+```
+
+When annotations are present, reports add `requirement_recall@k`, `all_requirements_covered@k`, and binary-relevance `evidence_ndcg@k`; chunk-level gold also enables `chunk_precision@k`, while hard negatives enable `hard_negative_rejection@k`. Verifier runs add `requirement_full_coverage_rate`; adaptive runs add `adaptive_retry_trigger_rate` and, for retried rows, `adaptive_rescue_rate`. `retrieval_query_count` exposes query-budget cost. The trigger rate and query count are rollout diagnostics and are excluded from the default baseline gate; coverage, ranking, rejection, and rescue metrics can be baseline-gated when present.
+
+Each report row also records `retrieved_items`, `evidence_requirement_assessments`, `missing_evidence_requirement_ids`, `retrieval_retry_count`, `adaptive_retrieval_rescued`, `retrieval_query_count`, `retrieval_ranking_count`, `retrieval_carryover_count`, and per-channel counts in `retrieval_channel_counts`, so a regression can be traced to planning, fusion, verification, or recovery rather than inferred from a final source list.
+
 `make eval` runs an ad hoc retrieval check against the local set and falls back to `eval/retrieval_eval.example.jsonl` on a clean checkout. `make eval-coverage` checks the smoke profile without touching the index. Run `make eval-suite-run-retrieval` when the combined suite should also execute real retrieval. `make eval-quality` measures router accuracy, citation accuracy, and the manual faithfulness ledger across QA, Summary, Compare, multi-turn, no-answer, and feedback layers; `make eval-quality-coverage` additionally enforces the required case types and recommended layers. Thumbs-down and correction feedback writes `eval_draft` rows to `bad_cases.jsonl`, so reviewed cases can be promoted into the quality eval set. For a coverage-only quality check, run `python scripts/eval_quality.py --coverage-only`. `--coverage-only` is intentionally incompatible with `--check-coverage`, `--json`, and `--baseline`.
+
+Quality cases can also carry runtime `claim_audit` data directly, under `output.claim_audit`, or under `trace.output.claim_audit`. The report recomputes claim support, citation coverage, unsupported/insufficient rates, repair success, audit observability, and verifier latency from claim details; it does not trust precomputed counts, and these rollout diagnostics are intentionally not part of the default baseline gate. The general scoring layer also accepts a deterministic `claim_audit_assertion`; missing audit evidence is `NOT_OBSERVABLE`, while configurable support/citation/status thresholds can be promoted to a strict gate after domain calibration.
 
 Run `python scripts/eval_retrieval.py --rerank --verify-evidence` to include the cloud evidence verifier in final acceptance/abstention metrics; add `--local-verifier` to use Ollama. This mode makes model calls and is intentionally excluded from the default retrieval gate.
 
@@ -677,7 +752,7 @@ Backup/restore and index rebuild rules are covered in [PRODUCTION_zh-CN.md](docs
 - **OCR is an opt-in Tesseract MVP.** It is disabled by default, supports locally installed language packs, and intentionally has no hosted provider. Recognition quality depends on scan quality, selected languages, and DPI.
 - Summary and Compare are fixed-schema MVPs; cloud mode runs independent section/dimension LLM cells concurrently with stable output order, while local Ollama mode stays serial to avoid memory pressure. The default section/dimension sets are fixed unless passed through graph state.
 - Local Compare intentionally supports only two documents, uses four core dimensions, and skips the extra conclusion generation step to reduce Ollama memory pressure.
-- Citation validation checks physical citation legality (`source` and `page`), not whether the surrounding sentence is semantically perfect, nor whether every sentence is cited.
+- With the semantic gate disabled (the default), citation validation proves only physical citation legality (`source` / `page` or knowledge ID), not that the surrounding claim is semantically supported or that every factual sentence is cited. Enabling `CLAIM_VERIFICATION_ENABLED` adds a model-based claim/evidence gate for QA, Summary, and Compare; it fails closed on unsupported/insufficient claims and verifier/repair errors, but still requires calibration against a reviewed domain baseline.
 - The rewrite similarity threshold defaults to `0.5` and should be calibrated on real project data.
 - Local model downloads may require network access or a pre-populated Hugging Face cache.
 

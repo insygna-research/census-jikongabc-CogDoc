@@ -1,5 +1,7 @@
 import argparse
+import copy
 import json
+import math
 import statistics
 import sys
 import time
@@ -11,12 +13,14 @@ if str(ROOT / "src") not in sys.path:
     # 包源码在源码目录下，项目根目录用于解析数据文件相对路径。
     sys.path.insert(0, str(ROOT / "src"))
 
-from cogdoc.config.settings import get_settings
-from cogdoc.tools.eval.retrieval_metrics import (
+from cogdoc.config.settings import get_settings  # noqa: E402
+from cogdoc.graph.state import RetrievedDoc  # noqa: E402
+from cogdoc.tools.eval.retrieval_metrics import (  # noqa: E402
     aggregate,
     audit_coverage,
     coverage_minimums,
     evaluate_query,
+    evaluate_requirement_coverage,
     evaluate_thresholds,
     infer_retrieval_layer,
     metric_direction,
@@ -35,6 +39,7 @@ DEFAULT_EVAL_SET = _project_path(_settings.eval_set_path)
 # 真实评测集不入库，干净检出时回退到示例评测集。
 EXAMPLE_EVAL_SET = _project_path(_settings.eval_example_set_path)
 DEFAULT_K_VALUES = [1, 3, 5, 9]
+DIAGNOSTIC_METRICS = {"adaptive_retry_trigger_rate", "retrieval_query_count"}
 
 
 # 解析默认评测集。
@@ -72,74 +77,256 @@ def retrieve_result(
     *,
     verify_evidence: bool = False,
     is_local_verifier: bool = False,
+    rewritten_queries: List[str] | None = None,
+    evidence_requirements: List[dict] | None = None,
 ) -> dict:
     from cogdoc.graph.subgraphs.qa import RetrieverFactory
-    from cogdoc.tools.retriever.confidence import assess_retrieval_support
-
-    engine = RetrieverFactory.get_engine(doc_id)
-    docs = engine.search(query=query, top_k=top_k)
-    if rerank and docs:
-        from cogdoc.tools.reranker import BGEReranker
-
-        docs = BGEReranker.rerank(query=query, docs=docs, top_n=len(docs))
-    support = assess_retrieval_support(docs)
-    result = {
-        "sources": [doc["meta"]["source"] for doc in docs],
-        "supported": support.supported,
-        "first_stage_supported": support.supported,
-        "confidence": support.score,
-        "reason": support.reason,
-        "signals": support.signals,
-        "evidence_verification_required": False,
-        "evidence_supported": support.supported,
-        "evidence_verification_reason": "not_requested",
-        "evidence_verified_chunk_ids": [],
-    }
-    if not verify_evidence:
-        return result
-
-    from cogdoc.agents.evidence_verifier import (
-        EvidenceVerifierAgent,
-        select_verification_docs,
-        should_verify_evidence,
+    from cogdoc.service.kb_readers import kb_read_lease
+    from cogdoc.service.retrieval_pipeline import (
+        build_retrieval_queries,
+        retrieve_candidate_pool,
     )
+    from cogdoc.state_runtime import default_state_runtime
+    from cogdoc.tools.retriever.confidence import assess_retrieval_support
+    from cogdoc.tools.retriever.fusion import select_rerank_candidates
 
     settings = get_settings()
-    verify_state = {
-        "query": query,
-        "is_local": is_local_verifier,
-        "retrieval_first_stage_supported": support.supported,
-        "retrieval_abstained": not support.supported,
-        "retrieval_abstain_reason": support.reason,
-        "retrieval_confidence": support.score,
-        "verification_docs": select_verification_docs(
-            docs, settings.qa_evidence_verify_max_docs
-        ),
-    }
-    if not should_verify_evidence(verify_state, settings):
-        result["evidence_verification_reason"] = "not_required"
-        return result
+    runtime = default_state_runtime()
+    rewritten_queries = list(rewritten_queries or [])
+    evidence_requirements = list(evidence_requirements or [])[:3]
+    requirement_ids = [
+        str(item.get("requirement_id") or "")
+        for item in evidence_requirements
+        if isinstance(item, dict) and item.get("requirement_id")
+    ]
+    retry_count = 0
+    prioritized_requirement_ids: List[str] = []
+    pinned_ids: set[str] = set()
+    verified_docs: Dict[str, RetrievedDoc] = {}
+    initial_supported: bool | None = None
+    verification: dict = {}
+    verification_required = False
+    total_query_count = 0
+    total_ranking_count = 0
+    total_channel_counts: Dict[str, int] = {}
+    retrieval_feedback_error = ""
+    retrieval_carryover_count = 0
 
-    verification = EvidenceVerifierAgent.verify(verify_state)
-    result.update(
-        {
-            "supported": bool(verification.get("evidence_supported")),
-            "reason": str(
-                verification.get("retrieval_abstain_reason") or support.reason
-            ),
-            "evidence_verification_required": True,
-            "evidence_supported": bool(verification.get("evidence_supported")),
-            "evidence_verification_reason": str(
-                verification.get("evidence_verification_reason") or ""
-            ),
-            "evidence_verified_chunk_ids": list(
-                verification.get("evidence_verified_chunk_ids") or []
-            ),
-            "evidence_verifier_error": str(
-                verification.get("evidence_verifier_error") or ""
-            ),
+    while True:
+        round_top_k = top_k
+        if retry_count:
+            round_top_k = min(
+                int(
+                    math.ceil(
+                        top_k
+                        * (settings.qa_adaptive_retrieval_top_k_multiplier**retry_count)
+                    )
+                ),
+                max(top_k, settings.qa_adaptive_retrieval_max_top_k),
+            )
+        queries = build_retrieval_queries(
+            query,
+            rewritten_queries=rewritten_queries,
+            evidence_requirements=evidence_requirements,
+            prioritized_requirement_ids=prioritized_requirement_ids,
+            max_queries=settings.qa_retrieval_max_queries,
+        )
+        with kb_read_lease(doc_id):
+            pipeline_result = retrieve_candidate_pool(
+                RetrieverFactory.get_engine(doc_id),
+                runtime.derived_knowledge_retriever,
+                runtime.retrieval_feedback_store,
+                kb_id=doc_id,
+                original_query=query,
+                queries=queries,
+                top_k=round_top_k,
+                rrf_k=float(settings.hybrid_rrf_k),
+                retrieval_round=retry_count,
+            )
+        total_query_count += len(pipeline_result.queries)
+        total_ranking_count += pipeline_result.ranking_count
+        for channel, count in pipeline_result.channel_counts.items():
+            total_channel_counts[channel] = total_channel_counts.get(channel, 0) + count
+        if pipeline_result.feedback_error and not retrieval_feedback_error:
+            retrieval_feedback_error = pipeline_result.feedback_error
+        current_docs = pipeline_result.docs
+        seen_chunk_ids = {
+            str(doc.get("meta", {}).get("chunk_id") or "") for doc in current_docs
         }
+        carryover_docs: List[RetrievedDoc] = []
+        if retry_count:
+            for chunk_id, verified_doc in verified_docs.items():
+                if chunk_id in seen_chunk_ids:
+                    continue
+                seen_chunk_ids.add(chunk_id)
+                carryover_docs.append(copy.deepcopy(verified_doc))
+        retrieval_carryover_count = len(carryover_docs)
+        ranked_docs = carryover_docs + current_docs
+        if rerank and ranked_docs:
+            from cogdoc.tools.reranker import BGEReranker
+
+            max_candidates = max(
+                settings.qa_rerank_max_candidates,
+                settings.qa_rerank_top_n,
+            )
+            candidates = (
+                select_rerank_candidates(
+                    ranked_docs,
+                    max_candidates=max_candidates,
+                    requirement_ids=requirement_ids,
+                )
+                if max_candidates > 0
+                else ranked_docs
+            )
+            ranked_docs = BGEReranker.rerank(
+                query=query,
+                docs=candidates,
+                top_n=len(candidates),
+            )
+        # 完整排名用于 recall@n；放行判断严格复用线上 generation top-n 预算。
+        decision_docs = ranked_docs[: max(0, int(settings.qa_rerank_top_n))]
+        support = assess_retrieval_support(decision_docs, settings)
+        if initial_supported is None:
+            initial_supported = support.supported
+
+        if verify_evidence:
+            # 每轮结论只描述当前候选集；定向重试 ID 和 pinned chunk 单独保留。
+            verification_required = False
+            verification = {}
+            from cogdoc.agents.evidence_verifier import (
+                EvidenceVerifierAgent,
+                select_verification_docs,
+                should_verify_evidence,
+            )
+
+            verification_candidates = sorted(
+                ranked_docs,
+                key=lambda doc: (
+                    str(doc.get("meta", {}).get("chunk_id") or "") not in pinned_ids
+                ),
+            )
+            verification_docs = select_verification_docs(
+                verification_candidates,
+                settings.qa_evidence_verify_max_docs,
+                requirement_ids=requirement_ids,
+            )
+            verify_state = {
+                "query": query,
+                "is_local": is_local_verifier,
+                "rewritten_queries": rewritten_queries,
+                "evidence_requirements": evidence_requirements,
+                "retrieval_first_stage_supported": support.supported,
+                "retrieval_abstained": not support.supported,
+                "retrieval_abstain_reason": support.reason,
+                "retrieval_confidence": support.score,
+                "verification_docs": verification_docs,
+            }
+            if should_verify_evidence(verify_state, settings):
+                verification_required = True
+                verification = EvidenceVerifierAgent.verify(verify_state)
+                round_verified_ids = {
+                    str(chunk_id)
+                    for chunk_id in verification.get("evidence_verified_chunk_ids", [])
+                    if str(chunk_id)
+                }
+                round_verified_docs: Dict[str, RetrievedDoc] = {}
+                for verified_doc in verification_docs:
+                    chunk_id = str(verified_doc.get("meta", {}).get("chunk_id") or "")
+                    if chunk_id in round_verified_ids:
+                        round_verified_docs[chunk_id] = copy.deepcopy(verified_doc)
+                pinned_ids = round_verified_ids
+                verified_docs = round_verified_docs
+                if verification.get("evidence_supported"):
+                    break
+                prioritized_requirement_ids = list(
+                    verification.get("missing_evidence_requirement_ids") or []
+                )
+                # 与线上 retry node 一致：多需求失败但没有明确缺口时，
+                # 定向重试全部需求，而不是静默结束自适应检索。
+                if not prioritized_requirement_ids and len(requirement_ids) > 1:
+                    prioritized_requirement_ids = list(requirement_ids)
+                if verification.get("evidence_verifier_error"):
+                    break
+            elif support.supported:
+                break
+            else:
+                # 线上终轮未进入 verifier 时清空旧 verified 结论；若仍有下一轮，
+                # 也不能继续携带已不属于当前闭集结论的快照。
+                if retry_count:
+                    pinned_ids.clear()
+                    verified_docs.clear()
+                if not prioritized_requirement_ids:
+                    if len(requirement_ids) <= 1:
+                        break
+                    prioritized_requirement_ids = list(requirement_ids)
+        else:
+            # 关闭模型校验只关闭 LLM gate；线上对多需求首阶段失败仍会补检索。
+            if support.supported:
+                break
+            if not prioritized_requirement_ids:
+                if len(requirement_ids) <= 1:
+                    break
+                prioritized_requirement_ids = list(requirement_ids)
+
+        if (
+            not settings.qa_adaptive_retrieval_enabled
+            or retry_count >= settings.qa_adaptive_retrieval_max_retries
+            or not prioritized_requirement_ids
+        ):
+            break
+        retry_count += 1
+
+    supported = (
+        bool(verification.get("evidence_supported"))
+        if verification_required
+        else support.supported
     )
+    missing_requirement_ids = list(
+        verification.get("missing_evidence_requirement_ids") or []
+    )
+    if retry_count > 0 and not supported and not missing_requirement_ids:
+        missing_requirement_ids = list(prioritized_requirement_ids)
+    result = {
+        "sources": [
+            str(doc.get("meta", {}).get("source") or "") for doc in ranked_docs
+        ],
+        "items": [
+            {
+                "chunk_id": str(doc.get("meta", {}).get("chunk_id") or ""),
+                "source": str(doc.get("meta", {}).get("source") or ""),
+            }
+            for doc in ranked_docs
+        ],
+        "supported": supported,
+        "first_stage_supported": bool(initial_supported),
+        "confidence": support.score,
+        "reason": str(verification.get("retrieval_abstain_reason") or support.reason),
+        "signals": support.signals,
+        "evidence_verification_required": verification_required,
+        "evidence_supported": supported,
+        "evidence_verification_reason": str(
+            verification.get("evidence_verification_reason")
+            or ("not_required" if verify_evidence else "not_requested")
+        ),
+        "evidence_verified_chunk_ids": list(
+            verification.get("evidence_verified_chunk_ids") or []
+        ),
+        "evidence_requirement_assessments": list(
+            verification.get("evidence_requirement_assessments") or []
+        ),
+        "missing_evidence_requirement_ids": missing_requirement_ids,
+        "evidence_verifier_error": str(
+            verification.get("evidence_verifier_error") or ""
+        ),
+        "retrieval_retry_count": retry_count,
+        "adaptive_retrieval_rescued": bool(retry_count and supported),
+        # 自适应评测按完整请求累计成本，不能只报告末轮结果。
+        "retrieval_query_count": total_query_count,
+        "retrieval_ranking_count": total_ranking_count,
+        "retrieval_channel_counts": total_channel_counts,
+        "retrieval_carryover_count": retrieval_carryover_count,
+        "retrieval_feedback_error": retrieval_feedback_error,
+    }
     return result
 
 
@@ -175,6 +362,8 @@ def run_eval(
         rerank,
         verify_evidence=verify_evidence,
         is_local_verifier=is_local_verifier,
+        rewritten_queries=warmup_item.get("rewritten_queries", []),
+        evidence_requirements=warmup_item.get("evidence_requirements", []),
     )
     warmup_latency_ms = (time.perf_counter() - warmup_started) * 1000.0
 
@@ -187,10 +376,37 @@ def run_eval(
             rerank,
             verify_evidence=verify_evidence,
             is_local_verifier=is_local_verifier,
+            rewritten_queries=item.get("rewritten_queries", []),
+            evidence_requirements=item.get("evidence_requirements", []),
         )
         retrieved = retrieval_result["sources"]
         latency_ms = (time.perf_counter() - started) * 1000.0
         metrics = evaluate_query(retrieved, item["expected_sources"], k_values)
+        metrics.update(
+            evaluate_requirement_coverage(
+                retrieval_result.get("items")
+                or [{"source": source} for source in retrieved],
+                item.get("gold_requirements", []),
+                k_values,
+                hard_negative_chunk_ids=item.get("hard_negative_chunk_ids", []),
+            )
+        )
+        retry_count = int(retrieval_result.get("retrieval_retry_count", 0) or 0)
+        metrics["adaptive_retry_trigger_rate"] = float(retry_count > 0)
+        if retry_count > 0:
+            metrics["adaptive_rescue_rate"] = float(
+                retrieval_result.get("adaptive_retrieval_rescued", False)
+            )
+        assessments = list(
+            retrieval_result.get("evidence_requirement_assessments") or []
+        )
+        if assessments:
+            metrics["requirement_full_coverage_rate"] = float(
+                all(row.get("verdict") == "supported" for row in assessments)
+            )
+        metrics["retrieval_query_count"] = float(
+            retrieval_result.get("retrieval_query_count", 0) or 0
+        )
         if item["expected_sources"]:
             metrics["answerable_acceptance_rate"] = (
                 1.0 if retrieval_result["supported"] else 0.0
@@ -214,6 +430,7 @@ def run_eval(
                 "query": item["query"],
                 "expected_sources": item["expected_sources"],
                 "retrieved_sources": retrieved,
+                "retrieved_items": retrieval_result.get("items", []),
                 "retrieval_supported": retrieval_result["supported"],
                 "retrieval_confidence": retrieval_result["confidence"],
                 "retrieval_abstain_reason": retrieval_result["reason"],
@@ -233,6 +450,29 @@ def run_eval(
                 ],
                 "evidence_verifier_error": retrieval_result.get(
                     "evidence_verifier_error", ""
+                ),
+                "evidence_requirement_assessments": assessments,
+                "missing_evidence_requirement_ids": retrieval_result.get(
+                    "missing_evidence_requirement_ids", []
+                ),
+                "retrieval_retry_count": retry_count,
+                "adaptive_retrieval_rescued": retrieval_result.get(
+                    "adaptive_retrieval_rescued", False
+                ),
+                "retrieval_query_count": retrieval_result.get(
+                    "retrieval_query_count", 0
+                ),
+                "retrieval_ranking_count": retrieval_result.get(
+                    "retrieval_ranking_count", 0
+                ),
+                "retrieval_channel_counts": retrieval_result.get(
+                    "retrieval_channel_counts", {}
+                ),
+                "retrieval_carryover_count": retrieval_result.get(
+                    "retrieval_carryover_count", 0
+                ),
+                "retrieval_feedback_error": retrieval_result.get(
+                    "retrieval_feedback_error", ""
                 ),
                 "latency_ms": latency_ms,
                 "metrics": metrics,
@@ -256,13 +496,16 @@ def run_eval(
             "num_queries": len(items),
             "answerable_queries": sum(bool(item["expected_sources"]) for item in items),
             "no_answer_queries": sum(not item["expected_sources"] for item in items),
+            "requirement_annotated_queries": sum(
+                bool(item.get("gold_requirements")) for item in items
+            ),
             "warmup_latency_ms": warmup_latency_ms,
         },
         "aggregate": aggregate_metrics,
         "baseline_gated_metrics": sorted(
             metric
             for metric in aggregate_metrics
-            if metric_direction(metric) == "higher"
+            if metric_direction(metric) == "higher" and metric not in DIAGNOSTIC_METRICS
         ),
         "metric_directions": {
             metric: metric_direction(metric) for metric in aggregate_metrics
@@ -323,6 +566,16 @@ def print_report(report: dict) -> None:
             f"reason={row['retrieval_abstain_reason']} "
             f"signals={row['retrieval_signals']}"
         )
+        if row.get("retrieval_query_count") or row.get("retrieval_retry_count"):
+            print(
+                "        adaptive="
+                f"queries={row.get('retrieval_query_count', 0)} "
+                f"rankings={row.get('retrieval_ranking_count', 0)} "
+                f"retry={row.get('retrieval_retry_count', 0)} "
+                f"carryover={row.get('retrieval_carryover_count', 0)} "
+                f"rescued={row.get('adaptive_retrieval_rescued', False)} "
+                f"channels={row.get('retrieval_channel_counts', {})}"
+            )
         if cfg.get("verify_evidence"):
             print(
                 "        evidence_verify="
@@ -331,6 +584,8 @@ def print_report(report: dict) -> None:
                 f"chunks={row['evidence_verified_chunk_ids']} "
                 f"reason={row['evidence_verification_reason']}"
             )
+            if row.get("evidence_requirement_assessments"):
+                print(f"        requirements={row['evidence_requirement_assessments']}")
 
     print("\n聚合:")
     for key, value in report["aggregate"].items():

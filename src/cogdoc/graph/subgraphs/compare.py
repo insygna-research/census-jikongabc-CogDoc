@@ -1,5 +1,10 @@
 from langchain_core.messages import AIMessage
 from langgraph.graph import StateGraph, START, END
+from cogdoc.agents.claim_evidence_verifier import (
+    CLAIM_AUDIT_EXEMPTION_GUIDANCE,
+    CLAIM_AUDIT_EXEMPTION_UPSTREAM_ERROR,
+    make_claim_audit_exemption,
+)
 from cogdoc.agents.compare_generator import CompareGeneratorAgent
 from cogdoc.agents.compare_profile import (
     DocumentProfileAgent,
@@ -54,6 +59,10 @@ def document_loader_node(state: GraphState) -> dict:
             "compare_docs_by_source": {},
             "answer": message,
             "messages": [AIMessage(content=message)],
+            "claim_audit_exemption": make_claim_audit_exemption(
+                message,
+                CLAIM_AUDIT_EXEMPTION_GUIDANCE,
+            ),
         }
         log_event(
             "compare",
@@ -77,6 +86,10 @@ def document_loader_node(state: GraphState) -> dict:
             "compare_docs_by_source": {},
             "answer": message,
             "messages": [AIMessage(content=message)],
+            "claim_audit_exemption": make_claim_audit_exemption(
+                message,
+                CLAIM_AUDIT_EXEMPTION_GUIDANCE,
+            ),
         }
         log_event(
             "compare",
@@ -107,6 +120,10 @@ def document_loader_node(state: GraphState) -> dict:
             "compare_docs_by_source": docs_by_source,
             "answer": message,
             "messages": [AIMessage(content=message)],
+            "claim_audit_exemption": make_claim_audit_exemption(
+                message,
+                CLAIM_AUDIT_EXEMPTION_GUIDANCE,
+            ),
         }
         log_event(
             "compare",
@@ -164,6 +181,10 @@ def document_profile_node(state: GraphState) -> dict:
             "answer": message,
             "messages": [AIMessage(content=message)],
             "error": str(exc),
+            "claim_audit_exemption": make_claim_audit_exemption(
+                message,
+                CLAIM_AUDIT_EXEMPTION_UPSTREAM_ERROR,
+            ),
             "steps_trace": [
                 {
                     "step_name": "compare_document_profile_error",

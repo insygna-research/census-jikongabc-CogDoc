@@ -5,10 +5,10 @@ from cogdoc.config.settings import get_settings
 from cogdoc.agents.conversation_memory import extract_chat_turn, extract_final_answer
 from cogdoc.agents.router import FORCED_TASK_TYPES
 from cogdoc.observability.logger import configure_logging, log_event, new_trace_id
+from cogdoc.observability.trace import build_trace_step, export_trace, monotonic_ms
 
 # 编译后的工作流图首次调用时惰性载入，避免模块级循环依赖。
 app = None
-from cogdoc.observability.trace import build_trace_step, export_trace, monotonic_ms
 
 
 # 服务层灾难失败时携带稳定的错误归因，交付层据此映射错误码。
@@ -86,6 +86,61 @@ def _build_result(
     )
 
 
+_CLAIM_AUDITED_TASKS = {"qa", "summary", "compare"}
+
+
+def _enforce_claim_gate_release(
+    task_type: str,
+    task_output: dict[str, Any],
+    settings: Any,
+) -> bool:
+    """Block a candidate if an enabled claim gate did not reach a releasable state."""
+
+    if (
+        not settings.claim_verification_enabled
+        or task_type not in _CLAIM_AUDITED_TASKS
+        or not extract_final_answer(task_type, task_output)
+    ):
+        return False
+
+    from cogdoc.agents.answer_markers import (
+        NO_RELEVANT_CONTENT_ANSWER,
+        NO_RELEVANT_CONTENT_MARKER,
+    )
+
+    answer = extract_final_answer(task_type, task_output)
+    if answer in {NO_RELEVANT_CONTENT_MARKER, NO_RELEVANT_CONTENT_ANSWER}:
+        return False
+
+    audit = task_output.get("claim_audit")
+    audit = audit if isinstance(audit, dict) else {}
+    status = str(audit.get("status") or "")
+    reason_code = str(audit.get("reason_code") or "")
+    if status in {"passed", "repaired"}:
+        return False
+
+    from cogdoc.agents.claim_evidence_verifier import (
+        block_unfaithful_answer,
+        matching_claim_audit_exemption,
+    )
+
+    exemption_reason = matching_claim_audit_exemption(
+        task_output,
+        answer=answer,
+        task_type=task_type,
+    )
+    if status == "not_run" and exemption_reason and exemption_reason == reason_code:
+        return False
+
+    task_output.update(
+        block_unfaithful_answer(
+            task_output,
+            reason_code=reason_code or "audit_incomplete",
+        )
+    )
+    return True
+
+
 # 构建运行时错误步骤。
 def _runtime_error_step(node_name: str, exc: Exception) -> dict[str, Any]:
     return {
@@ -137,6 +192,29 @@ def _trace_config(
         "qa_evidence_verify_borderline_min_score": (
             settings.qa_evidence_verify_borderline_min_score
         ),
+        "qa_retrieval_max_queries": settings.qa_retrieval_max_queries,
+        "qa_adaptive_retrieval_enabled": settings.qa_adaptive_retrieval_enabled,
+        "qa_adaptive_retrieval_max_retries": (
+            settings.qa_adaptive_retrieval_max_retries
+        ),
+        "qa_adaptive_retrieval_top_k_multiplier": (
+            settings.qa_adaptive_retrieval_top_k_multiplier
+        ),
+        "qa_adaptive_retrieval_max_top_k": (settings.qa_adaptive_retrieval_max_top_k),
+        "claim_verification_enabled": settings.claim_verification_enabled,
+        "claim_verification_max_claims": settings.claim_verification_max_claims,
+        "claim_verification_max_claims_per_batch": (
+            settings.claim_verification_max_claims_per_batch
+        ),
+        "claim_verification_max_docs_per_batch": (
+            settings.claim_verification_max_docs_per_batch
+        ),
+        "claim_verification_max_chars_per_doc": (
+            settings.claim_verification_max_chars_per_doc
+        ),
+        "claim_verification_max_repair_attempts": (
+            settings.claim_verification_max_repair_attempts
+        ),
         "model": settings.ollama_model_name if is_local else settings.llm_model_name,
     }
 
@@ -158,6 +236,8 @@ def run_chat(
     chat_history: list | None = None,
     forced_task: str | None = None,
     session_id: str | None = None,
+    *,
+    state_runtime=None,
 ) -> Iterator[ChatEvent]:
     global app
     if app is None:
@@ -167,6 +247,10 @@ def run_chat(
 
     configure_logging()
     settings = get_settings()
+    if state_runtime is None:
+        from cogdoc.state_runtime import default_state_runtime
+
+        state_runtime = default_state_runtime()
     trace_id = new_trace_id()
     trace_steps: list[dict[str, Any]] = []
     request_start_ms = monotonic_ms()
@@ -198,6 +282,7 @@ def run_chat(
         "request_id": trace_id,
         "trace_id": trace_id,
         "session_id": session_id,
+        "state_runtime": state_runtime,
     }
     if forced_task in FORCED_TASK_TYPES:
         configurable["forced_task"] = forced_task
@@ -205,7 +290,12 @@ def run_chat(
 
     current_task = "qa"
     saw_parent_output = False
-    fallback_outputs = {"qa": {}, "summary": {}, "compare": {}, "unknown": {}}
+    fallback_outputs: dict[str, dict[str, Any]] = {
+        "qa": {},
+        "summary": {},
+        "compare": {},
+        "unknown": {},
+    }
     final_outputs: dict[str, dict[str, Any]] = {}
 
     log_event(
@@ -229,7 +319,9 @@ def run_chat(
     )
 
     try:
-        token_stream = app.stream(
+        # 编译图和测试注入的流实现共享动态协议，显式落到 Any 边界。
+        stream_app: Any = app
+        token_stream = stream_app.stream(
             initial_state,
             config=runtime_config,
             stream_mode=["messages", "updates"],
@@ -241,7 +333,8 @@ def run_chat(
                 in_subgraph = len(ns) > 0
                 if mode == "messages":
                     token = _extract_token(data)
-                    if token:
+                    # Claim gate 开启时不外泄候选 token；通过审计后只发最终答案。
+                    if token and not settings.claim_verification_enabled:
                         yield ChatEvent("token", {"content": token})
                     continue
 
@@ -281,7 +374,12 @@ def run_chat(
                             f"{namespace}.{node_name}" if namespace else node_name
                         )
                         retrieval_top_k = (
-                            settings.qa_retrieval_top_k
+                            int(
+                                node_output.get(
+                                    "retrieval_top_k_used",
+                                    settings.qa_retrieval_top_k,
+                                )
+                            )
                             if node_name == "retrieve_node"
                             else None
                         )
@@ -309,7 +407,14 @@ def run_chat(
                     rewrite_output = data["rewrite_node"]
                     yield ChatEvent(
                         "rewrite_queries",
-                        {"queries": list(rewrite_output.get("rewritten_queries", []))},
+                        {
+                            "queries": list(
+                                rewrite_output.get("rewritten_queries", [])
+                            ),
+                            "requirements": list(
+                                rewrite_output.get("evidence_requirements", [])
+                            ),
+                        },
                     )
                 elif mode == "updates" and in_subgraph and "rerank_node" in data:
                     rerank_output = data["rerank_node"]
@@ -318,7 +423,10 @@ def run_chat(
                     verification_pending = bool(
                         rerank_output.get("evidence_verification_pending", False)
                     )
-                    if is_abstained and not verification_pending:
+                    retry_pending = bool(
+                        rerank_output.get("adaptive_retrieval_retry_pending", False)
+                    )
+                    if is_abstained and not verification_pending and not retry_pending:
                         yield ChatEvent(
                             "retrieval_abstained",
                             {
@@ -336,15 +444,41 @@ def run_chat(
                     verify_output = data["evidence_verify_node"]
                     fallback_outputs["qa"].update(verify_output)
                     supported = bool(verify_output.get("evidence_supported"))
+                    retry_pending = bool(
+                        verify_output.get("adaptive_retrieval_retry_pending", False)
+                    )
+                    verification_payload = {
+                        "supported": supported,
+                        "reason": verify_output.get("evidence_verification_reason", ""),
+                        "evidence_chunk_ids": list(
+                            verify_output.get("evidence_verified_chunk_ids", [])
+                        ),
+                    }
+                    requirement_assessments = list(
+                        verify_output.get("evidence_requirement_assessments", [])
+                    )
+                    if requirement_assessments:
+                        verification_payload["requirement_assessments"] = (
+                            requirement_assessments
+                        )
+                    if retry_pending:
+                        verification_payload["will_retry"] = True
                     yield ChatEvent(
                         "evidence_verified" if supported else "evidence_rejected",
+                        verification_payload,
+                    )
+                elif (
+                    mode == "updates" and in_subgraph and "retrieval_retry_node" in data
+                ):
+                    retry_output = data["retrieval_retry_node"]
+                    fallback_outputs["qa"].update(retry_output)
+                    yield ChatEvent(
+                        "retrieval_retry",
                         {
-                            "supported": supported,
-                            "reason": verify_output.get(
-                                "evidence_verification_reason", ""
-                            ),
-                            "evidence_chunk_ids": list(
-                                verify_output.get("evidence_verified_chunk_ids", [])
+                            "retry_count": retry_output.get("retrieval_retry_count", 0),
+                            "reason": retry_output.get("retrieval_retry_reason", ""),
+                            "missing_requirement_ids": list(
+                                retry_output.get("missing_evidence_requirement_ids", [])
                             ),
                         },
                     )
@@ -359,15 +493,18 @@ def run_chat(
                     )
                     if critique:
                         round_answer = fallback_outputs["qa"].get("answer", "")
+                        rejection_payload = {
+                            "critique": critique,
+                            "iteration_count": iter_num,
+                            "max_iteration_count": max_iter,
+                            "will_retry": iter_num <= max_iter,
+                        }
+                        # Debug 预览也是发布通道；门禁开启时不把未审计候选塞进任何进度事件。
+                        if not settings.claim_verification_enabled:
+                            rejection_payload["round_answer"] = round_answer
                         yield ChatEvent(
                             "citation_rejected",
-                            {
-                                "critique": critique,
-                                "iteration_count": iter_num,
-                                "max_iteration_count": max_iter,
-                                "round_answer": round_answer,
-                                "will_retry": iter_num < max_iter,
-                            },
+                            rejection_payload,
                         )
                     else:
                         yield ChatEvent(
@@ -398,6 +535,7 @@ def run_chat(
                         if isinstance(value, dict):
                             task_output.update(value)
                 elif mode == "updates" and not in_subgraph:
+                    postprocess_updated = False
                     for parent_key, task_name in {
                         "qa_subgraph": "qa",
                         "summary_subgraph": "summary",
@@ -407,7 +545,53 @@ def run_chat(
                         if parent_key in data:
                             saw_parent_output = True
                             final_outputs[task_name] = data[parent_key]
+                            postprocess_updated = True
                             break
+                    if not postprocess_updated:
+                        task_output = final_outputs.setdefault(
+                            current_task,
+                            fallback_outputs.get(current_task, {}),
+                        )
+                        for node_name in (
+                            "claim_audit_node",
+                            "claim_repair_node",
+                            "claim_repair_citation_node",
+                            "claim_block_node",
+                        ):
+                            node_output = data.get(node_name)
+                            if isinstance(node_output, dict):
+                                task_output.update(node_output)
+                                audit = node_output.get("claim_audit") or {}
+                                if node_name == "claim_audit_node":
+                                    yield ChatEvent(
+                                        "claim_audit",
+                                        {
+                                            "status": audit.get("status", "not_run"),
+                                            "counts": audit.get("counts", {}),
+                                            "metrics": audit.get("metrics", {}),
+                                        },
+                                    )
+                                elif node_name == "claim_repair_node":
+                                    yield ChatEvent(
+                                        "claim_repair",
+                                        {
+                                            "attempt_count": node_output.get(
+                                                "claim_repair_count", 0
+                                            ),
+                                            "error": node_output.get(
+                                                "claim_repair_error", ""
+                                            ),
+                                        },
+                                    )
+                                elif node_name == "claim_block_node":
+                                    yield ChatEvent(
+                                        "claim_rejected",
+                                        {
+                                            "status": audit.get("status", "rejected"),
+                                            "reason_code": audit.get("reason_code", ""),
+                                        },
+                                    )
+                                break
 
             if not saw_parent_output:
                 task_output = fallback_outputs.get(current_task, {})
@@ -435,9 +619,30 @@ def run_chat(
             )
 
         task_output = final_outputs.get(current_task, {})
-        trace_status = "failed" if stream_error and not task_output else "ok"
-        if stream_error and task_output:
-            trace_status = "degraded"
+        gate_forced_block = _enforce_claim_gate_release(
+            current_task,
+            task_output,
+            settings,
+        )
+        if gate_forced_block:
+            trace_steps.append(
+                build_trace_step(
+                    "runtime.claim_gate_fail_closed",
+                    task_output,
+                    0.0,
+                )
+            )
+            log_event(
+                "claim_audit",
+                "claim_gate_fail_closed",
+                initial_state,
+                task_type=current_task,
+                stream_error=bool(stream_error),
+            )
+        has_releasable_output = bool(extract_final_answer(current_task, task_output))
+        trace_status = "ok"
+        if stream_error:
+            trace_status = "degraded" if has_releasable_output else "failed"
         exported = export_trace(
             trace_id=trace_id,
             request_id=trace_id,
@@ -455,7 +660,13 @@ def run_chat(
                 "chat_history": list(chat_history or []),
             },
             output_payload=task_output,
-            execution_status=("TRACE_INCOMPLETE" if trace_status == "degraded" else "SUCCESS"),
+            execution_status=(
+                "SUCCESS"
+                if trace_status == "ok"
+                else "TRACE_INCOMPLETE"
+                if trace_status == "degraded"
+                else "TARGET_ERROR"
+            ),
         )
         trace_path = str(exported) if exported else None
         result = _build_result(
@@ -466,6 +677,31 @@ def run_chat(
             trace_steps,
             trace_path,
         )
+        # 检索/重排等局部状态不是可交付结果；流已失败且没有答案时只保留
+        # 先前 error 事件，禁止再伪造一个空 final。
+        if stream_error and not result.answer:
+            log_event(
+                "runtime",
+                "request_end",
+                initial_state,
+                task_type=current_task,
+                has_output=False,
+                trace_path=trace_path,
+            )
+            return
+        if settings.claim_verification_enabled and result.answer:
+            audit = result.raw_output.get("claim_audit")
+            audit_status = (
+                str(audit.get("status") or "") if isinstance(audit, dict) else ""
+            )
+            yield ChatEvent(
+                "token",
+                {
+                    "content": result.answer,
+                    "verified": result.is_valid
+                    and audit_status in {"passed", "repaired"},
+                },
+            )
         log_event(
             "runtime",
             "request_end",
@@ -525,7 +761,7 @@ def run_chat_sync(*args: Any, **kwargs: Any) -> ChatResult:
         elif event.type == "error":
             last_error = event.payload
     # 出现错误事件且最终无可信输出即视为失败，不把空答案当成功返回。
-    has_trustworthy_output = result is not None and bool(result.raw_output)
+    has_trustworthy_output = result is not None and bool(result.answer.strip())
     if last_error is not None and not has_trustworthy_output:
         raise ChatServiceError(
             stage=last_error.get("stage", "runtime"),

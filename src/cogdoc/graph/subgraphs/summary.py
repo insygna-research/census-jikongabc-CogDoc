@@ -1,5 +1,9 @@
 from langchain_core.messages import AIMessage
 from langgraph.graph import StateGraph, START, END
+from cogdoc.agents.claim_evidence_verifier import (
+    CLAIM_AUDIT_EXEMPTION_GUIDANCE,
+    make_claim_audit_exemption,
+)
 from cogdoc.agents.summary_planner import SectionPlannerAgent
 from cogdoc.agents.summary_generator import GlobalSummaryAgent, SectionSummaryAgent
 from cogdoc.agents.source_resolver import resolve_summary_source
@@ -48,6 +52,10 @@ def document_loader_node(state: GraphState) -> dict:
             "summary_docs": [],
             "answer": message,
             "messages": [AIMessage(content=message)],
+            "claim_audit_exemption": make_claim_audit_exemption(
+                message,
+                CLAIM_AUDIT_EXEMPTION_GUIDANCE,
+            ),
         }
         log_event(
             "summary",
@@ -67,6 +75,10 @@ def document_loader_node(state: GraphState) -> dict:
             "summary_docs": [],
             "answer": message,
             "messages": [AIMessage(content=message)],
+            "claim_audit_exemption": make_claim_audit_exemption(
+                message,
+                CLAIM_AUDIT_EXEMPTION_GUIDANCE,
+            ),
         }
         log_event(
             "summary",

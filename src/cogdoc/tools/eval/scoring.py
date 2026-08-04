@@ -32,6 +32,7 @@ SEVERITY_RANK = {
     "FATAL_GATE_UNOBSERVABLE": 4,
     "FATAL": 5,
 }
+CLAIM_VERDICTS = {"supported", "unsupported", "insufficient", "not_factual"}
 
 
 class JudgeOutput(BaseModel):
@@ -117,6 +118,11 @@ def _evidence_available(trial: Mapping[str, Any], name: str) -> bool:
         "trajectory": ("trajectory", "trace.steps"),
         "citations": ("citations",),
         "conversation_turns": ("conversation_turns", "turns"),
+        "claim_audit": (
+            "claim_audit",
+            "output.claim_audit",
+            "trace.output.claim_audit",
+        ),
         "trace": ("trace",),
     }
     return any(_path(trial, alias) is not None for alias in aliases.get(name, (name,)))
@@ -129,11 +135,146 @@ def _value(trial: Mapping[str, Any], name: str, default: Any = None) -> Any:
         "retrieved_context": ("retrieved_context", "context", "evidence"),
         "tool_trace": ("tool_trace", "tools"),
         "trajectory": ("trajectory",),
+        "claim_audit": (
+            "claim_audit",
+            "output.claim_audit",
+            "trace.output.claim_audit",
+        ),
     }.get(name, (name,)):
         value = _path(trial, alias)
         if value is not None:
             return value
     return default
+
+
+def _configured_rate(
+    config: Mapping[str, Any], name: str, default: float
+) -> float:
+    value = float(config.get(name, default))
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(f"{name} must be between 0 and 1")
+    return value
+
+
+def _claim_audit_assertion(
+    audit: Mapping[str, Any], config: Mapping[str, Any]
+) -> dict[str, Any]:
+    """依据逐条 verdict 重算门禁，忽略 audit 自带的 counts / metrics。"""
+    claims = audit.get("claims")
+    if not isinstance(claims, list):
+        raise ValueError("claim_audit.claims must be a list")
+
+    counts = {
+        "claim_count": 0,
+        "supported": 0,
+        "unsupported": 0,
+        "insufficient": 0,
+        "cited": 0,
+        "not_factual": 0,
+    }
+    for claim in claims:
+        if not isinstance(claim, Mapping):
+            raise ValueError("claim_audit.claims must contain objects")
+        verdict = str(claim.get("verdict") or "")
+        if verdict not in CLAIM_VERDICTS:
+            raise ValueError(f"unsupported claim verdict: {verdict or '<missing>'}")
+        if verdict == "not_factual":
+            counts["not_factual"] += 1
+            continue
+        cited_ids = {
+            str(chunk_id)
+            for chunk_id in list(claim.get("cited_chunk_ids") or [])
+            if str(chunk_id)
+        }
+        supporting_ids = {
+            str(chunk_id)
+            for chunk_id in list(claim.get("supporting_chunk_ids") or [])
+            if str(chunk_id)
+        }
+        # 外部 eval case 可能伪造自相矛盾的 supported。按运行时门禁的
+        # 同一规则重算：必须至少有一个 supporting id，且全部属于合法引用集。
+        if verdict == "supported" and (
+            not supporting_ids or not supporting_ids.issubset(cited_ids)
+        ):
+            verdict = "insufficient"
+        counts["claim_count"] += 1
+        counts[verdict] += 1
+        if cited_ids:
+            counts["cited"] += 1
+
+    denominator = counts["claim_count"]
+
+    def rate(name: str) -> float | None:
+        return counts[name] / denominator if denominator else None
+
+    metrics = {
+        "claim_support_rate": rate("supported"),
+        "citation_coverage": rate("cited"),
+        "unsupported_claim_rate": rate("unsupported"),
+        "insufficient_claim_rate": rate("insufficient"),
+    }
+    allowed_raw = config.get("allowed_statuses", ("passed", "repaired"))
+    if isinstance(allowed_raw, str):
+        allowed_statuses = {allowed_raw}
+    elif isinstance(allowed_raw, Sequence):
+        allowed_statuses = {str(item) for item in allowed_raw}
+    else:
+        raise ValueError("allowed_statuses must be a string or sequence")
+
+    allow_empty = bool(config.get("allow_empty", True))
+    min_support = _configured_rate(config, "min_claim_support_rate", 1.0)
+    min_citation = _configured_rate(config, "min_citation_coverage", 1.0)
+    max_unsupported = _configured_rate(
+        config, "max_unsupported_claim_rate", 0.0
+    )
+    max_insufficient = _configured_rate(
+        config, "max_insufficient_claim_rate", 0.0
+    )
+    empty_allowed = denominator > 0 or allow_empty
+    checks = {
+        "status_allowed": str(audit.get("status") or "") in allowed_statuses,
+        "claim_count_allowed": empty_allowed,
+        "support_rate": (
+            empty_allowed
+            if metrics["claim_support_rate"] is None
+            else metrics["claim_support_rate"] >= min_support
+        ),
+        "citation_coverage": (
+            empty_allowed
+            if metrics["citation_coverage"] is None
+            else metrics["citation_coverage"] >= min_citation
+        ),
+        "unsupported_claim_rate": (
+            empty_allowed
+            if metrics["unsupported_claim_rate"] is None
+            else metrics["unsupported_claim_rate"] <= max_unsupported
+        ),
+        "insufficient_claim_rate": (
+            empty_allowed
+            if metrics["insufficient_claim_rate"] is None
+            else metrics["insufficient_claim_rate"] <= max_insufficient
+        ),
+    }
+    passed = all(checks.values())
+    return {
+        "status": "PASS" if passed else "FAIL",
+        "score": 1.0 if passed else 0.0,
+        "passed": passed,
+        "details": {
+            "audit_status": str(audit.get("status") or ""),
+            "counts": counts,
+            "metrics": metrics,
+            "checks": checks,
+            "thresholds": {
+                "allowed_statuses": sorted(allowed_statuses),
+                "allow_empty": allow_empty,
+                "min_claim_support_rate": min_support,
+                "min_citation_coverage": min_citation,
+                "max_unsupported_claim_rate": max_unsupported,
+                "max_insufficient_claim_rate": max_insufficient,
+            },
+        },
+    }
 
 
 def _deterministic(spec: EvaluatorSpec, trial: Mapping[str, Any]) -> dict[str, Any]:
@@ -176,6 +317,11 @@ def _deterministic(spec: EvaluatorSpec, trial: Mapping[str, Any]) -> dict[str, A
         observed = _value(trial, "tool_trace", []) or []
         target = expected if isinstance(expected, list) else config.get("expected", [])
         passed = observed == target or all(item in observed for item in target)
+    elif kind == "claim_audit_assertion":
+        audit = _value(trial, "claim_audit")
+        if not isinstance(audit, Mapping):
+            raise ValueError("claim_audit must be an object")
+        return _claim_audit_assertion(audit, config)
     elif kind in {"safety_assertion", "abstention_assertion"}:
         forbidden = config.get("forbidden_patterns", [])
         if kind == "abstention_assertion":
@@ -266,6 +412,20 @@ def evaluate_one(spec: EvaluatorSpec, trial: Mapping[str, Any], judge: LLMJudge 
     missing = [name for name in spec.requires if not _evidence_available(trial, name)]
     if missing:
         return {"status": "NOT_OBSERVABLE", "score": None, "missing_evidence": missing}
+    if spec.type == "claim_audit_assertion":
+        audit = _value(trial, "claim_audit")
+        if not isinstance(audit, Mapping):
+            return {
+                "status": "NOT_OBSERVABLE",
+                "score": None,
+                "missing_evidence": ["claim_audit"],
+            }
+        if not isinstance(audit.get("claims"), list):
+            return {
+                "status": "NOT_OBSERVABLE",
+                "score": None,
+                "missing_evidence": ["claim_audit.claims"],
+            }
     if spec.type in {"llm_judge", "ragas_metric", "code_review", "deepeval_metric", "ragas"}:
         if judge is None:
             return {"status": "NOT_OBSERVABLE", "score": None, "error": "judge_not_configured"}

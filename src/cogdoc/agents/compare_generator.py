@@ -1,6 +1,10 @@
 from typing import Dict, List, Tuple
 from langchain_core.messages import HumanMessage, SystemMessage
 from cogdoc.agents.citation_validator import CitationValidatorAgent
+from cogdoc.agents.claim_evidence_verifier import (
+    CLAIM_AUDIT_EXEMPTION_GUIDANCE,
+    make_claim_audit_exemption,
+)
 from cogdoc.agents.qa_generator import Generator
 from cogdoc.agents.summary_generator import (
     all_contents_no_evidence,
@@ -80,7 +84,13 @@ class CompareGeneratorAgent:
 
         if len(sources) < 2 or not dimensions or not profiles:
             answer = "未能生成对比表：请在问题中点名至少 2 篇可用文档。"
-            return {"answer": answer}
+            return {
+                "answer": answer,
+                "claim_audit_exemption": make_claim_audit_exemption(
+                    answer,
+                    CLAIM_AUDIT_EXEMPTION_GUIDANCE,
+                ),
+            }
 
         table_answer = _format_compare_blocks(sources, dimensions, profiles)
         conclusion_warning = ""

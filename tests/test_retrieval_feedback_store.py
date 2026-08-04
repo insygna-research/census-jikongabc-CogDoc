@@ -20,6 +20,7 @@ def test_record_from_feedback_and_disable(tmp_path):
             "kb_id": "kb",
             "query": "报名要求",
             "feedback": "thumbs_down",
+            "feedback_type": "bad_retrieval",
             "trace_id": "t1",
             "citations": [{"chunk_id": "c1", "source_type": "document"}],
             "evidence": [{"chunk_id": "c1"}, {"chunk_id": "c2"}],
@@ -98,6 +99,7 @@ def test_boost_cache_refreshes_after_append(tmp_path):
         "kb_id": "kb",
         "query": "问题",
         "feedback": "thumbs_down",
+        "feedback_type": "bad_retrieval",
         "citations": [{"chunk_id": "c1"}],
     }
     second = {
@@ -112,3 +114,77 @@ def test_boost_cache_refreshes_after_append(tmp_path):
     store.record_from_feedback("fb2", second)
 
     assert store.boosts_for_query("kb", "问题") == {"c1": -0.35, "c2": 0.2}
+
+
+# 验证普通点踩、回答错误和纠错不会误惩罚所有引用分块。
+def test_negative_feedback_requires_explicit_bad_retrieval_attribution(tmp_path):
+    store = RetrievalFeedbackStore(path=str(tmp_path / "retrieval_feedback.jsonl"))
+    base = {
+        "kb_id": "kb",
+        "query": "问题",
+        "citations": [{"chunk_id": "c1"}],
+    }
+
+    cases = [
+        {"feedback": "thumbs_down"},
+        {"feedback": "thumbs_down", "feedback_type": "wrong_answer"},
+        {"feedback": "correction", "feedback_type": "correction"},
+        {"feedback": "thumbs_up", "rating": 1},
+    ]
+
+    for index, case in enumerate(cases):
+        assert store.record_from_feedback(f"fb{index}", {**base, **case}) == []
+    assert store.boosts_for_query("kb", "问题") == {}
+
+
+# 验证正反向检索调权的边界与显式跳过开关。
+def test_attributed_negative_and_positive_feedback_weights(tmp_path):
+    store = RetrievalFeedbackStore(path=str(tmp_path / "retrieval_feedback.jsonl"))
+    base = {
+        "kb_id": "kb",
+        "citations": [{"chunk_id": "c1"}],
+    }
+
+    assert (
+        store.record_from_feedback(
+            "negative",
+            {
+                **base,
+                "query": "负反馈",
+                "feedback": "thumbs_down",
+                "feedback_type": "bad_retrieval",
+            },
+        )[0]["weight_delta"]
+        == -0.35
+    )
+    assert (
+        store.record_from_feedback(
+            "positive",
+            {**base, "query": "正反馈", "feedback": "thumbs_up"},
+        )[0]["weight_delta"]
+        == 0.2
+    )
+    assert (
+        store.record_from_feedback(
+            "high-rating",
+            {
+                **base,
+                "query": "高评分",
+                "feedback": "thumbs_up",
+                "rating": 5,
+            },
+        )[0]["weight_delta"]
+        == 0.24
+    )
+    assert (
+        store.record_from_feedback(
+            "skipped",
+            {
+                **base,
+                "query": "跳过",
+                "feedback": "thumbs_up",
+                "skip_retrieval_feedback": True,
+            },
+        )
+        == []
+    )

@@ -1,5 +1,11 @@
 import pytest
 from cogdoc.agents.answer_markers import NO_RELEVANT_CONTENT_ANSWER
+from cogdoc.agents.claim_evidence_verifier import (
+    CLAIM_AUDIT_BLOCKED_ANSWER,
+    CLAIM_AUDIT_EXEMPTION_GUIDANCE,
+    make_claim_audit_exemption,
+)
+from cogdoc.config.settings import Settings
 from cogdoc.service import chat_service
 from cogdoc.service.chat_service import ChatServiceError, run_chat_sync
 
@@ -265,6 +271,139 @@ def test_run_chat_emits_evidence_rejected_event(monkeypatch):
     assert events[-1].payload["result"].answer == NO_RELEVANT_CONTENT_ANSWER
 
 
+# 补检索中的低置信度不应提前发终态拒答，且 retry 事件与 trace 步骤各出现一次。
+class AdaptiveRetryApp:
+    def stream(self, initial_state, config, stream_mode, subgraphs):
+        yield (
+            (),
+            "updates",
+            {"intent_router": {"task_type": "qa", "router_reason": "文档问答"}},
+        )
+        yield (
+            ("qa_subgraph",),
+            "updates",
+            {
+                "rerank_node": {
+                    "retrieval_abstained": True,
+                    "retrieval_confidence": 0.4,
+                    "retrieval_abstain_reason": "below_threshold",
+                    "evidence_verification_pending": False,
+                    "adaptive_retrieval_retry_pending": True,
+                }
+            },
+        )
+        yield (
+            ("qa_subgraph",),
+            "updates",
+            {
+                "retrieval_retry_node": {
+                    "retrieval_retry_count": 1,
+                    "retrieval_round": 1,
+                    "retrieval_retry_reason": "missing_requirements",
+                    "missing_evidence_requirement_ids": ["r2"],
+                }
+            },
+        )
+        yield (
+            ("qa_subgraph",),
+            "updates",
+            {
+                "rerank_node": {
+                    "retrieval_abstained": False,
+                    "retrieval_confidence": 0.9,
+                    "retrieval_abstain_reason": "supported",
+                    "evidence_verification_pending": False,
+                    "adaptive_retrieval_retry_pending": False,
+                }
+            },
+        )
+        yield (
+            (),
+            "updates",
+            {
+                "qa_subgraph": {
+                    "answer": "补检索后的答案。[a.pdf:P1]",
+                    "critique": "",
+                    "retrieval_abstained": False,
+                    "retrieval_retry_count": 1,
+                    "reranked_docs": [_doc()],
+                    "sources": [_doc()["meta"]],
+                    "evidence": [
+                        {"chunk_id": "chunk:a:1", "source": "a.pdf", "page": 1}
+                    ],
+                }
+            },
+        )
+
+
+def test_run_chat_emits_one_retry_without_premature_abstention(monkeypatch):
+    monkeypatch.setattr(chat_service, "app", AdaptiveRetryApp())
+    monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
+    monkeypatch.setattr(chat_service, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(chat_service, "export_trace", lambda **kwargs: None)
+
+    events = list(chat_service.run_chat("kb", "比较 A 和 B", is_local=False))
+
+    assert [event.type for event in events] == [
+        "request_started",
+        "router_decided",
+        "retrieval_retry",
+        "final",
+    ]
+    assert events[2].payload == {
+        "retry_count": 1,
+        "reason": "missing_requirements",
+        "missing_requirement_ids": ["r2"],
+    }
+    step_names = [step["node_name"] for step in events[-1].payload["result"].steps]
+    assert sum(name.endswith(".rerank_node") for name in step_names) == 2
+    assert sum(name.endswith(".retrieval_retry_node") for name in step_names) == 1
+
+
+# 补检索状态已经产生但尚无答案时发生中断，局部状态不能被包装成空 final。
+class StreamInterruptAfterRetryApp:
+    def stream(self, initial_state, config, stream_mode, subgraphs):
+        yield (
+            (),
+            "updates",
+            {"intent_router": {"task_type": "qa", "router_reason": "文档问答"}},
+        )
+        yield (
+            ("qa_subgraph",),
+            "updates",
+            {
+                "retrieval_retry_node": {
+                    "retrieval_retry_count": 1,
+                    "retrieval_round": 1,
+                    "retrieval_retry_reason": "missing_requirements",
+                    "missing_evidence_requirement_ids": ["r2"],
+                }
+            },
+        )
+        raise TimeoutError("补检索流中断")
+
+
+def test_stream_interrupt_after_retry_does_not_emit_empty_final(monkeypatch):
+    exported = []
+    monkeypatch.setattr(chat_service, "app", StreamInterruptAfterRetryApp())
+    monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
+    monkeypatch.setattr(chat_service, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        chat_service, "export_trace", lambda **kwargs: exported.append(kwargs)
+    )
+
+    events = list(chat_service.run_chat("kb", "比较 A 和 B", is_local=False))
+
+    assert [event.type for event in events] == [
+        "request_started",
+        "router_decided",
+        "retrieval_retry",
+        "error",
+    ]
+    assert exported[0]["status"] == "failed"
+    assert exported[0]["execution_status"] == "TARGET_ERROR"
+
+
 # 路由后流式迭代中途崩溃，父子图始终未产出可信输出。
 class StreamInterruptApp:
     # 路由后流式迭代中途崩溃，父子图始终未产出可信输出。
@@ -305,6 +444,7 @@ def test_run_chat_exports_failed_trace_on_stream_interrupt(monkeypatch):
         run_chat_sync("kb", "报名要求是什么", is_local=False)
 
     assert exported[0]["status"] == "failed"
+    assert exported[0]["execution_status"] == "TARGET_ERROR"
     assert exported[0]["error"]["stage"] == "stream"
     assert exported[0]["error"]["error_class"] == "TimeoutError"
 
@@ -358,4 +498,228 @@ def test_run_chat_exports_degraded_trace_when_partial_output(monkeypatch):
 
     assert result.raw_output.get("answer") == "部分答案"
     assert exported[0]["status"] == "degraded"
+    assert exported[0]["execution_status"] == "TRACE_INCOMPLETE"
     assert exported[0]["error"]["stage"] == "stream"
+
+
+# 验证门禁开启时，审计前流中断也不能把部分候选答案作为降级结果释放。
+def test_claim_gate_blocks_partial_output_when_stream_ends_before_audit(monkeypatch):
+    settings = Settings(_env_file=None, claim_verification_enabled=True)
+    monkeypatch.setattr(chat_service, "app", StreamInterruptWithPartialApp())
+    monkeypatch.setattr(chat_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
+    monkeypatch.setattr(chat_service, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(chat_service, "export_trace", lambda **kwargs: None)
+
+    events = list(chat_service.run_chat("kb", "报名要求是什么", is_local=False))
+
+    token_events = [event for event in events if event.type == "token"]
+    assert len(token_events) == 1
+    assert "部分答案" not in token_events[0].payload["content"]
+    assert token_events[0].payload["verified"] is False
+    result = next(event.payload["result"] for event in events if event.type == "final")
+    assert result.raw_output["claim_audit"]["status"] == "rejected"
+    assert result.raw_output["claim_audit"]["reason_code"] == "audit_incomplete"
+    assert result.is_valid is False
+
+
+class ClaimGateStreamingApp:
+    def stream(self, initial_state, config, stream_mode, subgraphs):
+        class CandidateMessage:
+            content = "未经验证的候选答案"
+
+        yield (
+            (),
+            "updates",
+            {"intent_router": {"task_type": "qa", "router_reason": "文档问答"}},
+        )
+        # LangGraph 的 messages 流会在审计前吐出生成候选；服务层必须压住它。
+        yield (("qa_subgraph",), "messages", CandidateMessage())
+        yield (
+            (),
+            "updates",
+            {
+                "qa_subgraph": {
+                    "answer": "最终验证答案。[a.pdf:P1]",
+                    "critique": "",
+                    "reranked_docs": [_doc()],
+                    "sources": [_doc()["meta"]],
+                    "evidence": [
+                        {"chunk_id": "chunk:a:1", "source": "a.pdf", "page": 1}
+                    ],
+                }
+            },
+        )
+        yield (
+            (),
+            "updates",
+            {
+                "claim_audit_node": {
+                    "claim_audit_required": True,
+                    "claim_audit_passed": True,
+                    "claim_audit": {
+                        "status": "passed",
+                        "counts": {
+                            "claim_count": 1,
+                            "supported": 1,
+                            "unsupported": 0,
+                            "insufficient": 0,
+                        },
+                        "metrics": {
+                            "claim_support_rate": 1.0,
+                            "citation_coverage": 1.0,
+                            "unsupported_claim_rate": 0.0,
+                        },
+                    },
+                }
+            },
+        )
+
+
+class ClaimGateCitationRetryApp:
+    def stream(self, initial_state, config, stream_mode, subgraphs):
+        yield (
+            (),
+            "updates",
+            {"intent_router": {"task_type": "qa", "router_reason": "文档问答"}},
+        )
+        yield (
+            ("qa_subgraph",),
+            "updates",
+            {"generate_node": {"answer": "未验证且引用错误的候选答案。[a.pdf:P99]"}},
+        )
+        yield (
+            ("qa_subgraph",),
+            "updates",
+            {
+                "citation_node": {
+                    "critique": "页码不存在",
+                    "iteration_count": 2,
+                    "max_iteration_count": 2,
+                }
+            },
+        )
+        final_output = {
+            "answer": "最终验证答案。[a.pdf:P1]",
+            "critique": "",
+            "reranked_docs": [_doc()],
+            "sources": [_doc()["meta"]],
+            "evidence": [{"chunk_id": "chunk:a:1", "source": "a.pdf", "page": 1}],
+        }
+        yield ((), "updates", {"qa_subgraph": final_output})
+        yield (
+            (),
+            "updates",
+            {
+                "claim_audit_node": {
+                    "claim_audit_required": True,
+                    "claim_audit_passed": True,
+                    "claim_audit": {
+                        "status": "passed",
+                        "counts": {"claim_count": 1, "supported": 1},
+                        "metrics": {"claim_support_rate": 1.0},
+                    },
+                }
+            },
+        )
+
+
+def test_claim_gate_hides_candidate_token_and_emits_only_verified_answer(monkeypatch):
+    settings = Settings(_env_file=None, claim_verification_enabled=True)
+    monkeypatch.setattr(chat_service, "app", ClaimGateStreamingApp())
+    monkeypatch.setattr(chat_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
+    monkeypatch.setattr(chat_service, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(chat_service, "export_trace", lambda **kwargs: None)
+
+    events = list(chat_service.run_chat("kb", "报名要求是什么", is_local=False))
+
+    token_events = [event for event in events if event.type == "token"]
+    assert [event.payload["content"] for event in token_events] == [
+        "最终验证答案。[a.pdf:P1]"
+    ]
+    assert token_events[0].payload["verified"] is True
+    assert all("未经验证" not in event.payload["content"] for event in token_events)
+    assert [event.type for event in events] == [
+        "request_started",
+        "router_decided",
+        "claim_audit",
+        "token",
+        "final",
+    ]
+    assert events[-1].payload["result"].answer == "最终验证答案。[a.pdf:P1]"
+
+
+def test_claim_gate_hides_candidate_from_citation_progress_event(monkeypatch):
+    settings = Settings(_env_file=None, claim_verification_enabled=True)
+    monkeypatch.setattr(chat_service, "app", ClaimGateCitationRetryApp())
+    monkeypatch.setattr(chat_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
+    monkeypatch.setattr(chat_service, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(chat_service, "export_trace", lambda **kwargs: None)
+
+    events = list(chat_service.run_chat("kb", "报名要求是什么", is_local=False))
+
+    rejected = next(event for event in events if event.type == "citation_rejected")
+    assert "round_answer" not in rejected.payload
+    assert "未验证" not in str(rejected.payload)
+    assert rejected.payload["will_retry"] is True
+
+
+def test_claim_gate_does_not_release_broad_not_run_reason():
+    settings = Settings(_env_file=None, claim_verification_enabled=True)
+    output = {
+        "answer": "报名截止日期是 9 月 30 日。[a.pdf:P1]",
+        "claim_audit": {
+            "status": "not_run",
+            "reason_code": "no_evidence_documents",
+        },
+    }
+
+    blocked = chat_service._enforce_claim_gate_release("qa", output, settings)
+
+    assert blocked is True
+    assert output["answer"] == CLAIM_AUDIT_BLOCKED_ANSWER
+    assert output["claim_audit"]["status"] == "rejected"
+
+
+def test_claim_gate_releases_only_matching_answer_bound_exemption():
+    settings = Settings(_env_file=None, claim_verification_enabled=True)
+    answer = "请在摘要问题中明确指定要总结的文件名。"
+    output = {
+        "answer": answer,
+        "claim_audit_exemption": make_claim_audit_exemption(
+            answer,
+            CLAIM_AUDIT_EXEMPTION_GUIDANCE,
+        ),
+        "claim_audit": {
+            "status": "not_run",
+            "reason_code": CLAIM_AUDIT_EXEMPTION_GUIDANCE,
+        },
+    }
+
+    blocked = chat_service._enforce_claim_gate_release("summary", output, settings)
+
+    assert blocked is False
+    assert output["answer"] == answer
+
+
+def test_claim_gate_blocks_exemption_when_audit_reason_does_not_match():
+    settings = Settings(_env_file=None, claim_verification_enabled=True)
+    answer = "请在摘要问题中明确指定要总结的文件名。"
+    output = {
+        "answer": answer,
+        "claim_audit_exemption": make_claim_audit_exemption(
+            answer,
+            CLAIM_AUDIT_EXEMPTION_GUIDANCE,
+        ),
+        "claim_audit": {
+            "status": "not_run",
+            "reason_code": "upstream_error",
+        },
+    }
+
+    blocked = chat_service._enforce_claim_gate_release("summary", output, settings)
+
+    assert blocked is True
+    assert output["answer"] == CLAIM_AUDIT_BLOCKED_ANSWER

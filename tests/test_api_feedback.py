@@ -137,10 +137,8 @@ async def test_thumbs_down_lands_in_bad_cases(tmp_path, monkeypatch):
     }
     # 同时也进总反馈日志。
     assert len(_read_jsonl(root / "feedback.jsonl")) == 1
-    retrieval_feedback = _read_jsonl(root / "retrieval_feedback.jsonl")
-    assert len(retrieval_feedback) == 1
-    assert retrieval_feedback[0]["chunk_id"] == "c1"
-    assert retrieval_feedback[0]["weight_delta"] < 0
+    # 未归因的点踩可以是回答问题，不应自动惩罚引用分块。
+    assert _read_jsonl(root / "retrieval_feedback.jsonl") == []
     feedback_analysis = _read_jsonl(root / "feedback_analysis.jsonl")
     assert feedback_analysis[0]["recommended_action"] == "adjust_retrieval"
     assert feedback_analysis[0]["target"]["chunk_ids"] == ["c1"]
@@ -158,6 +156,7 @@ async def test_retrieval_feedback_counts_one_feedback_with_multiple_chunks(
         {
             "trace_id": "t-multi-chunk",
             "feedback": "thumbs_down",
+            "feedback_type": "bad_retrieval",
             "kb_id": "kb",
             "query": "问题",
             "citations": [{"chunk_id": "c1", "source": "a.pdf"}],
@@ -193,6 +192,7 @@ async def test_quick_feedback_duplicate_trace_ignored(tmp_path, monkeypatch):
         {
             "trace_id": "t-dup",
             "feedback": "thumbs_down",
+            "feedback_type": "bad_retrieval",
             "kb_id": "kb",
             "query": "问题",
             "citations": [{"chunk_id": "c1", "source": "a.pdf"}],
@@ -327,9 +327,8 @@ async def test_correction_can_create_pending_knowledge(
     assert knowledge["related_page_end"] == 2
     assert knowledge["related_chunk_text_hash"] == "hash-c1"
     assert knowledge["related_anchor_text"] == "差旅报销"
-    retrieval_feedback = _read_jsonl(root / "retrieval_feedback.jsonl")
-    assert len(retrieval_feedback) == 1
-    assert retrieval_feedback[0]["weight_delta"] == -0.55
+    # 普通纠错只供审核和派生知识，不代表检索证据有错。
+    assert _read_jsonl(root / "retrieval_feedback.jsonl") == []
     assert [event for event, _ in webhook_dispatcher.events] == [
         "knowledge.pending_created"
     ]
@@ -538,6 +537,7 @@ async def test_retrieval_feedback_can_disable_and_enable(tmp_path, monkeypatch):
                 json={
                     "trace_id": "t6",
                     "feedback": "thumbs_down",
+                    "feedback_type": "bad_retrieval",
                     "kb_id": "kb",
                     "query": "问题",
                     "citations": [{"chunk_id": "c1", "source": "a.pdf"}],

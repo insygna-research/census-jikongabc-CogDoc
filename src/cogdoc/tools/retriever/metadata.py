@@ -15,6 +15,14 @@ SAFE_RETRIEVAL_METADATA_KEYS = {
     "knowledge_term_count",
     "status_filter",
     "rewrite_query",
+    "query_fusion_score",
+    "query_hit_count",
+    "matched_queries",
+    "matched_channels",
+    "matched_requirement_ids",
+    "best_query_rank",
+    "original_query_hit",
+    "retrieval_round",
 }
 
 

@@ -1,5 +1,7 @@
 import json
 import sys
+from contextlib import contextmanager
+from types import SimpleNamespace
 
 import pytest
 import scripts.eval_retrieval as eval_retrieval
@@ -8,6 +10,7 @@ from cogdoc.tools.eval.retrieval_metrics import (
     audit_coverage,
     coverage_minimums,
     evaluate_query,
+    evaluate_requirement_coverage,
     evaluate_thresholds,
     hit_at_k,
     infer_retrieval_layer,
@@ -64,6 +67,78 @@ def test_evaluate_query_emits_no_answer_false_positive_metrics():
         "no_answer_false_positive@5": 1.0,
     }
     assert evaluate_query([], [], k_values=[5]) == {"no_answer_false_positive@5": 0.0}
+
+
+# 验证 chunk 级需求覆盖不会把同一 PDF 内的错误文本块算成成功。
+def test_requirement_coverage_uses_chunk_level_gold_and_full_coverage():
+    retrieved = [
+        {"chunk_id": "a-wrong", "source": "a.pdf"},
+        {"chunk_id": "b-right", "source": "b.pdf"},
+        {"chunk_id": "a-right", "source": "a.pdf"},
+    ]
+    requirements = [
+        {"requirement_id": "r1", "acceptable_chunk_ids": ["a-right"]},
+        {"requirement_id": "r2", "acceptable_chunk_ids": ["b-right"]},
+    ]
+
+    metrics = evaluate_requirement_coverage(retrieved, requirements, [2, 3])
+
+    assert metrics["requirement_recall@2"] == 0.5
+    assert metrics["all_requirements_covered@2"] == 0.0
+    assert metrics["requirement_recall@3"] == 1.0
+    assert metrics["all_requirements_covered@3"] == 1.0
+    assert metrics["chunk_precision@2"] == 0.5
+    assert 0.0 < metrics["evidence_ndcg@3"] < 1.0
+
+
+# 验证来源级迁移标注和 hard-negative 拒绝率可同时评估。
+def test_requirement_coverage_supports_source_gold_and_hard_negatives():
+    retrieved = [
+        {"chunk_id": "distractor", "source": "noise.pdf"},
+        {"chunk_id": "right", "source": "policy.pdf"},
+    ]
+    requirements = [{"requirement_id": "r1", "acceptable_sources": ["policy.pdf"]}]
+
+    metrics = evaluate_requirement_coverage(
+        retrieved,
+        requirements,
+        [1, 2],
+        hard_negative_chunk_ids=["distractor"],
+    )
+
+    assert metrics["requirement_recall@1"] == 0.0
+    assert metrics["requirement_recall@2"] == 1.0
+    assert metrics["hard_negative_rejection@1"] == 0.0
+    assert metrics["hard_negative_rejection@2"] == 0.0
+
+
+# 验证同一需求的多个可接受块不会重复抬高 nDCG。
+def test_requirement_ndcg_deduplicates_multiple_hits_for_one_requirement():
+    metrics = evaluate_requirement_coverage(
+        [{"chunk_id": "a"}, {"chunk_id": "b"}],
+        [{"requirement_id": "r1", "acceptable_chunk_ids": ["a", "b"]}],
+        [2],
+    )
+
+    assert metrics["evidence_ndcg@2"] == pytest.approx(1.0)
+    assert metrics["evidence_ndcg@2"] <= 1.0
+
+
+# 验证一块同时覆盖两个需求时，实际增益和理想增益使用相同多需求口径。
+def test_requirement_ndcg_handles_one_chunk_covering_two_requirements():
+    metrics = evaluate_requirement_coverage(
+        [{"chunk_id": "shared"}],
+        [
+            {"requirement_id": "r1", "acceptable_chunk_ids": ["shared"]},
+            {"requirement_id": "r2", "acceptable_chunk_ids": ["shared"]},
+        ],
+        [1, 2],
+    )
+
+    assert metrics["evidence_ndcg@1"] == pytest.approx(1.0)
+    assert metrics["evidence_ndcg@2"] == pytest.approx(1.0)
+    assert metrics["evidence_ndcg@1"] <= 1.0
+    assert metrics["evidence_ndcg@2"] <= 1.0
 
 
 # 验证聚合逻辑对每个指标取均值。
@@ -270,6 +345,8 @@ def test_retrieval_run_eval_reports_layers_and_latency(monkeypatch):
         *,
         verify_evidence=False,
         is_local_verifier=False,
+        rewritten_queries=None,
+        evidence_requirements=None,
     ):
         supported = query != "none"
         return {
@@ -315,3 +392,269 @@ def test_retrieval_run_eval_reports_layers_and_latency(monkeypatch):
     assert report["aggregate"]["latency_p95_ms"] >= 0.0
     assert report["by_layer"]["single-source"]["count"] == 1
     assert report["by_layer"]["no-answer"]["count"] == 1
+
+
+# 验证关闭模型证据校验时，多需求首轮失败仍按线上语义执行一次定向补检索。
+def test_retrieve_result_adaptive_second_round_without_model_verifier(monkeypatch):
+    from cogdoc import state_runtime
+    from cogdoc.graph.subgraphs import qa
+    from cogdoc.tools.retriever import confidence
+
+    settings = SimpleNamespace(
+        qa_adaptive_retrieval_enabled=True,
+        qa_adaptive_retrieval_max_retries=1,
+        qa_adaptive_retrieval_top_k_multiplier=2.0,
+        qa_adaptive_retrieval_max_top_k=12,
+        qa_retrieval_max_queries=7,
+        qa_rerank_top_n=1,
+        hybrid_rrf_k=60,
+    )
+    requirements = [
+        {
+            "requirement_id": "r1",
+            "retrieval_query": "A 主检索",
+            "recovery_query": "A 恢复检索",
+        },
+        {
+            "requirement_id": "r2",
+            "retrieval_query": "B 主检索",
+            "recovery_query": "B 恢复检索",
+        },
+    ]
+
+    class Engine:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query, top_k):
+            self.calls.append((query, top_k))
+            if query == "B 恢复检索":
+                return [
+                    {
+                        "text": f"B 的直接证据 {index}",
+                        "meta": {
+                            "chunk_id": f"c{index}",
+                            "source": f"b{index}.pdf",
+                        },
+                    }
+                    for index in range(3)
+                ]
+            return []
+
+    class Knowledge:
+        def search(self, kb_id, query, top_k):
+            return []
+
+    class Feedback:
+        def boosts_for_query(self, kb_id, query):
+            return {}
+
+    engine = Engine()
+
+    @contextmanager
+    def lease(_kb_id):
+        yield
+
+    monkeypatch.setattr(eval_retrieval, "get_settings", lambda: settings)
+    monkeypatch.setattr(qa.RetrieverFactory, "get_engine", lambda _kb_id: engine)
+    monkeypatch.setattr("cogdoc.service.kb_readers.kb_read_lease", lease)
+    monkeypatch.setattr(
+        state_runtime,
+        "default_state_runtime",
+        lambda: SimpleNamespace(
+            derived_knowledge_retriever=Knowledge(),
+            retrieval_feedback_store=Feedback(),
+        ),
+    )
+    decision_candidate_counts = []
+
+    def assess_support(docs, _settings):
+        decision_candidate_counts.append(len(docs))
+        return SimpleNamespace(
+            supported=bool(docs),
+            score=1.0 if docs else 0.0,
+            reason="supported" if docs else "no_candidates",
+            signals={},
+        )
+
+    monkeypatch.setattr(confidence, "assess_retrieval_support", assess_support)
+
+    result = eval_retrieval.retrieve_result(
+        "比较 A 和 B",
+        "kb",
+        3,
+        False,
+        verify_evidence=False,
+        evidence_requirements=requirements,
+    )
+
+    assert result["supported"] is True
+    assert result["retrieval_retry_count"] == 1
+    assert result["adaptive_retrieval_rescued"] is True
+    assert result["sources"] == ["b0.pdf", "b1.pdf", "b2.pdf"]
+    assert decision_candidate_counts == [0, 1]
+    assert result["retrieval_query_count"] == 6
+    assert result["retrieval_ranking_count"] == 1
+    assert result["retrieval_channel_counts"] == {
+        "hybrid": 3,
+        "derived_knowledge": 0,
+    }
+    assert ("B 主检索", 3) in engine.calls
+    assert ("B 恢复检索", 6) in engine.calls
+
+
+# 验证补检索只召回新缺口时，上一轮已验证证据仍进入终轮闭集和评测排名。
+def test_retrieve_result_carries_verified_docs_into_second_round(monkeypatch):
+    from cogdoc import state_runtime
+    from cogdoc.agents import evidence_verifier
+    from cogdoc.graph.subgraphs import qa
+    from cogdoc.tools.retriever import confidence
+
+    settings = SimpleNamespace(
+        qa_adaptive_retrieval_enabled=True,
+        qa_adaptive_retrieval_max_retries=1,
+        qa_adaptive_retrieval_top_k_multiplier=2.0,
+        qa_adaptive_retrieval_max_top_k=12,
+        qa_retrieval_max_queries=7,
+        qa_rerank_top_n=2,
+        qa_evidence_verify_max_docs=4,
+        hybrid_rrf_k=60,
+    )
+    requirements = [
+        {
+            "requirement_id": "r1",
+            "retrieval_query": "A 主检索",
+            "recovery_query": "A 恢复检索",
+        },
+        {
+            "requirement_id": "r2",
+            "retrieval_query": "B 主检索",
+            "recovery_query": "B 恢复检索",
+        },
+    ]
+
+    class Engine:
+        def search(self, query, top_k):
+            if query == "A 主检索" and top_k == 3:
+                return [
+                    {
+                        "text": "A 的直接证据",
+                        "meta": {"chunk_id": "c1", "source": "a.pdf"},
+                    }
+                ]
+            if query == "B 恢复检索" and top_k == 6:
+                return [
+                    {
+                        "text": "B 的直接证据",
+                        "meta": {"chunk_id": "c2", "source": "b.pdf"},
+                    }
+                ]
+            return []
+
+    class Knowledge:
+        def search(self, kb_id, query, top_k):
+            return []
+
+    class Feedback:
+        def boosts_for_query(self, kb_id, query):
+            return {}
+
+    @contextmanager
+    def lease(_kb_id):
+        yield
+
+    verifier_calls = []
+
+    def verify(state):
+        chunk_ids = [doc["meta"]["chunk_id"] for doc in state["verification_docs"]]
+        verifier_calls.append(chunk_ids)
+        if "c2" not in chunk_ids:
+            return {
+                "evidence_verification_required": True,
+                "evidence_supported": False,
+                "evidence_verification_reason": "缺少 B",
+                "evidence_verified_chunk_ids": ["c1"],
+                "evidence_requirement_assessments": [
+                    {
+                        "requirement_id": "r1",
+                        "verdict": "supported",
+                        "evidence_chunk_ids": ["c1"],
+                        "reason": "A 已覆盖",
+                    },
+                    {
+                        "requirement_id": "r2",
+                        "verdict": "missing",
+                        "evidence_chunk_ids": [],
+                        "reason": "缺少 B",
+                    },
+                ],
+                "missing_evidence_requirement_ids": ["r2"],
+                "retrieval_abstained": True,
+                "retrieval_abstain_reason": "evidence_not_supported",
+            }
+        return {
+            "evidence_verification_required": True,
+            "evidence_supported": True,
+            "evidence_verification_reason": "全部覆盖",
+            "evidence_verified_chunk_ids": ["c1", "c2"],
+            "evidence_requirement_assessments": [
+                {
+                    "requirement_id": requirement_id,
+                    "verdict": "supported",
+                    "evidence_chunk_ids": [chunk_id],
+                    "reason": "已覆盖",
+                }
+                for requirement_id, chunk_id in (("r1", "c1"), ("r2", "c2"))
+            ],
+            "missing_evidence_requirement_ids": [],
+            "retrieval_abstained": False,
+            "retrieval_abstain_reason": "evidence_supported",
+        }
+
+    monkeypatch.setattr(eval_retrieval, "get_settings", lambda: settings)
+    monkeypatch.setattr(qa.RetrieverFactory, "get_engine", lambda _kb_id: Engine())
+    monkeypatch.setattr("cogdoc.service.kb_readers.kb_read_lease", lease)
+    monkeypatch.setattr(
+        state_runtime,
+        "default_state_runtime",
+        lambda: SimpleNamespace(
+            derived_knowledge_retriever=Knowledge(),
+            retrieval_feedback_store=Feedback(),
+        ),
+    )
+    monkeypatch.setattr(
+        confidence,
+        "assess_retrieval_support",
+        lambda docs, _settings: SimpleNamespace(
+            supported=bool(docs),
+            score=1.0 if docs else 0.0,
+            reason="supported" if docs else "no_candidates",
+            signals={},
+        ),
+    )
+    monkeypatch.setattr(
+        evidence_verifier, "should_verify_evidence", lambda state, settings: True
+    )
+    monkeypatch.setattr(
+        evidence_verifier,
+        "select_verification_docs",
+        lambda docs, max_docs, requirement_ids=None: list(docs),
+    )
+    monkeypatch.setattr(evidence_verifier.EvidenceVerifierAgent, "verify", verify)
+
+    result = eval_retrieval.retrieve_result(
+        "比较 A 和 B",
+        "kb",
+        3,
+        False,
+        verify_evidence=True,
+        evidence_requirements=requirements,
+    )
+
+    assert verifier_calls == [["c1"], ["c1", "c2"]]
+    assert result["supported"] is True
+    assert result["retrieval_retry_count"] == 1
+    assert result["retrieval_carryover_count"] == 1
+    assert result["sources"] == ["a.pdf", "b.pdf"]
+    assert [item["chunk_id"] for item in result["items"]] == ["c1", "c2"]
+    assert result["evidence_verified_chunk_ids"] == ["c1", "c2"]

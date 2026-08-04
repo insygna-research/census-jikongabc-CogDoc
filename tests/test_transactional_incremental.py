@@ -211,6 +211,7 @@ def test_transactional_empty_marks_previous_bindings_stale(tmp_path, monkeypatch
     state = _make_state(tmp_path, kb_id)
     _seed_active(state, _docs(("a.pdf", "H1")), [_reg_doc("a.pdf", "H1", 0, 0)])
     calls = []
+    knowledge_store = object()
 
     monkeypatch.setattr(ingest_service.RetrieverFactory, "invalidate", lambda kb: None)
     monkeypatch.setattr(ingest_service, "_remove_manifest", lambda kb: None)
@@ -220,17 +221,23 @@ def test_transactional_empty_marks_previous_bindings_stale(tmp_path, monkeypatch
     monkeypatch.setattr(
         ingest_service,
         "_mark_stale_derived_knowledge_quiet",
-        lambda kb, bindings, state=None: calls.append((kb, bindings)),
+        lambda kb, bindings, state=None, knowledge_store=None: calls.append(
+            (kb, bindings, knowledge_store)
+        ),
     )
 
-    result = _transactional_empty(kb_id, state)
+    result = _transactional_empty(
+        kb_id,
+        state,
+        knowledge_store=knowledge_store,
+    )
 
     assert result.document_count == 0
-    assert calls == [(kb_id, [("a.pdf", "H1")])]
+    assert calls == [(kb_id, [("a.pdf", "H1")], knowledge_store)]
 
 
 # 验证文档更新后可按文本哈希自动重绑。
-def test_changed_document_rebinds_knowledge_by_chunk_hash(tmp_path, monkeypatch):
+def test_changed_document_rebinds_knowledge_by_chunk_hash(tmp_path):
     store = DerivedKnowledgeStore(path=str(tmp_path / "knowledge.jsonl"))
     text = "差旅报销需要七天内提交。"
     row, _ = store.create(
@@ -245,9 +252,12 @@ def test_changed_document_rebinds_knowledge_by_chunk_hash(tmp_path, monkeypatch)
     )
     chunk = _reg_doc("a.pdf", "H2", 0, 0, page_start=2, page_end=3)
     chunk["text"] = text
-    monkeypatch.setattr(ingest_service, "DerivedKnowledgeStore", lambda: store)
-
-    reviewed = _review_changed_derived_knowledge("kb", [("a.pdf", "H1")], [chunk])
+    reviewed = _review_changed_derived_knowledge(
+        "kb",
+        [("a.pdf", "H1")],
+        [chunk],
+        knowledge_store=store,
+    )
     updated = store.list(kb_id="kb")[0]
 
     assert reviewed == {"stale": 0, "rebound": 1}
@@ -259,7 +269,7 @@ def test_changed_document_rebinds_knowledge_by_chunk_hash(tmp_path, monkeypatch)
 
 
 # 验证文档更新后可按锚点自动重绑。
-def test_changed_document_rebinds_knowledge_by_anchor(tmp_path, monkeypatch):
+def test_changed_document_rebinds_knowledge_by_anchor(tmp_path):
     store = DerivedKnowledgeStore(path=str(tmp_path / "knowledge.jsonl"))
     row, _ = store.create(
         {
@@ -273,9 +283,12 @@ def test_changed_document_rebinds_knowledge_by_anchor(tmp_path, monkeypatch):
     )
     chunk = _reg_doc("a.pdf", "H2", 1, 1, page_start=4, page_end=4)
     chunk["text"] = "入职审批需要直属经理确认后提交。"
-    monkeypatch.setattr(ingest_service, "DerivedKnowledgeStore", lambda: store)
-
-    reviewed = _review_changed_derived_knowledge("kb", [("a.pdf", "H1")], [chunk])
+    reviewed = _review_changed_derived_knowledge(
+        "kb",
+        [("a.pdf", "H1")],
+        [chunk],
+        knowledge_store=store,
+    )
     updated = store.list(kb_id="kb")[0]
 
     assert reviewed == {"stale": 0, "rebound": 1}
@@ -286,7 +299,7 @@ def test_changed_document_rebinds_knowledge_by_anchor(tmp_path, monkeypatch):
 
 
 # 验证无法定位新版分块时仍标记过期。
-def test_changed_document_marks_knowledge_stale_without_rebind(tmp_path, monkeypatch):
+def test_changed_document_marks_knowledge_stale_without_rebind(tmp_path):
     store = DerivedKnowledgeStore(path=str(tmp_path / "knowledge.jsonl"))
     row, _ = store.create(
         {
@@ -300,9 +313,12 @@ def test_changed_document_marks_knowledge_stale_without_rebind(tmp_path, monkeyp
     )
     chunk = _reg_doc("a.pdf", "H2", 0, 0)
     chunk["text"] = "新版内容没有旧锚点。"
-    monkeypatch.setattr(ingest_service, "DerivedKnowledgeStore", lambda: store)
-
-    reviewed = _review_changed_derived_knowledge("kb", [("a.pdf", "H1")], [chunk])
+    reviewed = _review_changed_derived_knowledge(
+        "kb",
+        [("a.pdf", "H1")],
+        [chunk],
+        knowledge_store=store,
+    )
     updated = store.list(kb_id="kb")[0]
 
     assert reviewed == {"stale": 1, "rebound": 0}

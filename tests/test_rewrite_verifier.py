@@ -184,3 +184,92 @@ def test_verify_rewrites_handles_empty_embedding_result(monkeypatch):
 
     assert result["rewritten_queries"] == []
     assert "missing" in result["steps_trace"][0]["output_summary"]
+
+
+# 需求先对原问题守卫，再将漂移的主/恢复查询回退到需求问题。
+def test_requirement_guard_drops_drift_and_falls_back_queries(monkeypatch):
+    captured = {"calls": 0}
+
+    def embed(texts):
+        captured["calls"] += 1
+        assert len(texts) == 8
+        return [
+            [1.0, 0.0],  # original baseline
+            [1.0, 0.0],  # legacy rewrite
+            [1.0, 0.0],  # r1 question
+            [0.0, 1.0],  # r1 primary drift
+            [1.0, 0.0],  # r1 recovery
+            [0.0, 1.0],  # r2 question drift
+            [0.0, 1.0],
+            [0.0, 1.0],
+        ]
+
+    monkeypatch.setattr(rewrite_verifier.Embedder, "embed_documents", embed)
+    result = RewriteVerifyAgent.verify_rewrites(
+        {
+            "query": "A 的日期和 B 的费用",
+            "rewritten_queries": ["A 日期 B 费用"],
+            "evidence_requirements": [
+                {
+                    "requirement_id": "r1",
+                    "question": "A 的日期是什么？",
+                    "retrieval_query": "无关新实体",
+                    "recovery_query": "A 什么时候",
+                },
+                {
+                    "requirement_id": "r2",
+                    "question": "完全无关的问题",
+                    "retrieval_query": "无关",
+                    "recovery_query": "无关",
+                },
+            ],
+        }
+    )
+
+    assert captured["calls"] == 1
+    assert result["evidence_requirements"] == [
+        {
+            "requirement_id": "r1",
+            "question": "A 的日期是什么？",
+            "retrieval_query": "A 的日期是什么？",
+            "recovery_query": "A 什么时候",
+        }
+    ]
+    trace = result["steps_trace"][0]["output_summary"]
+    assert '"requirement_id": "r2"' in trace
+    assert '"field": "retrieval_query"' in trace
+
+
+# 规划需求全部漂移时，仍保留一个原问题需求保证检索可继续。
+def test_requirement_guard_uses_original_fallback_when_all_drift(monkeypatch):
+    monkeypatch.setattr(
+        rewrite_verifier.Embedder,
+        "embed_documents",
+        lambda texts: [[1.0, 0.0]] + [[0.0, 1.0]] * (len(texts) - 1),
+    )
+    result = RewriteVerifyAgent.verify_rewrites(
+        {
+            "query": "原问题",
+            "rewritten_queries": [],
+            "evidence_requirements": [
+                {
+                    "requirement_id": "r1",
+                    "question": "无关新实体",
+                    "retrieval_query": "无关",
+                    "recovery_query": "无关",
+                }
+            ],
+        }
+    )
+
+    assert result["evidence_requirements"] == [
+        {
+            "requirement_id": "r1",
+            "question": "原问题",
+            "retrieval_query": "原问题",
+            "recovery_query": "原问题",
+        }
+    ]
+    assert (
+        '"original_fallback_used": true' in result["steps_trace"][0]["output_summary"]
+    )

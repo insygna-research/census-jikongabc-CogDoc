@@ -1,6 +1,6 @@
 import math
 from statistics import mean
-from typing import Dict, List, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Sequence
 
 RECOMMENDED_RETRIEVAL_LAYERS = (
     "single-source",
@@ -70,6 +70,178 @@ def evaluate_query(
     for k in k_values:
         metrics[f"recall@{k}"] = recall_at_k(retrieved_sources, expected_sources, k)
         metrics[f"hit@{k}"] = hit_at_k(retrieved_sources, expected_sources, k)
+    return metrics
+
+
+def _identity(item: Mapping[str, Any]) -> tuple[str, str]:
+    return str(item.get("chunk_id") or ""), str(item.get("source") or "")
+
+
+def _requirement_is_covered(
+    top_items: Sequence[Mapping[str, Any]], requirement: Mapping[str, Any]
+) -> bool:
+    expected_chunks = {
+        str(value)
+        for value in requirement.get("acceptable_chunk_ids", [])
+        if str(value)
+    }
+    expected_sources = {
+        str(value) for value in requirement.get("acceptable_sources", []) if str(value)
+    }
+    for item in top_items:
+        chunk_id, source = _identity(item)
+        if (chunk_id and chunk_id in expected_chunks) or (
+            source and source in expected_sources
+        ):
+            return True
+    return False
+
+
+def _requirement_mask(
+    item: Mapping[str, Any], requirements: Sequence[Mapping[str, Any]]
+) -> int:
+    chunk_id, source = _identity(item)
+    mask = 0
+    for index, requirement in enumerate(requirements):
+        expected_chunks = {
+            str(value)
+            for value in requirement.get("acceptable_chunk_ids", [])
+            if str(value)
+        }
+        expected_sources = {
+            str(value)
+            for value in requirement.get("acceptable_sources", [])
+            if str(value)
+        }
+        if (chunk_id and chunk_id in expected_chunks) or (
+            source and source in expected_sources
+        ):
+            mask |= 1 << index
+    return mask
+
+
+def _ideal_requirement_masks(
+    requirements: Sequence[Mapping[str, Any]], actual_masks: Sequence[int]
+) -> List[int]:
+    # 同一 gold identity 可同时覆盖多个需求；按 identity 合并 mask，才能正确表示
+    # “一个 chunk 覆盖两个需求”的理想排序。
+    by_identity: Dict[tuple[str, str], int] = {}
+    for index, requirement in enumerate(requirements):
+        bit = 1 << index
+        for chunk_id in requirement.get("acceptable_chunk_ids", []):
+            identity = ("chunk", str(chunk_id))
+            if identity[1]:
+                by_identity[identity] = by_identity.get(identity, 0) | bit
+        for source in requirement.get("acceptable_sources", []):
+            identity = ("source", str(source))
+            if identity[1]:
+                by_identity[identity] = by_identity.get(identity, 0) | bit
+
+    # 实际 item 可能同时用 chunk 和 source 命中不同需求；将其可实现 mask 纳入
+    # 理想候选，保证 IDCG 不会低于当前排序本身可实现的增益。
+    return sorted({mask for mask in (*by_identity.values(), *actual_masks) if mask})
+
+
+def _requirement_ndcg(
+    actual_masks: Sequence[int], ideal_masks: Sequence[int], k: int
+) -> float:
+    covered = 0
+    dcg = 0.0
+    for rank, mask in enumerate(actual_masks[:k], start=1):
+        new_requirements = (mask & ~covered).bit_count()
+        dcg += new_requirements / math.log2(rank + 1)
+        covered |= mask
+
+    if not ideal_masks or k <= 0:
+        return 0.0
+
+    # requirement 数通常不超过 3；按覆盖 mask 做精确 DP，得到允许一块覆盖多个
+    # 需求时真正可实现的 IDCG，而不是假定每个 rank 只能贡献 1。
+    best_by_covered = {0: 0.0}
+    for rank in range(1, k + 1):
+        discount = math.log2(rank + 1)
+        next_best = dict(best_by_covered)
+        for current_mask, score in best_by_covered.items():
+            for candidate_mask in ideal_masks:
+                combined = current_mask | candidate_mask
+                gain = (candidate_mask & ~current_mask).bit_count() / discount
+                next_best[combined] = max(next_best.get(combined, 0.0), score + gain)
+        best_by_covered = next_best
+    ideal = max(best_by_covered.values(), default=0.0)
+    return min(dcg / ideal, 1.0) if ideal else 0.0
+
+
+# 以原子证据需求和 chunk 级标注评估真实证据覆盖，避免“命中正确 PDF 的错误块”被算作成功。
+def evaluate_requirement_coverage(
+    retrieved_items: Sequence[Mapping[str, Any]],
+    gold_requirements: Sequence[Mapping[str, Any]],
+    k_values: Sequence[int],
+    *,
+    hard_negative_chunk_ids: Sequence[str] = (),
+) -> Dict[str, float]:
+    requirements = [
+        requirement
+        for requirement in gold_requirements
+        if isinstance(requirement, Mapping)
+        and (
+            requirement.get("acceptable_chunk_ids")
+            or requirement.get("acceptable_sources")
+        )
+    ]
+    if not requirements:
+        return {}
+
+    expected_chunk_ids = {
+        str(chunk_id)
+        for requirement in requirements
+        for chunk_id in requirement.get("acceptable_chunk_ids", [])
+        if str(chunk_id)
+    }
+    expected_sources = {
+        str(source)
+        for requirement in requirements
+        for source in requirement.get("acceptable_sources", [])
+        if str(source)
+    }
+    hard_negatives = {str(value) for value in hard_negative_chunk_ids if str(value)}
+    metrics: Dict[str, float] = {}
+    for k in k_values:
+        top_items = list(retrieved_items[:k])
+        covered = sum(
+            _requirement_is_covered(top_items, requirement)
+            for requirement in requirements
+        )
+        metrics[f"requirement_recall@{k}"] = covered / len(requirements)
+        metrics[f"all_requirements_covered@{k}"] = float(covered == len(requirements))
+
+        relevances = []
+        for item in top_items:
+            chunk_id, source = _identity(item)
+            relevances.append(
+                float(
+                    bool(
+                        (chunk_id and chunk_id in expected_chunk_ids)
+                        or (source and source in expected_sources)
+                    )
+                )
+            )
+        actual_masks = [
+            _requirement_mask(item, requirements) for item in retrieved_items
+        ]
+        metrics[f"evidence_ndcg@{k}"] = _requirement_ndcg(
+            actual_masks,
+            _ideal_requirement_masks(requirements, actual_masks),
+            k,
+        )
+        if expected_chunk_ids:
+            metrics[f"chunk_precision@{k}"] = (
+                sum(relevances) / len(top_items) if top_items else 0.0
+            )
+        if hard_negatives:
+            hard_negative_hit = any(
+                _identity(item)[0] in hard_negatives for item in top_items
+            )
+            metrics[f"hard_negative_rejection@{k}"] = float(not hard_negative_hit)
     return metrics
 
 

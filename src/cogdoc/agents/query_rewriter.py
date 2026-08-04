@@ -1,5 +1,9 @@
-from typing import List
+import unicodedata
+from collections.abc import Mapping
+from typing import Any, List
+
 from pydantic import BaseModel, Field
+
 from cogdoc.agents.conversation_memory import (
     CHAT_HISTORY_MESSAGE_LIMIT,
     format_recent_chat_history,
@@ -10,15 +14,21 @@ from cogdoc.agents.structured_output import invoke_structured
 
 QUERY_REWRITER_SYSTEM_PROMPT = (
     "你是一位 RAG 检索优化专家，负责将用户原始提问改写为更适合在向量数据库（Vector Search）和关键词引擎（BM25）中精确召回的检索语句。\n\n"
-    "【任务定义】\n输出 1 至 3 条改写查询，每条聚焦原问题的某一具体技术侧面或命名实体，覆盖不同检索角度。\n\n"
+    "【任务定义】\n输出 1 至 3 条改写查询，并把问题规划为最多 3 个可独立判定证据是否充分的原子需求。\n\n"
     "【改写规则】\n1. 去除语气词和问句结构（如'请问'、'是什么'、'为什么'、'如何'），保留核心名词、动词和专有名词。\n"
     "2. 每条改写语句之间须有明显差异，不得重复或近义替换。\n3. 不得引入原问题中不存在的概念或实体。\n"
     "4. 若当前提问包含代词、'上面/这个/那点'等省略表达，先结合近期对话补全真实检索对象。\n"
-    "5. 若原问题已是简洁的关键词形式，可将其作为第一条直接输出，再补充 1-2 条不同角度的改写。\n\n"
-    "【输出格式】\n只输出 JSON 对象，不要 Markdown，不要解释。JSON 示例：\n"
-    '{"queries":["大模型 医疗影像诊断 应用方法","医学图像分析 深度学习 临床部署"]}\n\n'
+    "5. 若原问题已是简洁的关键词形式，可将其作为第一条直接输出，再补充 1-2 条不同角度的改写。\n"
+    "6. 每个证据需求只能询问一个可验证事实；并列的对象、条件或指标应拆成不同需求。\n"
+    "7. question 保留完整语义；retrieval_query 用于主检索；recovery_query 用不同表达做补充检索。\n"
+    "8. 证据需求和查询都不得引入当前提问与近期对话中没有的实体。不要输出 requirement_id，系统会分配。\n\n"
+    "【输出格式】\n只输出 JSON 对象，不要 Markdown，不要解释。\n"
     "【示例】\n原问题：大模型在医疗影像诊断中是怎么应用的？\n改写输出：\n"
-    "  1. 大模型 医疗影像诊断 应用方法\n  2. 医学图像分析 深度学习 临床部署\n  3. 医疗AI 影像识别 模型推理"
+    '{"queries":["大模型 医疗影像诊断 应用方法",'
+    '"医疗影像诊断 大模型 使用方式","大模型 影像诊断 实施方法"],'
+    '"evidence_requirements":[{"question":"大模型如何用于医疗影像诊断？",'
+    '"retrieval_query":"大模型 医疗影像诊断 应用方法",'
+    '"recovery_query":"医疗影像诊断 大模型 使用方式"}]}'
 )
 QUERY_REWRITER_USER_PROMPT_TEMPLATE = (
     "【近期对话】\n{history_text}\n\n【当前提问】\n{query}\n\n"
@@ -26,20 +36,67 @@ QUERY_REWRITER_USER_PROMPT_TEMPLATE = (
 )
 
 
-# 改写结果限定在少量高价值检索查询内。
+# 模型只负责起草，requirement_id 由服务端确定性分配。
+class EvidenceRequirementDraft(BaseModel):
+    question: str = Field(description="可独立判断证据是否充分的原子问题")
+    retrieval_query: str = Field(description="主检索查询")
+    recovery_query: str = Field(description="召回不足时的补充检索查询")
+
+
+# 改写结果限定在少量高价值检索查询和原子证据需求内。
 class QueryRewriteOutput(BaseModel):
     queries: List[str] = Field(
         min_length=1,
         max_length=3,
         description="针对用户原始问题，裂变、改写出的 1-3 个最适合在本地知识库中检索的差异化查询语句。",
     )
+    evidence_requirements: list[EvidenceRequirementDraft] = Field(
+        default_factory=list,
+        max_length=3,
+        description="最多 3 个不含服务端标识的原子证据需求草案",
+    )
+
+
+def _fallback_requirement(query: str) -> dict[str, str]:
+    return {
+        "requirement_id": "r1",
+        "question": query,
+        "retrieval_query": query,
+        "recovery_query": query,
+    }
+
+
+def _normalize_requirements(
+    drafts: list[EvidenceRequirementDraft], query: str
+) -> list[dict[str, str]]:
+    requirements: list[dict[str, str]] = []
+    seen_questions: set[str] = set()
+    for draft in drafts[:3]:
+        question = " ".join(draft.question.split())
+        if not question:
+            continue
+        question_key = unicodedata.normalize("NFKC", question).casefold()
+        if question_key in seen_questions:
+            continue
+        seen_questions.add(question_key)
+        retrieval_query = " ".join(draft.retrieval_query.split()) or question
+        recovery_query = " ".join(draft.recovery_query.split()) or question
+        requirements.append(
+            {
+                "requirement_id": f"r{len(requirements) + 1}",
+                "question": question,
+                "retrieval_query": retrieval_query,
+                "recovery_query": recovery_query,
+            }
+        )
+    return requirements or [_fallback_requirement(query)]
 
 
 # 定义 QueryRewriteAgent 数据结构。
 class QueryRewriteAgent:
     # 完成 重写问题问题 处理。
     @staticmethod
-    def rewrite_query(state: dict) -> dict:
+    def rewrite_query(state: Mapping[str, Any]) -> dict[str, Any]:
         # 改写失败时回退到原始 query，保证检索链路可继续。
         query = state.get("query", "")
         is_local = state.get("is_local", False)
@@ -48,7 +105,7 @@ class QueryRewriteAgent:
         )
 
         if not query:
-            return {"rewritten_queries": []}
+            return {"rewritten_queries": [], "evidence_requirements": []}
 
         try:
             llm = Generator._get_client_for_node("query_rewriter", is_local=is_local)
@@ -65,6 +122,14 @@ class QueryRewriteAgent:
                     },
                 ],
             )
-            return {"rewritten_queries": output.queries}
+            return {
+                "rewritten_queries": output.queries,
+                "evidence_requirements": _normalize_requirements(
+                    output.evidence_requirements, query
+                ),
+            }
         except Exception:
-            return {"rewritten_queries": [query]}
+            return {
+                "rewritten_queries": [query],
+                "evidence_requirements": [_fallback_requirement(query)],
+            }

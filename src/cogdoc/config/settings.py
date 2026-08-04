@@ -149,9 +149,7 @@ class Settings(BaseSettings):
     llm_judge_model_name: str = Field(
         default="", validation_alias="LLM_JUDGE_MODEL_NAME"
     )
-    llm_judge_enabled: bool = Field(
-        default=True, validation_alias="LLM_JUDGE_ENABLED"
-    )
+    llm_judge_enabled: bool = Field(default=True, validation_alias="LLM_JUDGE_ENABLED")
     llm_judge_temperature: float = Field(
         default=0.0, ge=0.0, le=1.0, validation_alias="LLM_JUDGE_TEMPERATURE"
     )
@@ -168,6 +166,12 @@ class Settings(BaseSettings):
     )
     llm_evidence_verifier_model_name: str = Field(
         default="", validation_alias="LLM_EVIDENCE_VERIFIER_MODEL_NAME"
+    )
+    llm_claim_verifier_model_name: str = Field(
+        default="", validation_alias="LLM_CLAIM_VERIFIER_MODEL_NAME"
+    )
+    llm_claim_repairer_model_name: str = Field(
+        default="", validation_alias="LLM_CLAIM_REPAIRER_MODEL_NAME"
     )
     llm_qa_generator_model_name: str = Field(
         default="", validation_alias="LLM_QA_GENERATOR_MODEL_NAME"
@@ -192,6 +196,12 @@ class Settings(BaseSettings):
     )
     llm_evidence_verifier_backend: str = Field(
         default="default", validation_alias="LLM_EVIDENCE_VERIFIER_BACKEND"
+    )
+    llm_claim_verifier_backend: str = Field(
+        default="default", validation_alias="LLM_CLAIM_VERIFIER_BACKEND"
+    )
+    llm_claim_repairer_backend: str = Field(
+        default="default", validation_alias="LLM_CLAIM_REPAIRER_BACKEND"
     )
     llm_qa_generator_backend: str = Field(
         default="default", validation_alias="LLM_QA_GENERATOR_BACKEND"
@@ -232,6 +242,12 @@ class Settings(BaseSettings):
     )
     ollama_evidence_verifier_model_name: str = Field(
         default="", validation_alias="OLLAMA_EVIDENCE_VERIFIER_MODEL_NAME"
+    )
+    ollama_claim_verifier_model_name: str = Field(
+        default="", validation_alias="OLLAMA_CLAIM_VERIFIER_MODEL_NAME"
+    )
+    ollama_claim_repairer_model_name: str = Field(
+        default="", validation_alias="OLLAMA_CLAIM_REPAIRER_MODEL_NAME"
     )
     ollama_qa_generator_model_name: str = Field(
         default="", validation_alias="OLLAMA_QA_GENERATOR_MODEL_NAME"
@@ -289,6 +305,69 @@ class Settings(BaseSettings):
         le=1.0,
         validation_alias="QA_EVIDENCE_VERIFY_BORDERLINE_MIN_SCORE",
     )
+    # 多部分问题按证据需求组织候选；首次覆盖不足时只允许一次有界深召回。
+    qa_retrieval_max_queries: int = Field(
+        default=7,
+        ge=1,
+        le=16,
+        validation_alias="QA_RETRIEVAL_MAX_QUERIES",
+    )
+    qa_adaptive_retrieval_enabled: bool = Field(
+        default=True,
+        validation_alias="QA_ADAPTIVE_RETRIEVAL_ENABLED",
+    )
+    qa_adaptive_retrieval_max_retries: int = Field(
+        default=1,
+        ge=0,
+        le=2,
+        validation_alias="QA_ADAPTIVE_RETRIEVAL_MAX_RETRIES",
+    )
+    qa_adaptive_retrieval_top_k_multiplier: float = Field(
+        default=2.0,
+        ge=1.0,
+        le=4.0,
+        validation_alias="QA_ADAPTIVE_RETRIEVAL_TOP_K_MULTIPLIER",
+    )
+    qa_adaptive_retrieval_max_top_k: int = Field(
+        default=36,
+        ge=1,
+        le=100,
+        validation_alias="QA_ADAPTIVE_RETRIEVAL_MAX_TOP_K",
+    )
+    # 生成后逐声明证据校验；初次发布默认关闭，便于先建立人工基线。
+    claim_verification_enabled: bool = Field(
+        default=False, validation_alias="CLAIM_VERIFICATION_ENABLED"
+    )
+    claim_verification_max_claims: int = Field(
+        default=40,
+        ge=1,
+        le=200,
+        validation_alias="CLAIM_VERIFICATION_MAX_CLAIMS",
+    )
+    claim_verification_max_claims_per_batch: int = Field(
+        default=8,
+        ge=1,
+        le=40,
+        validation_alias="CLAIM_VERIFICATION_MAX_CLAIMS_PER_BATCH",
+    )
+    claim_verification_max_docs_per_batch: int = Field(
+        default=12,
+        ge=1,
+        le=40,
+        validation_alias="CLAIM_VERIFICATION_MAX_DOCS_PER_BATCH",
+    )
+    claim_verification_max_chars_per_doc: int = Field(
+        default=1600,
+        ge=200,
+        le=10000,
+        validation_alias="CLAIM_VERIFICATION_MAX_CHARS_PER_DOC",
+    )
+    claim_verification_max_repair_attempts: int = Field(
+        default=1,
+        ge=0,
+        le=3,
+        validation_alias="CLAIM_VERIFICATION_MAX_REPAIR_ATTEMPTS",
+    )
     hybrid_rrf_k: int = Field(default=60, validation_alias="HYBRID_RRF_K")
     cloud_section_max_workers: int = Field(
         default=6, validation_alias="CLOUD_SECTION_MAX_WORKERS"
@@ -319,7 +398,9 @@ class Settings(BaseSettings):
         default=False, validation_alias="COGDOC_OCR_ENABLED"
     )
     cogdoc_ocr_provider: str = Field(
-        default="tesseract", pattern="^tesseract$", validation_alias="COGDOC_OCR_PROVIDER"
+        default="tesseract",
+        pattern="^tesseract$",
+        validation_alias="COGDOC_OCR_PROVIDER",
     )
     cogdoc_ocr_binary: str = Field(
         default="tesseract", min_length=1, validation_alias="COGDOC_OCR_BINARY"

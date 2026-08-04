@@ -61,6 +61,148 @@ def test_quality_eval_reports_router_citation_and_faithfulness():
     assert report["by_layer"]["hard"]["count"] == 1
 
 
+# 验证声明指标按 claim 数微平均，且不信任运行时附带的汇总值。
+def test_quality_eval_reports_micro_averaged_claim_audit_diagnostics():
+    report = run_eval(
+        [
+            {
+                "case_type": "faithfulness",
+                "layer": "hard",
+                "is_faithful": False,
+                "claim_audit": {
+                    "status": "failed",
+                    "claims": [
+                        {
+                            "claim_id": "c1",
+                            "verdict": "supported",
+                            "cited_chunk_ids": ["chunk-1"],
+                        },
+                        {
+                            "claim_id": "c2",
+                            "verdict": "supported",
+                            "cited_chunk_ids": ["chunk-2"],
+                        },
+                        {
+                            "claim_id": "c3",
+                            "verdict": "unsupported",
+                            "cited_chunk_ids": [],
+                        },
+                    ],
+                    # 故意写错，评测必须从 claims 重算。
+                    "counts": {"claim_count": 99, "supported": 99},
+                    "metrics": {"claim_support_rate": 1.0},
+                    "repair": {"attempted": True, "succeeded": False},
+                    "verifier": {"duration_ms": 100},
+                },
+            },
+            {
+                "case_type": "faithfulness",
+                "layer": "hard",
+                "is_faithful": True,
+                "trace": {
+                    "output": {
+                        "claim_audit": {
+                            "status": "repaired",
+                            "claims": [
+                                {
+                                    "claim_id": "c1",
+                                    "verdict": "supported",
+                                    "cited_chunk_ids": ["chunk-4"],
+                                }
+                            ],
+                            "repair": {"attempted": True, "succeeded": True},
+                            "verifier": {"duration_ms": 300},
+                        }
+                    }
+                },
+            },
+            {
+                "case_type": "faithfulness",
+                "layer": "hard",
+                "is_faithful": True,
+            },
+        ]
+    )
+
+    aggregate = report["aggregate"]
+    assert aggregate["claim_audit_observable_rate"] == 2 / 3
+    assert aggregate["claim_support_rate"] == 3 / 4
+    assert aggregate["citation_coverage"] == 3 / 4
+    assert aggregate["unsupported_claim_rate"] == 1 / 4
+    assert aggregate["insufficient_claim_rate"] == 0.0
+    assert aggregate["repair_success_rate"] == 1 / 2
+    assert aggregate["claim_verifier_mean_duration_ms"] == 200.0
+    assert "claim_support_rate" not in report["baseline_gated_metrics"]
+    assert report["by_layer"]["hard"]["claim_support_rate"] == 3 / 4
+
+
+# 验证可观测但没有事实声明时比率保持为空。
+def test_quality_eval_keeps_empty_claim_rates_unset():
+    report = run_eval(
+        [
+            {
+                "case_type": "faithfulness",
+                "layer": "easy",
+                "claim_audit": {
+                    "status": "passed",
+                    "claims": [
+                        {
+                            "claim_id": "c1",
+                            "verdict": "not_factual",
+                            "cited_chunk_ids": [],
+                        }
+                    ],
+                },
+            }
+        ]
+    )
+
+    assert report["aggregate"]["claim_audit_observable_rate"] == 1.0
+    assert report["aggregate"]["claim_support_rate"] is None
+    assert report["aggregate"]["citation_coverage"] is None
+    assert report["aggregate"]["repair_success_rate"] is None
+    assert report["aggregate"]["faithfulness_manual_support_rate"] is None
+
+
+# 验证禁用门禁写入的 not_run 占位不冒充可观测审计。
+def test_quality_eval_treats_not_run_claim_audit_as_unobservable():
+    report = run_eval(
+        [
+            {
+                "case_type": "faithfulness",
+                "layer": "easy",
+                "claim_audit": {"status": "not_run", "claims": []},
+            }
+        ]
+    )
+
+    assert report["aggregate"]["claim_audit_observable_rate"] == 0.0
+    assert report["rows"][0]["metrics"]["claim_audit_observable"] == 0.0
+
+
+# 验证未知状态与非有限耗时不污染质量汇总。
+def test_quality_eval_rejects_unknown_status_and_nonfinite_duration():
+    report = run_eval(
+        [
+            {
+                "case_type": "faithfulness",
+                "claim_audit": {"status": "mystery", "claims": []},
+            },
+            {
+                "case_type": "faithfulness",
+                "claim_audit": {
+                    "status": "passed",
+                    "claims": [],
+                    "verifier": {"duration_ms": float("nan")},
+                },
+            },
+        ]
+    )
+
+    assert report["aggregate"]["claim_audit_observable_rate"] == 0.0
+    assert report["aggregate"]["claim_verifier_mean_duration_ms"] is None
+
+
 # 验证质量评测能识别非法引用。
 def test_quality_eval_catches_invalid_citation():
     report = run_eval(

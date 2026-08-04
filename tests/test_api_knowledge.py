@@ -587,6 +587,7 @@ async def test_review_queue_summary_counts_pending_work(tmp_path, monkeypatch):
             "kb_id": "kb",
             "query": "问题",
             "feedback": "thumbs_down",
+            "feedback_type": "bad_retrieval",
             "citations": [{"chunk_id": "c1", "source": "a.pdf"}],
         },
     )
@@ -695,6 +696,7 @@ async def test_review_metrics_endpoints_report_feedback_loop(tmp_path, monkeypat
             "kb_id": "kb",
             "query": "问题",
             "feedback": "thumbs_down",
+            "feedback_type": "bad_retrieval",
             "citations": [{"chunk_id": "c1", "source": "a.pdf"}],
         },
     )

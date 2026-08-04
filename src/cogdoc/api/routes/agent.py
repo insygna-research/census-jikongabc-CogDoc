@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from functools import partial
 from typing import Any
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
@@ -125,6 +126,11 @@ async def _task_endpoint(
     request.app.state.metrics.chat_results.labels(
         result.task_type, str(result.is_valid).lower()
     ).inc()
+    request.app.state.metrics.observe_claim_audit(
+        result.task_type,
+        result.raw_output.get("claim_audit"),
+    )
+    request.app.state.metrics.observe_retrieval(result.task_type, result.raw_output)
     task_response = chat_result_to_response(
         result, doc_id=body.doc_id, session_id=body.session_id
     )
@@ -133,32 +139,37 @@ async def _task_endpoint(
 
 
 # 运行检索。
-def _run_retrieve(body: RetrieveRequest) -> list:
+def _run_retrieve(body: RetrieveRequest, *, state_runtime=None) -> list:
     from cogdoc.graph.subgraphs.qa import RetrieverFactory
     from cogdoc.service.kb_readers import kb_read_lease
+    from cogdoc.service.retrieval_pipeline import (
+        build_retrieval_queries,
+        retrieve_candidate_pool,
+    )
+    from cogdoc.state_runtime import default_state_runtime
     from cogdoc.tools.reranker import BGEReranker, skipped_cpu_rerank_docs
-    from cogdoc.tools.retriever.derived_knowledge import DerivedKnowledgeRetriever
+
+    runtime = state_runtime or default_state_runtime()
+    settings = get_settings()
 
     with kb_read_lease(body.doc_id):
         engine = RetrieverFactory.get_engine(body.doc_id)
-        docs = engine.search(body.query, top_k=body.top_k)
-        seen_chunk_ids = {
-            str(doc.get("meta", {}).get("chunk_id") or "")
-            for doc in docs
-            if isinstance(doc, Mapping)
-        }
-        for doc in DerivedKnowledgeRetriever().search(
-            body.doc_id, body.query, top_k=body.top_k
-        ):
-            chunk_id = str(doc.get("meta", {}).get("chunk_id") or "")
-            if chunk_id and chunk_id not in seen_chunk_ids:
-                seen_chunk_ids.add(chunk_id)
-                docs.append(doc)
+        retrieval_result = retrieve_candidate_pool(
+            engine,
+            runtime.derived_knowledge_retriever,
+            runtime.retrieval_feedback_store,
+            kb_id=body.doc_id,
+            original_query=body.query,
+            queries=build_retrieval_queries(body.query, max_queries=1),
+            top_k=body.top_k,
+            rrf_k=float(settings.hybrid_rrf_k),
+        )
+        docs = retrieval_result.docs
         if not body.rerank or not docs:
             return docs
         target_device = BGEReranker.default_device()
         top_n = body.rerank_top_n or body.top_k
-        if target_device == "cpu" and not get_settings().qa_rerank_on_cpu:
+        if target_device == "cpu" and not settings.qa_rerank_on_cpu:
             return skipped_cpu_rerank_docs(docs, top_n)
         return BGEReranker.rerank(body.query, docs, top_n=top_n, device=target_device)
 
@@ -226,7 +237,10 @@ async def retrieve(body: RetrieveRequest, request: Request):
     kb_error = _ensure_kb_exists(request, body.doc_id)
     if kb_error is not None:
         return kb_error
-    retrieve_runner = getattr(request.app.state, "retrieve_runner", _run_retrieve)
+    retrieve_runner = getattr(request.app.state, "retrieve_runner", None) or partial(
+        _run_retrieve,
+        state_runtime=request.app.state.state_runtime,
+    )
     docs = await run_sync(
         request.app.state.offload_executor,
         retrieve_runner,

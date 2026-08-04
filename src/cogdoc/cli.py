@@ -15,12 +15,8 @@ except ImportError:
 
 from cogdoc.agents.conversation_memory import extract_final_answer
 from cogdoc.agents.feedback_understanding import analyze_feedback
-from cogdoc.api.derived_knowledge_store import DerivedKnowledgeStore
-from cogdoc.api.feedback_analysis_store import FeedbackAnalysisStore
-from cogdoc.api.feedback_store import FeedbackStore
 from cogdoc.api.ingest import KBExistsError, KnowledgeBaseRegistry
 from cogdoc.api.persistence import SqliteSessionStore
-from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
 from cogdoc.api.time_utils import now_iso
 from cogdoc.command_modes import parse_forced_mode
 from cogdoc.config.settings import get_settings
@@ -45,6 +41,7 @@ from cogdoc.service.process_lock import (
     release_single_instance_lock,
     strict_single_process,
 )
+from cogdoc.state_runtime import StateRuntime
 from cogdoc.tools.embedder import Embedder
 from cogdoc.tools.manifest import load_index_manifest
 from cogdoc.tools.reranker import BGEReranker
@@ -216,17 +213,19 @@ HELP_TEXT = """\
 # 对话历史落 SqliteSessionStore，重启不丢。
 class Console:
     # 对话历史落 SqliteSessionStore，重启不丢。
-    def __init__(self):
+    def __init__(self, state_runtime: StateRuntime | None = None):
         settings = get_settings()
+        self._owns_state_runtime = state_runtime is None
+        self.state_runtime = state_runtime or StateRuntime.from_settings(settings)
         self.registry = KnowledgeBaseRegistry()
         self.sessions = SqliteSessionStore(
             settings.state_db_path, memory_policy=settings.memory_policy
         )
-        self.knowledge_store = DerivedKnowledgeStore()
+        self.knowledge_store = self.state_runtime.knowledge_store
         self.knowledge_index = DerivedKnowledgeIndex(self.knowledge_store)
-        self.feedback_store = FeedbackStore()
-        self.feedback_analysis_store = FeedbackAnalysisStore()
-        self.retrieval_feedback_store = RetrievalFeedbackStore()
+        self.feedback_store = self.state_runtime.feedback_store
+        self.feedback_analysis_store = self.state_runtime.feedback_analysis_store
+        self.retrieval_feedback_store = self.state_runtime.retrieval_feedback_store
         # 用绝对路径，提示与列表里一眼看清 PDF 该放哪。
         self.inbox_dir = os.path.abspath(settings.cogdoc_doc_dir)
         self.active_kb: str | None = None
@@ -234,6 +233,10 @@ class Console:
         self.is_local = True
         self._completion_matches: list[str] = []
         os.makedirs(self.inbox_dir, exist_ok=True)
+
+    def close(self) -> None:
+        if self._owns_state_runtime:
+            self.state_runtime.close()
 
     # 工具。
 
@@ -284,7 +287,11 @@ class Console:
         # 重建后索引已变，需重新预热新 bm25。
         kb = self.active_kb
         try:
-            result = build_kb_index_transactional(kb, self.registry.source_dir(kb))
+            result = build_kb_index_transactional(
+                kb,
+                self.registry.source_dir(kb),
+                knowledge_store=self.knowledge_store,
+            )
         except Exception as e:
             print(f"❌ 索引重建失败: {e}")
             return
@@ -311,9 +318,26 @@ class Console:
         with kb_write_lock(kb_id):
             delete_kb_index_transactional(kb_id)
             mark_kb_deleted(kb_id)
-            self.registry.delete(kb_id)
+            try:
+                for store in (
+                    self.knowledge_store,
+                    self.feedback_store,
+                    self.feedback_analysis_store,
+                    self.retrieval_feedback_store,
+                ):
+                    clear_kb = getattr(store, "clear_kb", None)
+                    if callable(clear_kb):
+                        clear_kb(kb_id)
+            except Exception as exc:
+                raise KBCleanupError(
+                    f"KB 派生/反馈状态删除失败: {kb_id}"
+                ) from exc
             # 连带清掉该库的会话历史，否则同名新库复用 doc_id 会捡到旧对话。
-            self.sessions.clear_kb(kb_id)
+            try:
+                self.sessions.clear_kb(kb_id)
+            except Exception as exc:
+                raise KBCleanupError(f"KB 会话状态删除失败: {kb_id}") from exc
+            self.registry.delete(kb_id)
 
     # 完成 cmd知识库 处理。
     def cmd_kb(self, sub: str, name: str) -> None:
@@ -1614,6 +1638,7 @@ class Console:
                 chat_history=chat_history,
                 forced_task=forced_task,
                 session_id=sid,
+                state_runtime=self.state_runtime,
             ):
                 if event.type == "error":
                     print(f"\n⚠️ 执行中断: {event.payload.get('message', '')}")
@@ -1908,6 +1933,7 @@ def main():
         print(f"⚠️ 预热阶段失败，稍后提问时仍会尝试按需加载: {e}")
 
     console = Console()
+    atexit.register(console.close)
     _setup_completion(console)
 
     print(BANNER)
@@ -1944,7 +1970,10 @@ def main():
         except Exception as e:
             print(f"⚠️ [控制台内部异常捕获]: {e}")
 
-    _release_runtime_lock(lock_fh)
+    try:
+        console.close()
+    finally:
+        _release_runtime_lock(lock_fh)
 
 
 if __name__ == "__main__":

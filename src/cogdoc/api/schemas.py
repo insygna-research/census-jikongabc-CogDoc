@@ -1,3 +1,4 @@
+import math
 from collections.abc import Mapping
 from enum import Enum
 from typing import Any, Literal
@@ -111,6 +112,16 @@ class Evidence(ApiModel):
     retrieval: dict[str, Any] = Field(default_factory=dict)
 
 
+# 公开审计摘要不含声明全文和证据正文，完整明细仅留在 trace。
+class ClaimAuditSummary(ApiModel):
+    status: str = "not_run"
+    reason_code: str = ""
+    counts: dict[str, int] = Field(default_factory=dict)
+    metrics: dict[str, float | None] = Field(default_factory=dict)
+    repair: dict[str, Any] = Field(default_factory=dict)
+    duration_ms: float | None = None
+
+
 # 对话接口结构化响应。
 class ChatResponse(ApiModel):
     schema_version: Literal["v1"] = API_SCHEMA_VERSION
@@ -124,6 +135,7 @@ class ChatResponse(ApiModel):
     evidence: list[Evidence] = Field(default_factory=list)
     critique: str = ""
     is_valid: bool
+    claim_audit: ClaimAuditSummary | None = None
 
 
 # 独立任务接口请求体，摘要和对比任务由路由层固定。
@@ -600,6 +612,7 @@ class TraceSummary(ApiModel):
     error_count: int = 0
     evidence_ref_count: int = 0
     node_names: list[str] = Field(default_factory=list)
+    claim_audit: ClaimAuditSummary | None = None
 
 
 # 跟踪文件响应体。
@@ -655,7 +668,7 @@ def _int_or_none(value: Any) -> int | None:
         return None
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -664,9 +677,15 @@ def _float_or_none(value: Any) -> float | None:
     if value is None:
         return None
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
         return None
+    return number if math.isfinite(number) else None
+
+
+def _nonnegative_int(value: Any) -> int:
+    parsed = _int_or_none(value)
+    return max(parsed, 0) if parsed is not None else 0
 
 
 # 规范化任务类型。
@@ -711,6 +730,53 @@ def _evidence_from_mapping(item: Any) -> Evidence:
     )
 
 
+def _claim_audit_summary_from_mapping(item: Any) -> ClaimAuditSummary | None:
+    data = _as_mapping(item)
+    if not data:
+        return None
+    verifier = _as_mapping(data.get("verifier"))
+    raw_counts = _as_mapping(data.get("counts"))
+    raw_metrics = _as_mapping(data.get("metrics"))
+    raw_repair = _as_mapping(data.get("repair"))
+    count_keys = (
+        "claim_count",
+        "supported",
+        "unsupported",
+        "insufficient",
+        "cited",
+        "skipped_statements",
+    )
+    metric_keys = (
+        "claim_support_rate",
+        "citation_coverage",
+        "unsupported_claim_rate",
+    )
+    return ClaimAuditSummary(
+        status=str(data.get("status") or "not_run"),
+        reason_code=str(data.get("reason_code") or ""),
+        counts={
+            key: _nonnegative_int(raw_counts.get(key, 0))
+            for key in count_keys
+            if key in raw_counts
+        },
+        metrics={
+            key: (
+                _float_or_none(raw_metrics.get(key))
+                if raw_metrics.get(key) is not None
+                else None
+            )
+            for key in metric_keys
+            if key in raw_metrics
+        },
+        repair={
+            "attempted": bool(raw_repair.get("attempted", False)),
+            "attempt_count": _nonnegative_int(raw_repair.get("attempt_count", 0)),
+            "succeeded": bool(raw_repair.get("succeeded", False)),
+        },
+        duration_ms=_float_or_none(data.get("duration_ms", verifier.get("duration_ms"))),
+    )
+
+
 # 把对话结果转换成响应。
 def chat_result_to_response(
     result: Any,
@@ -719,6 +785,7 @@ def chat_result_to_response(
     session_id: str | None = None,
 ) -> ChatResponse:
     # 防御式取值，且不暴露原始输出、步骤和证据全文。
+    raw_output = _as_mapping(getattr(result, "raw_output", None))
     return ChatResponse(
         request_id=str(getattr(result, "request_id", "") or ""),
         trace_id=str(getattr(result, "trace_id", "") or ""),
@@ -736,6 +803,7 @@ def chat_result_to_response(
         ],
         critique=str(getattr(result, "critique", "") or ""),
         is_valid=bool(getattr(result, "is_valid", False)),
+        claim_audit=_claim_audit_summary_from_mapping(raw_output.get("claim_audit")),
     )
 
 

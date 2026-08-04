@@ -28,6 +28,17 @@ def test_settings_defaults_match_current_runtime_contract():
     assert settings.qa_evidence_verify_max_docs == 3
     assert settings.qa_evidence_verify_max_chars_per_doc == 1600
     assert settings.qa_evidence_verify_borderline_min_score == 0.75
+    assert settings.qa_retrieval_max_queries == 7
+    assert settings.qa_adaptive_retrieval_enabled is True
+    assert settings.qa_adaptive_retrieval_max_retries == 1
+    assert settings.qa_adaptive_retrieval_top_k_multiplier == 2.0
+    assert settings.qa_adaptive_retrieval_max_top_k == 36
+    assert settings.claim_verification_enabled is False
+    assert settings.claim_verification_max_claims == 40
+    assert settings.claim_verification_max_claims_per_batch == 8
+    assert settings.claim_verification_max_docs_per_batch == 12
+    assert settings.claim_verification_max_chars_per_doc == 1600
+    assert settings.claim_verification_max_repair_attempts == 1
     assert settings.hybrid_rrf_k == 60
     assert settings.memory_retrieval_enabled is True
     assert settings.memory_semantic_enabled is True
@@ -70,6 +81,10 @@ def test_settings_reads_environment_overrides(monkeypatch):
     monkeypatch.setenv("COGDOC_OCR_ENABLED", "true")
     monkeypatch.setenv("COGDOC_OCR_DPI", "240")
     monkeypatch.setenv("COGDOC_OCR_REQUIRED", "true")
+    monkeypatch.setenv("CLAIM_VERIFICATION_ENABLED", "true")
+    monkeypatch.setenv("CLAIM_VERIFICATION_MAX_CLAIMS", "24")
+    monkeypatch.setenv("QA_ADAPTIVE_RETRIEVAL_MAX_RETRIES", "2")
+    monkeypatch.setenv("QA_ADAPTIVE_RETRIEVAL_MAX_TOP_K", "24")
 
     settings = get_settings()
 
@@ -84,6 +99,10 @@ def test_settings_reads_environment_overrides(monkeypatch):
     assert settings.cogdoc_ocr_enabled is True
     assert settings.cogdoc_ocr_dpi == 240
     assert settings.cogdoc_ocr_required is True
+    assert settings.claim_verification_enabled is True
+    assert settings.claim_verification_max_claims == 24
+    assert settings.qa_adaptive_retrieval_max_retries == 2
+    assert settings.qa_adaptive_retrieval_max_top_k == 24
 
 
 # 验证节点可以独立选择后端和模型。
@@ -103,6 +122,31 @@ def test_settings_resolves_node_backend_and_model(monkeypatch):
     assert (
         settings.model_name_for_node("qa_generator", is_local=False)
         == settings.llm_model_name
+    )
+
+
+# 验证声明校验与修复可以各自选择独立后端和模型。
+def test_settings_resolves_claim_gate_node_backends(monkeypatch):
+    monkeypatch.setenv("LLM_CLAIM_VERIFIER_BACKEND", "local")
+    monkeypatch.setenv("OLLAMA_CLAIM_VERIFIER_MODEL_NAME", "claim-review:7b")
+    monkeypatch.setenv("LLM_CLAIM_REPAIRER_BACKEND", "cloud")
+    monkeypatch.setenv("LLM_CLAIM_REPAIRER_MODEL_NAME", "claim-repair")
+
+    settings = get_settings()
+
+    verifier_local = settings.is_local_for_node(
+        "claim_verifier", request_is_local=False
+    )
+    repairer_local = settings.is_local_for_node("claim_repairer", request_is_local=True)
+    assert verifier_local is True
+    assert (
+        settings.model_name_for_node("claim_verifier", is_local=verifier_local)
+        == "claim-review:7b"
+    )
+    assert repairer_local is False
+    assert (
+        settings.model_name_for_node("claim_repairer", is_local=repairer_local)
+        == "claim-repair"
     )
 
 
