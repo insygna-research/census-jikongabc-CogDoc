@@ -15,7 +15,12 @@ RUN cd rust_core && maturin build --release --out /wheels
 FROM python:3.13-slim AS runtime
 
 # libgomp1 是 torch / sentence-transformers 的 OpenMP 运行时依赖。
-RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+# OCR 默认关闭；启用时使用本地 Tesseract CLI，镜像预装英文和简体中文语言数据。
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgomp1 \
+        tesseract-ocr \
+        tesseract-ocr-eng \
+        tesseract-ocr-chi-sim \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -48,6 +48,68 @@ INDEX_BUILD_VERSION = (
 )
 
 
+# 新建不含页面文本或错误详情的 OCR 汇总。
+def _empty_ocr_summary() -> dict:
+    return {
+        "candidate_pages": 0,
+        "attempted_pages": 0,
+        "succeeded_pages": 0,
+        "degraded_pages": 0,
+        "failed_pages": 0,
+        "status_counts": {},
+    }
+
+
+# 从本次已解析页面生成 OCR 可观测性统计，不触发重复解析。
+def _summarize_ocr_pages(pages: list) -> dict:
+    summary = _empty_ocr_summary()
+    statuses = summary["status_counts"]
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        status = str(page.get("ocr_status") or "")
+        if not status:
+            continue
+        statuses[status] = statuses.get(status, 0) + 1
+        if status == "not_needed":
+            continue
+        summary["candidate_pages"] += 1
+        if status not in {"disabled", "limit"}:
+            summary["attempted_pages"] += 1
+        if status == "succeeded":
+            summary["succeeded_pages"] += 1
+        elif page.get("extraction_method") == "native":
+            summary["degraded_pages"] += 1
+        else:
+            summary["failed_pages"] += 1
+    return summary
+
+
+# 合并多个文档或构建分支的 OCR 汇总。
+def _merge_ocr_summary(target: dict, source: dict) -> None:
+    for key in (
+        "candidate_pages",
+        "attempted_pages",
+        "succeeded_pages",
+        "degraded_pages",
+        "failed_pages",
+    ):
+        target[key] += source[key]
+    statuses = target["status_counts"]
+    for status, count in source["status_counts"].items():
+        statuses[status] = statuses.get(status, 0) + count
+
+
+# 成功构建后记录安全汇总；日志失败不能影响已提交索引。
+def _log_ocr_summary(result) -> None:
+    try:
+        log_event(
+            "ingest", "ocr_summary", {}, kb_id=result.kb_id, **result.ocr_summary
+        )
+    except Exception:
+        pass
+
+
 # 写入索引构建版本。
 def stamp_index_build_version(manifest: dict) -> dict:
     # 写入当前构建版本，启动检查与入库共用同一门控。
@@ -69,6 +131,7 @@ class IngestResult:
     document_count: int
     chunk_count: int
     documents: list[IngestDocResult] = field(default_factory=list)
+    ocr_summary: dict = field(default_factory=_empty_ocr_summary)
 
 
 # 写后两路索引不一致（如向量清理静默失败、部分写）：标记入库失败而非误报成功。
@@ -434,12 +497,15 @@ def _parse_and_chunk(
     names: list[str],
     source_hash_by_name: dict[str, str],
     start_index: int = 0,
+    ocr_summary: dict | None = None,
 ) -> tuple[list, list[IngestDocResult]]:
     all_chunks = []
     next_chunk_index = start_index
     doc_results = []
     for pdf in names:
         pages = smart_parse(os.path.join(source_dir, pdf))
+        if ocr_summary is not None:
+            _merge_ocr_summary(ocr_summary, _summarize_ocr_pages(pages))
         chunks = chunk_paper(pages, source_sha256=source_hash_by_name[pdf])
         for chunk in chunks:
             # 展示编号仅用于界面，分块标识才是身份键。
@@ -461,8 +527,9 @@ def _verify_consistent(engine) -> None:
 def _full_rebuild(
     engine, kb_id, source_dir, pdf_files, manifest, source_hash_by_name
 ) -> IngestResult:
+    ocr_summary = _empty_ocr_summary()
     all_chunks, doc_results = _parse_and_chunk(
-        source_dir, pdf_files, source_hash_by_name
+        source_dir, pdf_files, source_hash_by_name, ocr_summary=ocr_summary
     )
     try:
         if all_chunks:
@@ -477,7 +544,7 @@ def _full_rebuild(
         raise
     save_index_manifest(manifest)
     _invalidate_engine_cache(kb_id)
-    return IngestResult(kb_id, len(pdf_files), len(all_chunks), doc_results)
+    return IngestResult(kb_id, len(pdf_files), len(all_chunks), doc_results, ocr_summary)
 
 
 # 应用增量构建。
@@ -485,11 +552,13 @@ def _incremental_apply(
     engine, kb_id, source_dir, pdf_files, manifest, plan, source_hash_by_name
 ) -> IngestResult:
     # 新块从现存最大编号续号：保证唯一、单调，且不重编未变文档的展示编号。
+    ocr_summary = _empty_ocr_summary()
     new_chunks, doc_results = _parse_and_chunk(
         source_dir,
         plan.to_parse,
         source_hash_by_name,
         start_index=engine.max_chunk_index() + 1,
+        ocr_summary=ocr_summary,
     )
     try:
         if plan.to_parse or plan.removed_sources:
@@ -502,14 +571,16 @@ def _incremental_apply(
     save_index_manifest(manifest)
     _invalidate_engine_cache(kb_id)
     # 分块数取索引现存总数，文档数取库内文档总数。
-    return IngestResult(kb_id, len(pdf_files), engine.count(), doc_results)
+    return IngestResult(kb_id, len(pdf_files), engine.count(), doc_results, ocr_summary)
 
 
 # 构建知识库索引。
 def build_kb_index(kb_id: str, source_dir: str) -> IngestResult:
     # 取知识库写锁串行化整个入库，避免文件变化与索引写入交错。
     with kb_write_lock(kb_id):
-        return _build_kb_index_locked(kb_id, source_dir)
+        result = _build_kb_index_locked(kb_id, source_dir)
+    _log_ocr_summary(result)
+    return result
 
 
 # 在锁内构建知识库索引。
@@ -684,7 +755,7 @@ def _plan_transactional_incremental(state: KBState, manifest: dict):
 
 # 增量填充暂存区。
 def _fill_staging_incremental(
-    kb_id, staging, prev_active, plan, gen_dir, source_hash_by_name
+    kb_id, staging, prev_active, plan, gen_dir, source_hash_by_name, ocr_summary
 ):
     # 复用上一代未变文档的分块和向量，只解析新增或改动文档。
     prev_collection_id = get_settings().kb_collection_id(kb_id, prev_active["id"])
@@ -732,8 +803,13 @@ def _fill_staging_incremental(
     start_index = (
         max((int(c["meta"]["chunk_index"]) for c in reused_chunks), default=-1) + 1
     )
+    branch_summary = _empty_ocr_summary()
     new_chunks, doc_results = _parse_and_chunk(
-        gen_dir, plan.to_parse, source_hash_by_name, start_index=start_index
+        gen_dir,
+        plan.to_parse,
+        source_hash_by_name,
+        start_index=start_index,
+        ocr_summary=branch_summary,
     )
     all_chunks = reused_chunks + new_chunks
     if reused_chunks:
@@ -741,19 +817,26 @@ def _fill_staging_incremental(
     if new_chunks:
         staging.vector_retriever.add_documents(new_chunks)
     staging.bm25_retriever.index(all_chunks)
+    _merge_ocr_summary(ocr_summary, branch_summary)
     return all_chunks, doc_results
 
 
 # 填充暂存区。
 def _populate_staging(
-    kb_id, state, gen_dir, pdf_files, manifest, source_hash_by_name, staging
+    kb_id, state, gen_dir, pdf_files, manifest, source_hash_by_name, staging, ocr_summary
 ):
     # 决定增量复用还是全量填充暂存区。
     plan, prev_active = _plan_transactional_incremental(state, manifest)
     if plan is not None:
         try:
             return _fill_staging_incremental(
-                kb_id, staging, prev_active, plan, gen_dir, source_hash_by_name
+                kb_id,
+                staging,
+                prev_active,
+                plan,
+                gen_dir,
+                source_hash_by_name,
+                ocr_summary,
             )
         except Exception as exc:
             # 复用失败时清空暂存区并回退全量重建。
@@ -766,7 +849,9 @@ def _populate_staging(
                 error_class=type(exc).__name__,
             )
             staging.clear()
-    all_chunks, doc_results = _parse_and_chunk(gen_dir, pdf_files, source_hash_by_name)
+    all_chunks, doc_results = _parse_and_chunk(
+        gen_dir, pdf_files, source_hash_by_name, ocr_summary=ocr_summary
+    )
     if all_chunks:
         staging.index(all_chunks)
     return all_chunks, doc_results
@@ -778,7 +863,9 @@ def build_kb_index_transactional(
 ) -> IngestResult:
     # 取知识库写锁串行化写操作，提交前回调失败会中止提交。
     with kb_write_lock(kb_id):
-        return _build_transactional_locked(kb_id, source_dir, on_commit)
+        result = _build_transactional_locked(kb_id, source_dir, on_commit)
+    _log_ocr_summary(result)
+    return result
 
 
 # 在锁内事务化构建。
@@ -805,12 +892,20 @@ def _build_transactional_locked(
 
     gen_id = state.begin_generation(Embedder.MODEL_NAME, INDEX_BUILD_VERSION)
     gen_dir = get_settings().kb_generation_dir(kb_id, gen_id)
+    ocr_summary = _empty_ocr_summary()
 
     try:
         _hardlink_snapshot(source_dir, gen_dir, pdf_files)
         staging = _build_staging_engine(kb_id, gen_id)
         all_chunks, doc_results = _populate_staging(
-            kb_id, state, gen_dir, pdf_files, manifest, source_hash_by_name, staging
+            kb_id,
+            state,
+            gen_dir,
+            pdf_files,
+            manifest,
+            source_hash_by_name,
+            staging,
+            ocr_summary,
         )
         if all_chunks:
             _verify_staging(staging, all_chunks)
@@ -854,7 +949,7 @@ def _build_transactional_locked(
         except Exception:
             pass
 
-    return IngestResult(kb_id, len(pdf_files), len(all_chunks), doc_results)
+    return IngestResult(kb_id, len(pdf_files), len(all_chunks), doc_results, ocr_summary)
 
 
 # 处理事务化空库。

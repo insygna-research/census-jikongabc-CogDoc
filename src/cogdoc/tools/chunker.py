@@ -264,6 +264,32 @@ def chunk_paper(
                 "page_end": p_end,
                 "origin": "vector",
             }
+            covered_pages = [
+                page
+                for page in parsed_pages
+                if p_start <= int(page["page"]) <= p_end
+            ]
+            extraction_methods = {
+                str(page.get("extraction_method", "native"))
+                for page in covered_pages
+            }
+            meta["extraction_method"] = (
+                next(iter(extraction_methods))
+                if len(extraction_methods) == 1
+                else "mixed"
+            )
+            ocr_providers = {
+                str(page.get("ocr_provider"))
+                for page in covered_pages
+                if page.get("ocr_provider")
+                and page.get("extraction_method") == "ocr"
+            }
+            if ocr_providers:
+                meta["ocr_provider"] = (
+                    next(iter(ocr_providers))
+                    if len(ocr_providers) == 1
+                    else "mixed"
+                )
             if context:
                 meta["context"] = context
 

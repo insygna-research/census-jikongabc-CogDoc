@@ -128,6 +128,54 @@ async def test_structured_readiness_rejects_service_before_startup(monkeypatch):
     assert payload["components"]["lifecycle"]["status"] == "not_ready"
 
 
+@pytest.mark.anyio
+async def test_required_ocr_dependency_blocks_readiness(monkeypatch):
+    import cogdoc.api.app as app_module
+    import cogdoc.api.routes.health as health_module
+
+    monkeypatch.setattr(app_module, "configure_logging", lambda: None)
+    monkeypatch.setattr(
+        health_module,
+        "_ocr_readiness_component",
+        lambda: {"status": "not_ready", "required": True},
+    )
+    app = create_app(session_store=SessionStore())
+
+    async with app.router.lifespan_context(app):
+        async with await _client(app) as client:
+            resp = await client.get("/health/ready")
+
+    assert resp.status_code == 503
+    assert resp.json()["components"]["ocr"] == {
+        "status": "not_ready",
+        "required": True,
+    }
+
+
+@pytest.mark.anyio
+async def test_optional_ocr_dependency_is_degraded_but_ready(monkeypatch):
+    import cogdoc.api.app as app_module
+    import cogdoc.api.routes.health as health_module
+
+    monkeypatch.setattr(app_module, "configure_logging", lambda: None)
+    monkeypatch.setattr(
+        health_module,
+        "_ocr_readiness_component",
+        lambda: {"status": "degraded", "required": False},
+    )
+    app = create_app(session_store=SessionStore())
+
+    async with app.router.lifespan_context(app):
+        async with await _client(app) as client:
+            resp = await client.get("/health/ready")
+
+    assert resp.status_code == 200
+    assert resp.json()["components"]["ocr"] == {
+        "status": "degraded",
+        "required": False,
+    }
+
+
 # 验证 unhandled error response maps shutdown to 503 场景。
 def test_unhandled_error_response_maps_shutdown_to_503():
     resp = _unhandled_error_response(

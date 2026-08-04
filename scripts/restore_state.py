@@ -208,7 +208,8 @@ def _extract_verified(archive_path: Path, payload: Path) -> tuple[dict, dict]:
 
             for directory in sorted(directories, key=lambda value: (value.count("/"), value)):
                 (payload / directory).mkdir(parents=True, exist_ok=True)
-            for name, expected in sorted(files.items()):
+            for name in sorted(archive_files):
+                expected = files.get(name)
                 source = archive.extractfile(members[name])
                 if source is None:
                     raise RestoreError("INTEGRITY_ERROR", f"无法读取归档文件: {name}")
@@ -223,9 +224,9 @@ def _extract_verified(archive_path: Path, payload: Path) -> tuple[dict, dict]:
                         size += len(block)
                 if size != members[name].size:
                     raise RestoreError("INTEGRITY_ERROR", f"文件校验失败: {name}")
-                if name in files and (
-                    size != files[name]["size_bytes"]
-                    or digest.hexdigest() != files[name]["sha256"]
+                if expected is not None and (
+                    size != expected["size_bytes"]
+                    or digest.hexdigest() != expected["sha256"]
                 ):
                     raise RestoreError("INTEGRITY_ERROR", f"文件校验失败: {name}")
             return manifest, {

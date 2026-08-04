@@ -46,6 +46,15 @@ def test_settings_defaults_match_current_runtime_contract():
     assert settings.cogdoc_log_to_console is False
     assert settings.cogdoc_trace_enabled is True
     assert settings.cogdoc_trace_dir == "logs/traces"
+    assert settings.cogdoc_ocr_enabled is False
+    assert settings.cogdoc_ocr_provider == "tesseract"
+    assert settings.cogdoc_ocr_binary == "tesseract"
+    assert settings.cogdoc_ocr_languages == "eng+chi_sim"
+    assert settings.cogdoc_ocr_dpi == 300
+    assert settings.cogdoc_ocr_min_native_chars == 40
+    assert settings.cogdoc_ocr_max_pages == 100
+    assert settings.cogdoc_ocr_page_timeout_seconds == 30.0
+    assert settings.cogdoc_ocr_required is False
 
 
 # 验证 settings reads environment overrides 场景。
@@ -58,6 +67,9 @@ def test_settings_reads_environment_overrides(monkeypatch):
     monkeypatch.setenv("COGDOC_MEMORY_RETRIEVAL_SHORT_LIMIT", "6")
     monkeypatch.setenv("COGDOC_MEMORY_RETRIEVAL_RECENT_PIN", "2")
     monkeypatch.setenv("COGDOC_MEMORY_SEMANTIC_WEIGHT", "2.5")
+    monkeypatch.setenv("COGDOC_OCR_ENABLED", "true")
+    monkeypatch.setenv("COGDOC_OCR_DPI", "240")
+    monkeypatch.setenv("COGDOC_OCR_REQUIRED", "true")
 
     settings = get_settings()
 
@@ -69,6 +81,9 @@ def test_settings_reads_environment_overrides(monkeypatch):
     assert settings.memory_retrieval_short_limit == 6
     assert settings.memory_retrieval_recent_pin == 2
     assert settings.memory_semantic_weight == 2.5
+    assert settings.cogdoc_ocr_enabled is True
+    assert settings.cogdoc_ocr_dpi == 240
+    assert settings.cogdoc_ocr_required is True
 
 
 # 验证节点可以独立选择后端和模型。

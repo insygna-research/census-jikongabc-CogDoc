@@ -100,3 +100,38 @@ def test_build_kb_index_indexes_when_chunks_present(tmp_path, monkeypatch):
     assert engine.cleared is False
     assert engine.indexed == chunks
     assert result.chunk_count == 1
+
+
+# 验证 OCR 汇总直接来自已解析页面。
+def test_build_kb_index_reports_ocr_summary(tmp_path, monkeypatch):
+    src = tmp_path / "sources"
+    src.mkdir()
+    (src / "a.pdf").write_bytes(b"%PDF-1.4")
+    engine = FakeEngine()
+    pages = [
+        {"ocr_status": "not_needed", "extraction_method": "native"},
+        {"ocr_status": "succeeded", "extraction_method": "ocr"},
+        {"ocr_status": "timeout", "extraction_method": "native"},
+        {"ocr_status": "disabled", "extraction_method": "none"},
+        {"ocr_status": "limit", "extraction_method": "native"},
+    ]
+    _patch_common(monkeypatch, engine, pages=pages, chunks=[])
+
+    result = ingest_service.build_kb_index("kb", str(src))
+
+    assert result.ocr_summary == {
+        "candidate_pages": 4,
+        "attempted_pages": 2,
+        "succeeded_pages": 1,
+        "degraded_pages": 2,
+        "failed_pages": 1,
+        "status_counts": {
+            "not_needed": 1,
+            "succeeded": 1,
+            "timeout": 1,
+            "disabled": 1,
+            "limit": 1,
+        },
+    }
+    assert "text" not in result.ocr_summary
+    assert "error" not in result.ocr_summary

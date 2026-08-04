@@ -6,7 +6,7 @@
 
 A local RAG knowledge-base console for individuals and teams, built on **LangGraph multi-agent orchestration** with a **deterministic Rust core (PyO3 + maturin)** underneath. It answers questions, summarizes a single document, compares multiple documents, and turns feedback into reviewable derived knowledge over your own PDF knowledge base — and every generated claim is pinned back to a `[source:Pn]` citation that is *checked, not trusted*. Use it from a **CLI console**, a **Streamlit web app** backed by FastAPI, or a standalone **Debug console** for trace inspection.
 
-> ⚠️ **Text-layer PDFs only — no OCR yet.** Parsing extracts the text layer; pages that look scanned/image-only are flagged (`is_ocr_fallback`) and skipped, not recognized. Use PDFs that contain a real text layer.
+> **Optional local OCR.** OCR is disabled by default. When enabled, pages without enough usable native text are rendered with PyMuPDF and recognized by a local Tesseract CLI; native-text pages keep the existing fast path.
 
 ## Feature Highlights
 
@@ -165,6 +165,37 @@ If `COGDOC_API_KEYS` is configured, `/v1` requests are authenticated and rate-li
 Full UI history remains separate from Agent memory. The default budgets are 12 short-term messages, 6,000 short-term characters, a 4,000-character mid-term summary, 64 stored long-term facts, and 8 long-term facts injected per request. Configure them with the `COGDOC_MEMORY_*` variables in `.env.example`.
 
 Memory recall is query-aware. CogDoc runs short-term recency, mixed-language lexical recall, long-term importance/recency, and optional BGE-M3 semantic recall as independent channels; weighted RRF merges their ranks before per-layer context packing. A configurable recent-message prefix is pinned for continuity. Short-term semantic recall is disabled by default because recency and lexical channels already cover the small working set, but it can be enabled independently. If embedding fails, recall degrades to the remaining channels without failing the chat request. All channel weights and limits are configurable through `COGDOC_MEMORY_*` variables.
+
+## Optional scanned-page OCR
+
+OCR is an opt-in ingestion fallback, not a replacement for native PDF extraction. CogDoc first reads every page's text layer. After whitespace normalization, a page with fewer than `COGDOC_OCR_MIN_NATIVE_CHARS` characters is an OCR candidate; pages above that threshold are never rendered for OCR. Candidate pages are rendered by the existing PyMuPDF dependency and passed to the local Tesseract CLI.
+
+Docker images already contain Tesseract plus the `eng` and `chi_sim` language packs. For a local Debian/Ubuntu installation:
+
+```bash
+sudo apt-get install tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim
+tesseract --list-langs
+```
+
+On other platforms, install the Tesseract executable and the language data required by `COGDOC_OCR_LANGUAGES`, then set `COGDOC_OCR_BINARY` to its executable path if it is not on `PATH`. No additional Python OCR package is required.
+
+```dotenv
+COGDOC_OCR_ENABLED=true
+COGDOC_OCR_PROVIDER=tesseract
+COGDOC_OCR_BINARY=tesseract
+COGDOC_OCR_LANGUAGES=eng+chi_sim
+COGDOC_OCR_DPI=300
+COGDOC_OCR_MIN_NATIVE_CHARS=40
+COGDOC_OCR_MAX_PAGES=100
+COGDOC_OCR_PAGE_TIMEOUT_SECONDS=30
+COGDOC_OCR_REQUIRED=false
+```
+
+`COGDOC_OCR_MAX_PAGES` bounds OCR candidate pages per document, and `COGDOC_OCR_PAGE_TIMEOUT_SECONDS` bounds each page-level Tesseract invocation. Raising DPI can improve small-print recognition but increases CPU and memory use. With `COGDOC_OCR_REQUIRED=false`, a missing binary, unavailable language pack, timeout, or non-zero OCR exit degrades that page to its native-text result and ingestion continues. With `COGDOC_OCR_REQUIRED=true`, the same condition fails ingestion so an incomplete scanned document cannot be accepted silently.
+
+Rendering and recognition run in the CogDoc process and a local Tesseract subprocess; no page image is sent to a hosted OCR service. OCR can still expose recognized text to the existing embedding and LLM pipeline, so cloud model backends retain their existing data boundary. Keep OCR disabled for untrusted PDFs unless the deployment can afford the extra CPU, memory, and subprocess work.
+
+`GET /health/ready` exposes OCR as a separate component. Its default state is `disabled`. When OCR is enabled but its binary is missing, optional OCR (`COGDOC_OCR_REQUIRED=false`) reports `degraded` while the service remains ready; required OCR (`COGDOC_OCR_REQUIRED=true`) makes the readiness probe return HTTP 503. Page-level recognition failures follow the ingestion behavior described above rather than changing readiness after the binary check succeeds.
 
 ## Tech Stack
 
@@ -466,7 +497,7 @@ Driven by `build_kb_index_transactional` whenever a KB's files change (`/add`, `
 
 1. **Scan** — `scan_pdf_manifest_native` (Rust) hashes every PDF with rayon-parallel, 1 MiB-buffered SHA-256 and returns `{doc_id, documents: [{name, size, sha256}]}`, sorted by filename.
 2. **Compare** — `manifests_match` reuses the index only if `doc_id`, `chunk_identity_version`, and every `{name, sha256}` match the saved manifest; any mismatch forces a rebuild.
-3. **Parse** — `smart_parse` (PyMuPDF) extracts page text, reflows two-column layouts by block center-x, and flags likely scanned pages (`is_ocr_fallback`). No OCR is performed; flagged pages contribute no text.
+3. **Parse** — `smart_parse` (PyMuPDF) extracts page text and reflows two-column layouts by block center-x. When optional OCR is enabled, low-text pages are rendered and recognized by local Tesseract within configured page-count and timeout budgets; otherwise they remain flagged as `is_ocr_fallback` and contribute only their native-text result.
 4. **Chunk** — `chunk_paper` keeps each chunk under 600 chars with 60-char overlap (30-char min), preferring paragraph, sentence/semicolon, newline, and whitespace boundaries before falling back to a fixed window for very long unbroken text. Each chunk stores up to 160 chars of surrounding context, maps back to its page span via `bisect`, and receives a stable `chunk_id`.
 5. **Index** — chunks land in Chroma (vector) and a persisted BM25 artifact that stores a compact chunk registry plus native `Bm25Index` bytes. Loading restores the native index from bytes instead of rebuilding it from a Python tokenized corpus. `save_index_manifest` persists the manifest. Tokenization uses `tokenize_mixed_text_native` / `tokenize_corpus_native` (`jieba-rs` for Chinese, Snowball stemming + stopword removal for English).
 
@@ -629,7 +660,7 @@ Backup/restore and index rebuild rules are covered in [PRODUCTION_zh-CN.md](docs
 
 ## Known Limitations
 
-- **No OCR.** Scanned or image-only PDFs are not supported — `smart_parse` only reads the text layer and flags such pages as `is_ocr_fallback` without extracting their text. Use PDFs with a real text layer.
+- **OCR is an opt-in Tesseract MVP.** It is disabled by default, supports locally installed language packs, and intentionally has no hosted provider. Recognition quality depends on scan quality, selected languages, and DPI.
 - Summary and Compare are fixed-schema MVPs; cloud mode runs independent section/dimension LLM cells concurrently with stable output order, while local Ollama mode stays serial to avoid memory pressure. The default section/dimension sets are fixed unless passed through graph state.
 - Local Compare intentionally supports only two documents, uses four core dimensions, and skips the extra conclusion generation step to reduce Ollama memory pressure.
 - Citation validation checks physical citation legality (`source` and `page`), not whether the surrounding sentence is semantically perfect, nor whether every sentence is cited.

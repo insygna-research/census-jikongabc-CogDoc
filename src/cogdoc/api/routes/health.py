@@ -4,6 +4,8 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 from cogdoc.api.metrics import CONTENT_TYPE_LATEST
+from cogdoc.config.settings import get_settings
+from cogdoc.tools.ocr import OcrConfig, probe_ocr_dependency
 from cogdoc.tools.rust_core_loader import REQUIRED_NATIVE_SYMBOLS, ensure_rust_core
 
 router = APIRouter(tags=["health"])
@@ -11,6 +13,19 @@ router = APIRouter(tags=["health"])
 
 def _component(status: str, *, required: bool = True) -> dict[str, Any]:
     return {"status": status, "required": required}
+
+
+def _ocr_readiness_component() -> dict[str, Any]:
+    config = OcrConfig.from_settings(get_settings())
+    dependency = probe_ocr_dependency(config)
+    if not config.enabled:
+        return _component("disabled", required=False)
+    if dependency.available:
+        return _component("ready", required=config.required)
+    return _component(
+        "not_ready" if config.required else "degraded",
+        required=config.required,
+    )
 
 
 def _readiness_snapshot(request: Request) -> tuple[bool, dict[str, Any]]:
@@ -60,6 +75,7 @@ def _readiness_snapshot(request: Request) -> tuple[bool, dict[str, Any]]:
     components["authentication"] = _component(
         "ready" if auth_enabled else "degraded", required=False
     )
+    components["ocr"] = _ocr_readiness_component()
 
     ready = all(
         item["status"] == "ready"

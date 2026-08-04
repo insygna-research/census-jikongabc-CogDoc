@@ -6,7 +6,7 @@
 
 一个面向个人 / 企业的本地 RAG 知识库控制台，上层是 **LangGraph 多 Agent 编排**，底层是**确定性 Rust 核心（PyO3 + maturin）**。它能在你自己的 PDF 知识库上做问答、总结单篇文档、对比多篇文档，也能把反馈沉淀为可审核的派生知识——而且每条生成结论都会绑定回 `[source:Pn]` 引用，并且这个引用是**经过校验的，而非默认可信**。你可以用**命令行控制台**、基于 FastAPI 服务的 **Streamlit 网页端**，也可以用独立 **Debug 控制台**查看 trace。
 
-> ⚠️ **目前仅支持带文字层的 PDF——暂未做 OCR。** 解析只抽取文本层；疑似扫描版/纯图片的页面会被标记（`is_ocr_fallback`）并跳过，不做识别。请使用包含真实文本的 PDF。
+> **可选本地 OCR。** OCR 默认关闭；开启后，原生文本不足的页面会由 PyMuPDF 渲染，并交给本机 Tesseract CLI 识别，带文字层的页面仍走现有快速路径。
 
 ## 功能特点
 
@@ -466,7 +466,7 @@ Python 层负责图编排、Prompt、模型客户端、索引、CLI 控制台、
 
 1. **扫描** — `scan_pdf_manifest_native`（Rust）用 rayon 并行、1 MiB 缓冲的 SHA-256 计算每个 PDF，返回 `{doc_id, documents: [{name, size, sha256}]}`，按文件名排序。
 2. **比对** — `manifests_match` 仅当 `doc_id`、`chunk_identity_version` 及每个 `{name, sha256}` 都与已存 manifest 一致时才复用索引；任一不匹配都强制重建。
-3. **解析** — `smart_parse`（PyMuPDF）抽取页文本，按文本块中心 x 坐标重排双栏布局，对疑似扫描页打 `is_ocr_fallback` 标记。不做 OCR；被标记的页不贡献任何文字。
+3. **解析** — `smart_parse`（PyMuPDF）抽取页文本，并按文本块中心 x 坐标重排双栏布局。开启可选 OCR 后，低文本页面会在页数与超时预算内渲染并交给本地 Tesseract 识别；未开启时仍标记为 `is_ocr_fallback`，且只保留原生文本结果。
 4. **切块** — `chunk_paper` 以 600 字符为硬上限、60 字符 overlap（最小 30）切过页文本流；边界优先按段落、句末标点/分号、换行/空白确定，超长无边界文本才退回固定窗口。每个 chunk 会保存前后最多 160 字符的定位上下文，通过 `bisect` 映射回页跨度，并赋予稳定的 `chunk_id`。
 5. **建索引** — chunk 写入 Chroma（向量）和 BM25 持久化 artifact；BM25 artifact 保存精简 chunk registry 与 native `Bm25Index` 字节，加载时直接从字节恢复 native 索引，不再从 Python 分词语料重建。`save_index_manifest` 落盘 manifest。分词走 `tokenize_mixed_text_native` / `tokenize_corpus_native`（中文 `jieba-rs`，英文 Snowball 词干化 + 停用词过滤）。
 
@@ -543,6 +543,37 @@ CogDoc/
 | `src/cogdoc/tools/` | PDF 解析、切块、manifest、embedding、rerank、Rust loader 和检索器 |
 | `rust_core/src/` | PyO3 原生内核：scanner、tokenizer、BM25、RRF、citation validator |
 | `scripts/`、`tests/`、`eval/`、`docs/` | 健康检查脚本、测试、离线评测集和项目文档 |
+
+## 扫描 PDF OCR（可选）
+
+OCR 是摄取阶段的可选降级路径，不会替代 PDF 原生文本提取。CogDoc 会先读取每页文本层；空白归一化后，字符数少于 `COGDOC_OCR_MIN_NATIVE_CHARS` 的页面才会成为 OCR 候选页，达到阈值的页面不会渲染。候选页由项目已有的 PyMuPDF 渲染，再交给本机 Tesseract CLI 识别。
+
+Docker 镜像已安装 Tesseract 以及 `eng`、`chi_sim` 语言包。本机使用 Debian/Ubuntu 时可执行：
+
+```bash
+sudo apt-get install tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim
+tesseract --list-langs
+```
+
+其他系统请安装 Tesseract 可执行文件和 `COGDOC_OCR_LANGUAGES` 所需语言数据；若命令不在 `PATH`，将 `COGDOC_OCR_BINARY` 设为可执行文件路径。不需要额外安装 Python OCR 包。
+
+```dotenv
+COGDOC_OCR_ENABLED=true
+COGDOC_OCR_PROVIDER=tesseract
+COGDOC_OCR_BINARY=tesseract
+COGDOC_OCR_LANGUAGES=eng+chi_sim
+COGDOC_OCR_DPI=300
+COGDOC_OCR_MIN_NATIVE_CHARS=40
+COGDOC_OCR_MAX_PAGES=100
+COGDOC_OCR_PAGE_TIMEOUT_SECONDS=30
+COGDOC_OCR_REQUIRED=false
+```
+
+`COGDOC_OCR_MAX_PAGES` 限制每份文档尝试 OCR 的候选页数，`COGDOC_OCR_PAGE_TIMEOUT_SECONDS` 限制每页 Tesseract 调用时间。提高 DPI 可能改善小字识别，但会增加 CPU 和内存开销。`COGDOC_OCR_REQUIRED=false` 时，命令缺失、语言包缺失、超时或 OCR 非零退出都会让该页降级为原生文本结果，摄取继续；设为 `true` 时，同类问题会让摄取失败，避免不完整的扫描文档被静默接收。
+
+页面渲染和识别发生在 CogDoc 进程及本地 Tesseract 子进程中，不会把页面图像发送给托管 OCR 服务。但识别出的文本仍会进入现有的向量化和 LLM 流程，因此使用云端模型时，数据边界与现有云端路径相同。对于不可信 PDF，只有在部署能够承担额外 CPU、内存和子进程开销时才应开启 OCR。
+
+`GET /health/ready` 会把 OCR 作为独立 component 返回，默认状态为 `disabled`。开启 OCR 但找不到可执行文件时，可选 OCR（`COGDOC_OCR_REQUIRED=false`）会报告 `degraded`，但服务整体仍为 ready；必需 OCR（`COGDOC_OCR_REQUIRED=true`）会让 readiness 返回 HTTP 503。可执行文件检查通过后的单页识别失败遵循上文的摄取语义，不会反向改变 readiness。
 
 ## 配置
 
@@ -629,7 +660,7 @@ CogDoc/
 
 ## 已知限制
 
-- **未做 OCR。** 不支持扫描版/纯图片 PDF——`smart_parse` 只读文本层，并把这类页面标记为 `is_ocr_fallback`，不抽取其文字。请使用带真实文字层的 PDF。
+- **OCR 是默认关闭的 Tesseract MVP。** 仅支持本机已安装的语言包，不提供托管 OCR provider；识别质量取决于扫描质量、语言选择和 DPI。
 - Summary 与 Compare 是固定 schema MVP：云端模式会并发执行相互独立的章节/维度 LLM cell，并保持输出顺序稳定；本地 Ollama 模式为避免内存压力仍走串行。默认章节/维度集合固定，除非通过 graph state 传入自定义配置。
 - 本地 Compare 有意限制为 2 篇文档、4 个核心维度，并跳过额外结论生成，以降低 Ollama 内存压力。
 - Citation 校验只证明引用的 `source` 和 `page` 物理合法，不证明整句话语义完全正确，也不强制每句都带引用。

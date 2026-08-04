@@ -239,6 +239,16 @@ class SourceChunksResponse(ApiModel):
     chunks: list[ChunkPreview] = Field(default_factory=list)
 
 
+# OCR 入库汇总，不包含页面正文或错误详情。
+class OcrSummary(ApiModel):
+    candidate_pages: int = 0
+    attempted_pages: int = 0
+    succeeded_pages: int = 0
+    degraded_pages: int = 0
+    failed_pages: int = 0
+    status_counts: dict[str, int] = Field(default_factory=dict)
+
+
 # 后台入库任务记录，供轮询状态。
 class IndexJob(ApiModel):
     job_id: str
@@ -248,6 +258,7 @@ class IndexJob(ApiModel):
     finished_at: str | None = None
     document_count: int | None = None
     chunk_count: int | None = None
+    ocr_summary: OcrSummary | None = None
     error_code: ErrorCode | None = None
     message: str | None = None
 

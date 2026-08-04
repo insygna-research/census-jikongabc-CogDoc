@@ -268,6 +268,7 @@ class IndexJobManager:
             "finished_at": None,
             "document_count": None,
             "chunk_count": None,
+            "ocr_summary": None,
             "error_code": None,
             "message": None,
         }
@@ -627,6 +628,7 @@ class IndexJobManager:
                     status="succeeded",
                     document_count=result.document_count,
                     chunk_count=result.chunk_count,
+                    ocr_summary=getattr(result, "ocr_summary", None),
                     finished_at=_now_iso(),
                 )
                 last_exc = None

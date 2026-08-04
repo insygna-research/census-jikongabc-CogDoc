@@ -309,6 +309,43 @@ class Settings(BaseSettings):
     # 入库上传单文件大小上限，最小毒丸防护。
     max_upload_mb: int = Field(default=50, validation_alias="COGDOC_MAX_UPLOAD_MB")
 
+    # 扫描页 OCR 默认关闭；开启后仅处理原生文本不足的候选页。
+    cogdoc_ocr_enabled: bool = Field(
+        default=False, validation_alias="COGDOC_OCR_ENABLED"
+    )
+    cogdoc_ocr_provider: str = Field(
+        default="tesseract", pattern="^tesseract$", validation_alias="COGDOC_OCR_PROVIDER"
+    )
+    cogdoc_ocr_binary: str = Field(
+        default="tesseract", min_length=1, validation_alias="COGDOC_OCR_BINARY"
+    )
+    cogdoc_ocr_languages: str = Field(
+        default="eng+chi_sim",
+        pattern=r"^[A-Za-z0-9_+-]+$",
+        validation_alias="COGDOC_OCR_LANGUAGES",
+    )
+    cogdoc_ocr_dpi: int = Field(
+        default=300, ge=72, le=600, validation_alias="COGDOC_OCR_DPI"
+    )
+    cogdoc_ocr_min_native_chars: int = Field(
+        default=40,
+        ge=0,
+        le=5000,
+        validation_alias="COGDOC_OCR_MIN_NATIVE_CHARS",
+    )
+    cogdoc_ocr_max_pages: int = Field(
+        default=100, ge=1, le=10000, validation_alias="COGDOC_OCR_MAX_PAGES"
+    )
+    cogdoc_ocr_page_timeout_seconds: float = Field(
+        default=30.0,
+        ge=0.1,
+        le=300.0,
+        validation_alias="COGDOC_OCR_PAGE_TIMEOUT_SECONDS",
+    )
+    cogdoc_ocr_required: bool = Field(
+        default=False, validation_alias="COGDOC_OCR_REQUIRED"
+    )
+
     # 评测默认路径。
     eval_set_path: str = Field(
         default="eval/retrieval_eval.jsonl", validation_alias="COGDOC_EVAL_SET"

@@ -19,7 +19,18 @@ def anyio_backend():
 
 # 模拟成功ingest。
 def _ok_ingest(kb_id, source_dir):
-    return SimpleNamespace(document_count=1, chunk_count=3)
+    return SimpleNamespace(
+        document_count=1,
+        chunk_count=3,
+        ocr_summary={
+            "candidate_pages": 2,
+            "attempted_pages": 2,
+            "succeeded_pages": 1,
+            "degraded_pages": 1,
+            "failed_pages": 0,
+            "status_counts": {"succeeded": 1, "timeout": 1},
+        },
+    )
 
 
 # 构造应用。
@@ -295,6 +306,14 @@ async def test_upload_triggers_job_until_succeeded(tmp_path, monkeypatch):
     assert up.json()["status"] in ("pending", "running", "succeeded")
     assert done.json()["status"] == "succeeded"
     assert done.json()["document_count"] == 1 and done.json()["chunk_count"] == 3
+    assert done.json()["ocr_summary"] == {
+        "candidate_pages": 2,
+        "attempted_pages": 2,
+        "succeeded_pages": 1,
+        "degraded_pages": 1,
+        "failed_pages": 0,
+        "status_counts": {"succeeded": 1, "timeout": 1},
+    }
     import os
 
     assert os.path.exists(os.path.join(source_dir_for("kb"), "a.pdf"))
