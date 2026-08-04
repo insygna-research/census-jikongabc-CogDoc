@@ -168,6 +168,14 @@ class FeedbackStore:
             "by_type": by_type,
         }
 
+    # 导出完整反馈记录，供统一状态库迁移使用。
+    def export_records(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [
+                json.loads(json.dumps(row, ensure_ascii=False))
+                for row in self._read_all()
+            ]
+
     # 删除某 KB 的反馈记录和坏样本导出。
     def clear_kb(self, kb_id: str) -> None:
         with self._lock:
@@ -225,7 +233,7 @@ class FeedbackStore:
 
 
 # 反馈落盘到数据库，逐行对象文件仅作为导出副本。
-class SqliteFeedbackStore:
+class SqliteFeedbackStore(FeedbackStore):
     def __init__(
         self,
         db_path: str | None = None,
@@ -366,6 +374,48 @@ class SqliteFeedbackStore:
             "by_type": by_type,
         }
 
+    # 导出稳定顺序的完整反馈记录。
+    def export_records(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM feedback_entries "
+                "ORDER BY created_at ASC, feedback_id ASC"
+            ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    # 按 feedback_id 幂等导入，保留原始标识与时间戳。
+    def import_records(self, records: list[dict[str, Any]]) -> dict[str, int]:
+        imported = 0
+        skipped = 0
+        with self._lock:
+            self._begin_locked()
+            try:
+                for raw in records:
+                    entry = json.loads(json.dumps(raw, ensure_ascii=False))
+                    feedback_id = str(entry.get("feedback_id") or "")
+                    if not feedback_id:
+                        raise ValueError("feedback_id is required")
+                    existing = self._conn.execute(
+                        "SELECT data FROM feedback_entries WHERE feedback_id=?",
+                        (feedback_id,),
+                    ).fetchone()
+                    if existing is not None and json.loads(existing[0]) == entry:
+                        skipped += 1
+                        continue
+                    self._insert_locked(
+                        entry, entry.get("feedback") in _BAD_CASE_TYPES
+                    )
+                    imported += 1
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        return {"imported": imported, "skipped": skipped}
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
     # 删除某 KB 的反馈记录和导出副本。
     def clear_kb(self, kb_id: str) -> None:
         with self._lock:
@@ -387,19 +437,28 @@ class SqliteFeedbackStore:
         ]
         if count or not os.path.exists(self._feedback_path):
             return
-        with open(self._feedback_path, encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                entry = json.loads(line)
-                feedback_id = str(entry.get("feedback_id") or uuid4().hex)
-                entry["feedback_id"] = feedback_id
-                is_bad_case = entry.get("feedback") in _BAD_CASE_TYPES
-                self._insert_locked(entry, is_bad_case)
+        self._begin_locked()
+        try:
+            with open(self._feedback_path, encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    entry = json.loads(line)
+                    feedback_id = str(entry.get("feedback_id") or uuid4().hex)
+                    entry["feedback_id"] = feedback_id
+                    is_bad_case = entry.get("feedback") in _BAD_CASE_TYPES
+                    self._insert_locked(entry, is_bad_case)
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
 
-    # 写入数据库。
+    def _begin_locked(self) -> None:
+        self._conn.execute("BEGIN IMMEDIATE")
+
+    # 写入当前事务；调用方负责提交或回滚。
     def _insert_locked(self, entry: dict[str, Any], is_bad_case: bool) -> None:
-        def _do():
+        def _do() -> None:
             self._conn.execute(
                 "INSERT OR REPLACE INTO feedback_entries "
                 "(feedback_id, kb_id, trace_id, session_id, feedback, feedback_type, "
@@ -416,7 +475,6 @@ class SqliteFeedbackStore:
                     json.dumps(entry, ensure_ascii=False),
                 ),
             )
-            self._conn.commit()
 
         _execute_write_with_retry(_do)
 

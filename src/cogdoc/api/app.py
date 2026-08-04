@@ -8,13 +8,22 @@ from cogdoc.api.access_control import (
     TokenBucketRateLimiter,
     build_rate_limiter,
 )
-from cogdoc.api.derived_knowledge_store import DerivedKnowledgeStore
-from cogdoc.api.feedback_analysis_store import FeedbackAnalysisStore
+from cogdoc.api.derived_knowledge_store import (
+    DerivedKnowledgeStore,
+    SqliteDerivedKnowledgeStore,
+)
+from cogdoc.api.feedback_analysis_store import (
+    FeedbackAnalysisStore,
+    SqliteFeedbackAnalysisStore,
+)
 from cogdoc.api.feedback_store import FeedbackStore, SqliteFeedbackStore
 from cogdoc.api.ingest import IndexJobManager, KnowledgeBaseRegistry
 from cogdoc.api.metrics import Metrics, MetricsMiddleware
 from cogdoc.api.persistence import SqliteJobStore, SqliteSessionStore
-from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
+from cogdoc.api.retrieval_feedback_store import (
+    RetrievalFeedbackStore,
+    SqliteRetrievalFeedbackStore,
+)
 from cogdoc.api.routes import (
     agent_router,
     chat_router,
@@ -49,9 +58,35 @@ ChatRunner = Callable[..., ChatResult]
 # 创建反馈存储。
 def _default_feedback_store():
     settings = get_settings()
+    if settings.cogdoc_state_backend == "sqlite":
+        return SqliteFeedbackStore(
+            db_path=settings.state_db_path,
+            export_jsonl=False,
+        )
     if settings.cogdoc_feedback_store.strip().lower() == "sqlite":
         return SqliteFeedbackStore()
     return FeedbackStore()
+
+
+def _default_feedback_analysis_store():
+    settings = get_settings()
+    if settings.cogdoc_state_backend == "sqlite":
+        return SqliteFeedbackAnalysisStore(settings.state_db_path)
+    return FeedbackAnalysisStore()
+
+
+def _default_knowledge_store():
+    settings = get_settings()
+    if settings.cogdoc_state_backend == "sqlite":
+        return SqliteDerivedKnowledgeStore(settings.state_db_path)
+    return DerivedKnowledgeStore()
+
+
+def _default_retrieval_feedback_store():
+    settings = get_settings()
+    if settings.cogdoc_state_backend == "sqlite":
+        return SqliteRetrievalFeedbackStore(settings.state_db_path)
+    return RetrievalFeedbackStore()
 
 
 # 构建未捕获异常响应。
@@ -224,11 +259,11 @@ def create_app(
     )
     app.state.feedback_store = feedback_store or _default_feedback_store()
     app.state.feedback_analysis_store = (
-        feedback_analysis_store or FeedbackAnalysisStore()
+        feedback_analysis_store or _default_feedback_analysis_store()
     )
-    app.state.knowledge_store = knowledge_store or DerivedKnowledgeStore()
+    app.state.knowledge_store = knowledge_store or _default_knowledge_store()
     app.state.retrieval_feedback_store = (
-        retrieval_feedback_store or RetrievalFeedbackStore()
+        retrieval_feedback_store or _default_retrieval_feedback_store()
     )
     app.state.webhook_dispatcher = webhook_dispatcher or WebhookDispatcher()
 

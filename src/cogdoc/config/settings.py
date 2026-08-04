@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     cogdoc_feedback_store: str = Field(
         default="jsonl", validation_alias="COGDOC_FEEDBACK_STORE"
     )
+    cogdoc_state_backend: str = Field(
+        default="jsonl",
+        pattern="^(jsonl|sqlite)$",
+        validation_alias="COGDOC_STATE_BACKEND",
+    )
     cogdoc_derived_knowledge_index_auto_refresh: bool = Field(
         default=False,
         validation_alias="COGDOC_DERIVED_KNOWLEDGE_INDEX_AUTO_REFRESH",

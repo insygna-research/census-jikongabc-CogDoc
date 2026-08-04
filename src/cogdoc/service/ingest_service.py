@@ -755,8 +755,17 @@ def _plan_transactional_incremental(state: KBState, manifest: dict):
 
 # 增量填充暂存区。
 def _fill_staging_incremental(
-    kb_id, staging, prev_active, plan, gen_dir, source_hash_by_name, ocr_summary
+    kb_id,
+    staging,
+    prev_active,
+    plan,
+    gen_dir,
+    source_hash_by_name,
+    ocr_summary=None,
 ):
+    if ocr_summary is None:
+        ocr_summary = _empty_ocr_summary()
+
     # 复用上一代未变文档的分块和向量，只解析新增或改动文档。
     prev_collection_id = get_settings().kb_collection_id(kb_id, prev_active["id"])
     prev_vector = VectorRetriever(collection_id=prev_collection_id)
@@ -823,8 +832,18 @@ def _fill_staging_incremental(
 
 # 填充暂存区。
 def _populate_staging(
-    kb_id, state, gen_dir, pdf_files, manifest, source_hash_by_name, staging, ocr_summary
+    kb_id,
+    state,
+    gen_dir,
+    pdf_files,
+    manifest,
+    source_hash_by_name,
+    staging,
+    ocr_summary=None,
 ):
+    if ocr_summary is None:
+        ocr_summary = _empty_ocr_summary()
+
     # 决定增量复用还是全量填充暂存区。
     plan, prev_active = _plan_transactional_incremental(state, manifest)
     if plan is not None:

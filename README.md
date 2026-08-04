@@ -197,6 +197,20 @@ Rendering and recognition run in the CogDoc process and a local Tesseract subpro
 
 `GET /health/ready` exposes OCR as a separate component. Its default state is `disabled`. When OCR is enabled but its binary is missing, optional OCR (`COGDOC_OCR_REQUIRED=false`) reports `degraded` while the service remains ready; required OCR (`COGDOC_OCR_REQUIRED=true`) makes the readiness probe return HTTP 503. Page-level recognition failures follow the ingestion behavior described above rather than changing readiness after the binary check succeeds.
 
+## Unified state backend
+
+`COGDOC_STATE_BACKEND` selects persistence for application state and defaults to `jsonl` for a backward-compatible rollout. Keep it set to `jsonl` until the migration has completed and verification succeeds:
+
+```bash
+python scripts/migrate_state.py                 # dry-run; writes nothing
+python scripts/migrate_state.py --apply         # import legacy state
+python scripts/migrate_state.py --verify-only   # verify the imported state
+```
+
+Only after all three steps succeed should `.env` be changed to `COGDOC_STATE_BACKEND=sqlite`. The unified SQLite backend stores sessions, index jobs, feedback records, feedback analyses, derived knowledge, and retrieval-feedback/tuning state together in `COGDOC_DATA_DIR/state.db`. The latter four are the feedback/knowledge state families migrated from their legacy stores.
+
+`COGDOC_FEEDBACK_STORE` remains only for compatibility with deployments that still select the legacy standalone feedback backend. It does not select the unified backend and should not be used instead of `COGDOC_STATE_BACKEND` after migration.
+
 ## Tech Stack
 
 - **Deterministic core** — a custom [Rust](https://www.rust-lang.org/) extension ([PyO3](https://pyo3.rs/) + [maturin](https://www.maturin.rs/)) carries `jieba-rs` CN/EN tokenization, BM25, RRF fusion, SHA-256 manifest, and citation validation — all native, independently unit-tested, stable across agent/prompt churn.

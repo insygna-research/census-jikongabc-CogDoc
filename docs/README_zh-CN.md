@@ -575,6 +575,20 @@ COGDOC_OCR_REQUIRED=false
 
 `GET /health/ready` 会把 OCR 作为独立 component 返回，默认状态为 `disabled`。开启 OCR 但找不到可执行文件时，可选 OCR（`COGDOC_OCR_REQUIRED=false`）会报告 `degraded`，但服务整体仍为 ready；必需 OCR（`COGDOC_OCR_REQUIRED=true`）会让 readiness 返回 HTTP 503。可执行文件检查通过后的单页识别失败遵循上文的摄取语义，不会反向改变 readiness。
 
+## 统一状态后端
+
+`COGDOC_STATE_BACKEND` 用于选择应用状态的持久化后端。为兼容现有部署，其默认值为 `jsonl`。迁移完成并验证通过之前必须保持 `jsonl`：
+
+```bash
+python scripts/migrate_state.py                 # dry-run，不写入数据
+python scripts/migrate_state.py --apply         # 导入旧状态
+python scripts/migrate_state.py --verify-only   # 校验导入结果
+```
+
+只有三步全部成功后，才能把 `.env` 改为 `COGDOC_STATE_BACKEND=sqlite`。统一 SQLite 后端会把会话、索引任务、反馈记录、反馈分析、派生知识以及检索反馈/调权状态共同存入 `COGDOC_DATA_DIR/state.db`；后四项就是从旧存储迁移的四类反馈/知识状态。
+
+`COGDOC_FEEDBACK_STORE` 仅为仍在使用旧版独立反馈后端的部署保留兼容性。它不能选择统一状态后端；迁移后不应使用它代替 `COGDOC_STATE_BACKEND`。
+
 ## 配置
 
 | 变量 | 默认值 | 作用 |

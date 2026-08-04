@@ -10,7 +10,9 @@ from cogdoc.memory.retriever import EmbeddingFunction, MemoryRetriever
 
 
 # 建立连接结果。
-def _connect(db_path: str) -> sqlite3.Connection:
+def connect_sqlite(
+    db_path: str, busy_timeout_ms: int = 5000
+) -> sqlite3.Connection:
     # 单连接跨线程复用：WAL 提升并发读写、busy_timeout 等锁而非立刻报错；外层用 RLock 串行化。 isolation_level=None 走 autocommit：每条 DML 立即提交，绝不留悬挂写事务长期占住 WAL 写锁 （否则 session/job 两条连接里任一处漏 commit 都会无限期堵死另一条连接的写，busy_timeout 也救不了）。
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=False, isolation_level=None)
@@ -19,9 +21,13 @@ def _connect(db_path: str) -> sqlite3.Connection:
         "PRAGMA synchronous=NORMAL"
     )  # WAL 下安全且少一次 fsync，缩短写锁持有时间
     conn.execute(
-        "PRAGMA busy_timeout=5000"
-    )  # 跨连接写竞争最多等 5s；配合重试总上界仍远小于客户端超时
+        f"PRAGMA busy_timeout={max(0, int(busy_timeout_ms))}"
+    )  # 跨连接写竞争默认最多等 5s；配合重试总上界仍远小于客户端超时
     return conn
+
+
+# 保留内部旧名称，避免破坏现有持久化存储调用方。
+_connect = connect_sqlite
 
 
 # 执行写入withretry。

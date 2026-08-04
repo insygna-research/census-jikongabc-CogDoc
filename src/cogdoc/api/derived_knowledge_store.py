@@ -4,9 +4,12 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
+import time
 import unicodedata
+from contextlib import contextmanager
 from threading import RLock
-from typing import Any
+from typing import Any, Iterator
 from uuid import uuid4
 
 from cogdoc.api.time_utils import now_iso
@@ -248,6 +251,19 @@ class DerivedKnowledgeStore:
             rows, key=lambda row: str(row.get("created_at", "")), reverse=True
         )
         return sorted_rows[:limit] if limit is not None else sorted_rows
+
+    # 按标识查询最新知识快照。
+    def get(self, knowledge_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            return self._latest().get(knowledge_id)
+
+    # 导出可迁移的历史快照；不折叠状态，确保审核事件和修订链完整。
+    def export_records(self, *, kb_id: str | None = None) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._read_history()
+        if kb_id is not None:
+            rows = [row for row in rows if row.get("kb_id") == kb_id]
+        return rows
 
     # 返回存储文件修订标记，供外部索引判断是否需要刷新。
     def revision_token(self) -> str:
@@ -704,3 +720,366 @@ class DerivedKnowledgeStore:
             for row in rows:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
         os.replace(tmp_path, self._path)
+
+
+# SQLite 追加事件版派生知识存储：公开行为与 JSONL 实现一致，完整快照保存在 record_json。
+class SqliteDerivedKnowledgeStore(DerivedKnowledgeStore):
+    def __init__(
+        self,
+        db_path: str | None = None,
+        *,
+        path: str | None = None,
+        busy_timeout_ms: int = 5000,
+    ):
+        if db_path is not None and path is not None and db_path != path:
+            raise ValueError("db_path and path must refer to the same database")
+        if db_path is None:
+            db_path = path
+        if db_path is None:
+            db_path = get_settings().state_db_path
+        self._path = db_path
+        self._lock = RLock()
+        self._transaction_depth = 0
+        os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
+        self._conn = sqlite3.connect(
+            db_path,
+            check_same_thread=False,
+            isolation_level=None,
+        )
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute(f"PRAGMA busy_timeout={max(0, int(busy_timeout_ms))}")
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS derived_knowledge_events ("
+            "event_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "event_key TEXT NOT NULL UNIQUE, "
+            "knowledge_id TEXT NOT NULL, "
+            "kb_id TEXT NOT NULL, "
+            "status TEXT NOT NULL, "
+            "normalized_hash TEXT, "
+            "conflict_group_id TEXT, "
+            "related_document_id TEXT, "
+            "related_source TEXT, "
+            "origin TEXT, "
+            "created_by TEXT, "
+            "created_at TEXT NOT NULL, "
+            "reviewed_at TEXT, "
+            "record_json TEXT NOT NULL)"
+        )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS derived_knowledge_meta ("
+            "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        self._conn.execute(
+            "INSERT OR IGNORE INTO derived_knowledge_meta (key, value) "
+            "VALUES (?, ?)",
+            ("revision", "0"),
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_derived_knowledge_latest "
+            "ON derived_knowledge_events(knowledge_id, event_id DESC)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_derived_knowledge_kb "
+            "ON derived_knowledge_events(kb_id, event_id DESC)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_derived_knowledge_status "
+            "ON derived_knowledge_events(kb_id, status, event_id DESC)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_derived_knowledge_hash "
+            "ON derived_knowledge_events(kb_id, normalized_hash, event_id DESC)"
+        )
+
+    # 创建及冲突组更新必须原子提交。
+    def create(self, payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        with self._write_transaction():
+            return super().create(payload)
+
+    # 修订记录及旧版本归档必须原子提交。
+    def revise(
+        self, knowledge_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        with self._write_transaction():
+            return super().revise(knowledge_id, payload)
+
+    # 审核快照及可能发生的旧版本归档必须原子提交。
+    def set_status(
+        self,
+        knowledge_id: str,
+        status: str,
+        *,
+        actor: str | None = None,
+        note: str | None = None,
+        binding_updates: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        with self._write_transaction():
+            return super().set_status(
+                knowledge_id,
+                status,
+                actor=actor,
+                note=note,
+                binding_updates=binding_updates,
+            )
+
+    # 整批审核共享一个事务，任一异常不会留下半批结果。
+    def batch_set_status(
+        self,
+        knowledge_ids: list[str],
+        status: str,
+        *,
+        actor: str | None = None,
+        note: str | None = None,
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        with self._write_transaction():
+            return super().batch_set_status(
+                knowledge_ids,
+                status,
+                actor=actor,
+                note=note,
+            )
+
+    # 删除单条知识的全部事件。
+    def delete(self, knowledge_id: str) -> dict[str, Any] | None:
+        with self._write_transaction():
+            latest = self.get(knowledge_id)
+            if latest is None:
+                return None
+            cursor = self._conn.execute(
+                "DELETE FROM derived_knowledge_events WHERE knowledge_id=?",
+                (knowledge_id,),
+            )
+            if cursor.rowcount:
+                self._bump_revision()
+            return latest
+
+    # 删除某 KB 的全部历史事件。
+    def clear_kb(self, kb_id: str) -> None:
+        with self._write_transaction():
+            cursor = self._conn.execute(
+                "DELETE FROM derived_knowledge_events WHERE kb_id=?",
+                (kb_id,),
+            )
+            if cursor.rowcount:
+                self._bump_revision()
+
+    # 文档清单扫描产生的多条 stale 事件共享一个事务。
+    def mark_stale_by_documents(
+        self, kb_id: str, documents: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        with self._write_transaction():
+            return super().mark_stale_by_documents(kb_id, documents)
+
+    # 单文档变更产生的多条 stale 事件共享一个事务。
+    def mark_stale_for_source(
+        self, kb_id: str, source: str, old_source_sha256: str
+    ) -> list[dict[str, Any]]:
+        with self._write_transaction():
+            return super().mark_stale_for_source(kb_id, source, old_source_sha256)
+
+    # SQLite 修订号不依赖文件系统时间精度，可直接用于派生知识索引失效判断。
+    def revision_token(self) -> str:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM derived_knowledge_meta WHERE key=?",
+                ("revision",),
+            ).fetchone()
+        return f"sqlite:{row[0] if row else '0'}"
+
+    # 导出完整事件历史，可直接作为 JSONL 到 SQLite 的迁移载荷。
+    def export_records(self, *, kb_id: str | None = None) -> list[dict[str, Any]]:
+        with self._lock:
+            if kb_id is None:
+                rows = self._conn.execute(
+                    "SELECT record_json FROM derived_knowledge_events "
+                    "ORDER BY event_id"
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT record_json FROM derived_knowledge_events "
+                    "WHERE kb_id=? ORDER BY event_id",
+                    (kb_id,),
+                ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    # 幂等导入历史：相同载荷重复导入不会重复生成审核事件。
+    def import_records(
+        self,
+        records: list[dict[str, Any]],
+    ) -> dict[str, int]:
+        prepared: list[tuple[dict[str, Any], str, str]] = []
+        occurrences: dict[str, int] = {}
+        for record in records:
+            if not isinstance(record, dict):
+                raise ValueError("each imported record must be an object")
+            if not str(record.get("knowledge_id") or "").strip():
+                raise ValueError("imported record knowledge_id must not be blank")
+            if not str(record.get("kb_id") or "").strip():
+                raise ValueError("imported record kb_id must not be blank")
+            encoded = json.dumps(
+                record,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            identity = json.dumps(
+                {
+                    key: record.get(key)
+                    for key in (
+                        "knowledge_id",
+                        "kb_id",
+                        "version",
+                        "status",
+                        "created_at",
+                        "updated_at",
+                        "reviewed_at",
+                        "archived_at",
+                    )
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+            occurrence = occurrences.get(digest, 0)
+            occurrences[digest] = occurrence + 1
+            prepared.append((record, f"import:{digest}:{occurrence}", encoded))
+
+        imported = 0
+        skipped = 0
+        with self._write_transaction():
+            for record, event_key, encoded in prepared:
+                existing = self._conn.execute(
+                    "SELECT record_json FROM derived_knowledge_events "
+                    "WHERE event_key=?",
+                    (event_key,),
+                ).fetchone()
+                if existing is not None:
+                    existing_encoded = json.dumps(
+                        json.loads(existing[0]),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    if existing_encoded != encoded:
+                        raise ValueError(f"import event key conflict: {event_key}")
+                    skipped += 1
+                    continue
+                self._insert_record(record, event_key=event_key)
+                imported += 1
+            if imported:
+                self._bump_revision()
+        return {"imported": imported, "skipped": skipped}
+
+    # 显式释放长期连接，主要供短生命周期迁移工具使用。
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+    # 读取全部历史事件。
+    def _read_history(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT record_json FROM derived_knowledge_events ORDER BY event_id"
+            ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    # 直接读取每个知识标识的最新事件，避免在 Python 中折叠完整历史。
+    def _latest(self) -> dict[str, dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT record_json FROM derived_knowledge_events "
+                "WHERE event_id IN ("
+                "SELECT MAX(event_id) FROM derived_knowledge_events "
+                "GROUP BY knowledge_id)"
+            ).fetchall()
+        latest: dict[str, dict[str, Any]] = {}
+        for (encoded,) in rows:
+            record = json.loads(encoded)
+            latest[str(record["knowledge_id"])] = record
+        return latest
+
+    # 追加事件；公开写入口已持有事务。
+    def _append(self, entry: dict[str, Any]) -> None:
+        self._insert_record(entry, event_key=f"event:{uuid4().hex}")
+        self._bump_revision()
+
+    # 兼容父类持久化原语，整体替换事件历史。
+    def _rewrite_history(self, rows: list[dict[str, Any]]) -> None:
+        self._conn.execute("DELETE FROM derived_knowledge_events")
+        for entry in rows:
+            self._insert_record(entry, event_key=f"event:{uuid4().hex}")
+        self._bump_revision()
+
+    # 参数化写入完整 JSON 快照及常用索引列。
+    def _insert_record(
+        self,
+        entry: dict[str, Any],
+        *,
+        event_key: str,
+    ) -> bool:
+        cursor = self._conn.execute(
+            "INSERT INTO derived_knowledge_events ("
+            "event_key, knowledge_id, kb_id, status, normalized_hash, "
+            "conflict_group_id, related_document_id, related_source, origin, "
+            "created_by, created_at, reviewed_at, record_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event_key,
+                str(entry.get("knowledge_id") or ""),
+                str(entry.get("kb_id") or ""),
+                str(entry.get("status") or ""),
+                entry.get("normalized_hash"),
+                entry.get("conflict_group_id"),
+                entry.get("related_document_id"),
+                entry.get("related_source"),
+                entry.get("origin"),
+                entry.get("created_by"),
+                str(entry.get("created_at") or ""),
+                entry.get("reviewed_at"),
+                json.dumps(entry, ensure_ascii=False, separators=(",", ":")),
+            ),
+        )
+        return cursor.rowcount == 1
+
+    # 在当前事务内递增持久修订号。
+    def _bump_revision(self) -> None:
+        self._conn.execute(
+            "UPDATE derived_knowledge_meta "
+            "SET value=CAST(value AS INTEGER) + 1 WHERE key=?",
+            ("revision",),
+        )
+
+    # busy_timeout 之外保留短退避，处理多个 store 实例同时抢写锁。
+    def _begin_immediate(self) -> None:
+        delay = 0.1
+        for attempt in range(3):
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == 2:
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, 0.5)
+
+    # 允许 batch/stale 等公共写入口嵌套调用 set_status 而不重复开事务。
+    @contextmanager
+    def _write_transaction(self) -> Iterator[None]:
+        with self._lock:
+            outermost = self._transaction_depth == 0
+            if outermost:
+                self._begin_immediate()
+            self._transaction_depth += 1
+            try:
+                yield
+            except BaseException:
+                self._transaction_depth -= 1
+                if outermost:
+                    self._conn.rollback()
+                raise
+            else:
+                self._transaction_depth -= 1
+                if outermost:
+                    self._conn.commit()

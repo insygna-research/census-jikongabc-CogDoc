@@ -11,6 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from cogdoc.config.settings import get_settings
+from cogdoc.api.persistence import connect_sqlite
 
 
 # 空文件修改时间标记。
@@ -271,6 +272,34 @@ class RetrievalFeedbackStore:
             rows = [row for row in self._read_history() if row.get("kb_id") != kb_id]
             self._rewrite_history(rows)
 
+    # 导出折叠后的当前快照，供 JSONL 与 SQLite 存储之间迁移。
+    def export_records(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [
+                json.loads(json.dumps(row, ensure_ascii=False))
+                for row in self._latest_cached().values()
+            ]
+
+    # 按稳定标识追加新快照；相同快照重复导入不会扩张历史。
+    def import_records(self, records: list[dict[str, Any]]) -> dict[str, int]:
+        incoming = [
+            json.loads(json.dumps(record, ensure_ascii=False)) for record in records
+        ]
+        for record in incoming:
+            if not str(record.get("retrieval_feedback_id") or ""):
+                raise ValueError("retrieval_feedback_id is required")
+        with self._lock:
+            latest = dict(self._latest_cached())
+            changed = 0
+            for record in incoming:
+                record_id = str(record["retrieval_feedback_id"])
+                if latest.get(record_id) == record:
+                    continue
+                self._append(record)
+                latest[record_id] = record
+                changed += 1
+            return {"imported": changed, "skipped": len(incoming) - changed}
+
     # 设置启用状态。
     def set_enabled(
         self,
@@ -355,3 +384,281 @@ class RetrievalFeedbackStore:
         os.replace(tmp_path, self._path)
         self._cache_mtime = None
         self._cache_latest = None
+
+
+def _enabled_value(value: Any) -> int | None:
+    if value is True:
+        return 1
+    if value is False:
+        return 0
+    return None
+
+
+# 检索调权反馈的 SQLite 适配器；每个标识保存最新快照。
+class SqliteRetrievalFeedbackStore(RetrievalFeedbackStore):
+    def __init__(self, db_path: str):
+        self._lock = RLock()
+        self._conn = connect_sqlite(db_path)
+        self._closed = False
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS retrieval_feedback_records ("
+            "retrieval_feedback_id TEXT PRIMARY KEY, "
+            "feedback_group_key TEXT NOT NULL, kb_id TEXT, query_hash TEXT, "
+            "enabled INTEGER, created_at TEXT NOT NULL, data TEXT NOT NULL)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_retrieval_feedback_kb_created "
+            "ON retrieval_feedback_records(kb_id, created_at DESC)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_retrieval_feedback_boosts "
+            "ON retrieval_feedback_records(kb_id, query_hash, enabled)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_retrieval_feedback_group "
+            "ON retrieval_feedback_records(feedback_group_key)"
+        )
+
+    # 从用户反馈生成调权记录。
+    def record_from_feedback(
+        self, feedback_id: str, payload: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        kb_id = _required_text(payload, "kb_id")
+        query_text = _required_text(payload, "query")
+        if not kb_id or not query_text:
+            return []
+        user_score, weight_delta = _feedback_weight(
+            str(payload.get("feedback") or ""), payload.get("rating")
+        )
+        if weight_delta == 0:
+            return []
+        targets = _target_chunks(payload)
+        if not targets:
+            return []
+        source_types = sorted({target["source_type"] for target in targets})
+        record = {
+            "retrieval_feedback_id": uuid4().hex,
+            "feedback_id": feedback_id,
+            "kb_id": kb_id,
+            "query_hash": query_hash(query_text),
+            "query_text": query_text,
+            "chunk_id": targets[0]["chunk_id"],
+            "source_type": source_types[0] if len(source_types) == 1 else "mixed",
+            "target_chunks": targets,
+            "chunk_count": len(targets),
+            "trace_id": payload.get("trace_id"),
+            "user_score": user_score,
+            "agent_score": None,
+            "agent_reason": None,
+            "weight_delta": weight_delta,
+            "confidence": 1.0,
+            "enabled": True,
+            "disabled_at": None,
+            "disabled_by": None,
+            "disable_reason": None,
+            "created_at": _now_iso(),
+        }
+        with self._lock:
+            self._begin_locked()
+            try:
+                self._upsert_locked(record)
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        return [record]
+
+    # 读取某查询下启用的调权。
+    def boosts_for_query(self, kb_id: str, query: str) -> dict[str, float]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM retrieval_feedback_records "
+                "WHERE kb_id=? AND query_hash=? AND enabled=?",
+                (kb_id, query_hash(query), 1),
+            ).fetchall()
+        boosts: dict[str, float] = {}
+        for (raw_data,) in rows:
+            row = json.loads(raw_data)
+            for target in _record_targets(row):
+                chunk_id = target["chunk_id"]
+                boosts[chunk_id] = boosts.get(chunk_id, 0.0) + float(
+                    row.get("weight_delta") or 0.0
+                ) * float(row.get("confidence") or 1.0)
+        return boosts
+
+    # 列出检索反馈。
+    def list(
+        self,
+        *,
+        kb_id: str,
+        enabled: bool | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            raw_rows = self._conn.execute(
+                "SELECT data FROM retrieval_feedback_records "
+                "WHERE kb_id=? ORDER BY rowid ASC",
+                (kb_id,),
+            ).fetchall()
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for (raw_data,) in raw_rows:
+            row = json.loads(raw_data)
+            grouped.setdefault(_feedback_group_key(row), []).append(row)
+        aggregated = [
+            _aggregate_retrieval_feedback_group(group) for group in grouped.values()
+        ]
+        if enabled is not None:
+            aggregated = [row for row in aggregated if row.get("enabled") is enabled]
+        aggregated.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+        return aggregated[:limit]
+
+    # 统计检索调权反馈。
+    def counts(self, *, kb_id: str) -> dict[str, int]:
+        with self._lock:
+            raw_rows = self._conn.execute(
+                "SELECT data FROM retrieval_feedback_records WHERE kb_id=?",
+                (kb_id,),
+            ).fetchall()
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for (raw_data,) in raw_rows:
+            row = json.loads(raw_data)
+            grouped.setdefault(_feedback_group_key(row), []).append(row)
+        aggregated = [
+            _aggregate_retrieval_feedback_group(group) for group in grouped.values()
+        ]
+        enabled = sum(1 for row in aggregated if row.get("enabled") is True)
+        disabled = sum(1 for row in aggregated if row.get("enabled") is False)
+        return {
+            "total": len(aggregated),
+            "enabled": enabled,
+            "disabled": disabled,
+        }
+
+    # 删除某 KB 的全部调权记录。
+    def clear_kb(self, kb_id: str) -> None:
+        with self._lock:
+            self._begin_locked()
+            try:
+                self._conn.execute(
+                    "DELETE FROM retrieval_feedback_records WHERE kb_id=?", (kb_id,)
+                )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    # 设置同一次反馈下所有记录的启用状态。
+    def set_enabled(
+        self,
+        retrieval_feedback_id: str,
+        enabled: bool,
+        *,
+        actor: str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            self._begin_locked()
+            try:
+                current_raw = self._conn.execute(
+                    "SELECT data FROM retrieval_feedback_records "
+                    "WHERE retrieval_feedback_id=?",
+                    (retrieval_feedback_id,),
+                ).fetchone()
+                if current_raw is None:
+                    self._conn.execute("COMMIT")
+                    return None
+                current = json.loads(current_raw[0])
+                group_key = _feedback_group_key(current)
+                group_rows = self._conn.execute(
+                    "SELECT data FROM retrieval_feedback_records "
+                    "WHERE feedback_group_key=? ORDER BY rowid ASC",
+                    (group_key,),
+                ).fetchall()
+                disabled_at = _now_iso() if not enabled else None
+                updated_rows = []
+                for (raw_data,) in group_rows:
+                    updated = {**json.loads(raw_data), "enabled": enabled}
+                    if enabled:
+                        updated["disabled_at"] = None
+                        updated["disabled_by"] = None
+                        updated["disable_reason"] = None
+                    else:
+                        updated["disabled_at"] = disabled_at
+                        updated["disabled_by"] = actor
+                        updated["disable_reason"] = reason
+                    self._upsert_locked(updated)
+                    updated_rows.append(updated)
+                self._conn.execute("COMMIT")
+                return _aggregate_retrieval_feedback_group(updated_rows)
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    # 导出折叠后的当前快照，按首次写入顺序保持稳定。
+    def export_records(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM retrieval_feedback_records ORDER BY rowid ASC"
+            ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    # 事务性 upsert；同一批数据可安全重复导入。
+    def import_records(self, records: list[dict[str, Any]]) -> dict[str, int]:
+        incoming = [
+            json.loads(json.dumps(record, ensure_ascii=False)) for record in records
+        ]
+        for record in incoming:
+            if not str(record.get("retrieval_feedback_id") or ""):
+                raise ValueError("retrieval_feedback_id is required")
+        with self._lock:
+            self._begin_locked()
+            try:
+                changed = 0
+                for record in incoming:
+                    existing = self._conn.execute(
+                        "SELECT data FROM retrieval_feedback_records "
+                        "WHERE retrieval_feedback_id=?",
+                        (str(record["retrieval_feedback_id"]),),
+                    ).fetchone()
+                    if existing is not None and json.loads(existing[0]) == record:
+                        continue
+                    self._upsert_locked(record)
+                    changed += 1
+                self._conn.execute("COMMIT")
+                return {"imported": changed, "skipped": len(incoming) - changed}
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    # 关闭数据库连接；允许清理路径安全地重复调用。
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._conn.close()
+            self._closed = True
+
+    def _begin_locked(self) -> None:
+        self._conn.execute("BEGIN IMMEDIATE")
+
+    def _upsert_locked(self, record: dict[str, Any]) -> None:
+        record_id = str(record["retrieval_feedback_id"])
+        self._conn.execute(
+            "INSERT INTO retrieval_feedback_records ("
+            "retrieval_feedback_id, feedback_group_key, kb_id, query_hash, "
+            "enabled, created_at, data) VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(retrieval_feedback_id) DO UPDATE SET "
+            "feedback_group_key=excluded.feedback_group_key, "
+            "kb_id=excluded.kb_id, query_hash=excluded.query_hash, "
+            "enabled=excluded.enabled, created_at=excluded.created_at, "
+            "data=excluded.data",
+            (
+                record_id,
+                _feedback_group_key(record),
+                record.get("kb_id"),
+                record.get("query_hash"),
+                _enabled_value(record.get("enabled")),
+                str(record.get("created_at") or ""),
+                json.dumps(record, ensure_ascii=False),
+            ),
+        )

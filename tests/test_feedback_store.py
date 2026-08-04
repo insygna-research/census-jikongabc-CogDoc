@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from cogdoc.api.feedback_store import SqliteFeedbackStore
 
 
@@ -137,6 +139,51 @@ def test_sqlite_feedback_store_bootstraps_from_jsonl(tmp_path):
 
     assert store.list(kb_id="kb")[0]["feedback_id"] == "f1"
     assert store.counts(kb_id="kb")["bad_cases"] == 1
+
+
+# 批量导入中任一记录失败时，不保留前面已写入的记录。
+def test_sqlite_feedback_store_import_is_atomic(tmp_path):
+    store = SqliteFeedbackStore(
+        db_path=str(tmp_path / "feedback.db"),
+        feedback_path=str(tmp_path / "feedback.jsonl"),
+        bad_cases_path=str(tmp_path / "bad_cases.jsonl"),
+        export_jsonl=False,
+    )
+
+    with pytest.raises(ValueError, match="feedback_id is required"):
+        store.import_records(
+            [
+                {
+                    "feedback_id": "f1",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "kb_id": "kb",
+                    "feedback": "thumbs_up",
+                },
+                {"kb_id": "kb", "feedback": "thumbs_down"},
+            ]
+        )
+
+    assert store.export_records() == []
+
+
+def test_sqlite_feedback_store_import_reports_imported_and_skipped(tmp_path):
+    store = SqliteFeedbackStore(
+        db_path=str(tmp_path / "feedback.db"),
+        feedback_path=str(tmp_path / "feedback.jsonl"),
+        bad_cases_path=str(tmp_path / "bad_cases.jsonl"),
+        export_jsonl=False,
+    )
+    records = [
+        {
+            "feedback_id": "f1",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "kb_id": "kb",
+            "feedback": "thumbs_up",
+        }
+    ]
+
+    assert store.import_records(records) == {"imported": 1, "skipped": 0}
+    assert store.import_records(records) == {"imported": 0, "skipped": 1}
 
 
 # 验证数据库反馈存储按 KB 清理数据库和导出副本。
