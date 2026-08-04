@@ -503,6 +503,9 @@ def build_evidence_pack(
     min_overlap_chars: int = DEFAULT_MIN_OVERLAP_CHARS,
     document_char_cost: Callable[[Mapping[str, Any], str], int] | None = None,
     separator_chars: int = 0,
+    document_transform: (
+        Callable[[RetrievedDoc, tuple[str, ...]], RetrievedDoc] | None
+    ) = None,
 ) -> EvidencePack:
     """Build a deterministic, globally budgeted evidence closure.
 
@@ -534,6 +537,28 @@ def build_evidence_pack(
         raise ValueError("separator_chars must be a non-negative integer")
 
     normalized, dropped = _normalize_candidates(candidates)
+    if document_transform is not None:
+        for candidate in normalized:
+            original_chunk_id = _chunk_id(candidate.doc)
+            canonical_doc = cast(dict[str, Any], copy.deepcopy(candidate.doc))
+            raw_retrieval = canonical_doc.get("retrieval")
+            canonical_retrieval = (
+                dict(raw_retrieval) if isinstance(raw_retrieval, Mapping) else {}
+            )
+            if candidate.matched_requirement_ids:
+                canonical_retrieval["matched_requirement_ids"] = list(
+                    candidate.matched_requirement_ids
+                )
+            else:
+                canonical_retrieval.pop("matched_requirement_ids", None)
+            canonical_doc["retrieval"] = canonical_retrieval
+            transformed = document_transform(
+                cast(RetrievedDoc, canonical_doc), candidate.matched_requirement_ids
+            )
+            if _chunk_id(transformed) != original_chunk_id:
+                raise ValueError("document_transform must preserve chunk_id")
+            candidate.doc = transformed
+            candidate.matched_requirement_ids = _document_requirement_ids(transformed)
     input_presentation = sorted(normalized, key=_presentation_key)
     input_estimated_chars, _, _, _ = _estimated_chars(
         input_presentation,
@@ -788,6 +813,9 @@ def build_evidence_pack_from_sources(
     min_overlap_chars: int = DEFAULT_MIN_OVERLAP_CHARS,
     document_char_cost: Callable[[Mapping[str, Any], str], int] | None = None,
     separator_chars: int = 0,
+    document_transform: (
+        Callable[[RetrievedDoc, tuple[str, ...]], RetrievedDoc] | None
+    ) = None,
 ) -> EvidencePack:
     """Convenience entry point for retrieval pipelines and offline evaluation."""
 
@@ -804,4 +832,5 @@ def build_evidence_pack_from_sources(
         min_overlap_chars=min_overlap_chars,
         document_char_cost=document_char_cost,
         separator_chars=separator_chars,
+        document_transform=document_transform,
     )

@@ -58,6 +58,17 @@ class RetrievalMetrics(TypedDict, total=False):
     evidence_text_start: int
     evidence_text_end: int
     evidence_trimmed_overlap_chars: int
+    evidence_span_selected: bool
+    evidence_span_input_start: int
+    evidence_span_input_end: int
+    evidence_span_start: int
+    evidence_span_end: int
+    evidence_span_original_chars: int
+    evidence_span_selected_chars: int
+    evidence_span_score: float
+    evidence_span_matched_terms: List[str]
+    evidence_span_matched_requirement_ids: List[str]
+    evidence_span_reason: str
 
 
 # RetrievedDoc 是检索、重排和生成节点共享的文档结构。
@@ -70,6 +81,10 @@ class RetrievedDoc(TypedDict):
     _evidence_source_start: NotRequired[int]
     _evidence_source_end: NotRequired[int]
     _evidence_source_overlap_chars: NotRequired[int]
+    _evidence_span_source_text: NotRequired[str]
+    _evidence_span_source_start: NotRequired[int]
+    _evidence_span_source_end: NotRequired[int]
+    _evidence_span_source_overlap_chars: NotRequired[int]
 
 
 # ChatMessage 保存会话历史中的单条消息。
@@ -201,6 +216,13 @@ class GraphState(TypedDict):
     retrieval_carryover_count: NotRequired[int]
     parent_context_expanded_count: NotRequired[int]
     neighbor_context_expanded_count: NotRequired[int]
+    evidence_span_input_count: NotRequired[int]
+    evidence_span_output_count: NotRequired[int]
+    evidence_span_compressed_count: NotRequired[int]
+    evidence_span_fallback_count: NotRequired[int]
+    evidence_span_input_chars: NotRequired[int]
+    evidence_span_selected_chars: NotRequired[int]
+    evidence_span_reason_counts: NotRequired[Dict[str, int]]
     evidence_pack_input_count: NotRequired[int]
     evidence_pack_kept_count: NotRequired[int]
     evidence_pack_dropped_count: NotRequired[int]

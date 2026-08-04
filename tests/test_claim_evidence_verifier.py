@@ -19,6 +19,7 @@ from cogdoc.agents.claim_evidence_verifier import (
     make_claim_audit_exemption,
 )
 from cogdoc.config.settings import Settings
+from cogdoc.tools.evidence_rendering import render_evidence_block
 
 
 def _settings(**overrides):
@@ -60,6 +61,24 @@ def _state(answer: str, *, doc: dict | None = None) -> dict:
         "reranked_docs": [doc or _doc()],
         "is_local": False,
     }
+
+
+def test_claim_evidence_rows_use_generator_renderer_before_truncation():
+    doc = _doc("报名截止日期是 8 月 30 日。")
+    doc["meta"].update(
+        {
+            "section_path": "Rules > Registration",
+            "context": "前文：报名要求。",
+        }
+    )
+    rendered = render_evidence_block(doc)
+    max_chars = len(rendered) - 5
+
+    row = claim_evidence_verifier._evidence_rows([doc], max_chars)[0]
+
+    assert row["text"] == rendered[:max_chars]
+    assert "章节路径：Rules > Registration" in row["text"]
+    assert "定位上下文：" in row["text"]
 
 
 def test_summary_documents_use_exact_section_evidence_not_same_page_siblings():

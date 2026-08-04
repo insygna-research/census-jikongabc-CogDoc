@@ -510,6 +510,7 @@ chunk_id = sha256:{source_sha256}:src:{source_name}:p{page_start}-p{page_end}:c{
 - **改写 + 证据需求规划** — `QueryRewriteAgent` 生成 1–3 条关键词查询，同时起草最多 3 个 `{question, retrieval_query, recovery_query}` 原子需求；服务端确定性分配 `r1..r3`，空规划或模型失败时回退为一个原问题需求。`RewriteVerifyAgent` 用一次 embedding 批处理执行两层语义守卫：先用含近期历史的原问题校验 requirement question，再用该 requirement 校验主/恢复查询。漂移的 requirement 被丢弃，漂移的聚焦查询回退到 requirement question，全部丢弃时回退原问题需求；原有改写保留/丢弃行为和 `steps_trace` 不变。
 - **带归因的 query-level RRF** — 原问题、改写和 requirement 查询都会检索 PDF 混合引擎与已审核派生知识。每个 query/channel 排名等权贡献 `score(d) = Σ_q,c 1 / (k + rank_q,c(d))`（`k = 60`），候选按稳定 `chunk_id` 去重，同分按身份键确定性打破。融合元数据保留命中的 queries、channels、requirement IDs、命中数、原问题是否命中、最佳排名和检索轮次，不再把归因压缩为一条 rewrite。
 - **有界 Parent–Child 补充** — child 级 rerank 与支持度判断完成后，每个原文命中从相同 `parent_chunk_id` 中加载连续、左右平衡的 sibling 窗口，并分别受块数与字符预算限制。补入 child 保留自己的 ID/页码，并记录 `context_anchor_chunk_id` 和 `context_expansion=section`；派生知识不做扩展。结构缺失、不完整或显式关闭时走旧邻块路径，因此旧索引仍可读取，而版本门禁会让新索引安全重建。
+- **Query-aware 抽取式证据 span** — 应用全局 pack 预算前，每个 canonical 长 chunk 会根据 query 与 requirement 的词项重合，被缩减为一个连续、逐字保真的原文区间；禁止改写或拼接不连续片段。`evidence_span_start` / `evidence_span_end` 是相对最终 child 正文的 0-based、左闭右开 offset。没有可靠命中时 fail-open 保留当前可用全文。隔离的模型视图会移除 `meta.context`，避免 span 外事实通过渲染重新进入闭集。自适应检索可从本地私有原文副本重新选 span，但 API 与 trace 都不会暴露该副本。
 - **确定性 Evidence Pack** — 结构补充后的 anchor、requirement 归因候选、自适应检索 carryover 与 sibling 上下文会被压缩为一个不可变 QA 证据闭集，并统一受全局块数和字符预算限制。字符预算精确等于 QA generator 最终渲染的证据上下文，完整计入文档/知识标签、身份属性、定位头、materialize 后正文和块间分隔符；system 指令、对话历史和 query 不计入，也不伪装成模型 token 估算。anchor 与已验证 carryover 是硬约束；若它们单独就超出任一预算，QA 会 fail-closed，而不会静默丢弃。证据 verifier（可只选闭集子集）、答案 generator 和 claim audit 都只能消费同一闭集内的 chunk。连续 child 的精确 overlap 只会在隔离的 pack 副本中移除；`retrieval.evidence_text_start`、`retrieval.evidence_text_end` 和 `retrieval.evidence_trimmed_overlap_chars` 保留其原文范围与裁剪归因。
 - **Requirement quota + 重排** — 进入 `BGEReranker`（`bge-reranker-v2-m3`）前，有界候选选择器会为每个 requirement 至少保留一条有归因候选，再按融合顺序补足剩余预算。证据校验候选也先覆盖 requirement，再做来源多样化，避免强势的第一条查询饿死后续需求命中。最终重排仍对 `(原问题, doc)` 打分，rewrite 不会直接偏置 cross-encoder 分数。
 - **闭集证据校验 + 有界自适应恢复** — 开启证据校验后，符合二阶段条件的精确事实问题和所有多 requirement 问题，生成前都必须对每个需求给出一份 `supported` / `missing` / `contradictory` 结论，且只能使用给定 requirement ID 和 chunk ID。需求 ID 遗漏/重复/未知、伪造 chunk、未支持需求或无证据冲突都不能放行。若缺口可恢复，CogDoc 默认只重试一次：缺失 requirement 的 `recovery_query` 会紧随原问题优先执行，检索深度按有上限倍数扩大，融合/重排后重新校验。重试数、查询预算和 `top_k` 全部有界，verifier 异常不会重试；最终仍有 requirement 无有效支持时跳过生成，以稳定拒答 fail-closed。
@@ -640,6 +641,9 @@ python scripts/migrate_state.py --verify-only   # 校验导入结果
 | `QA_PARENT_CONTEXT_ENABLED` | `true` | 为 rerank 命中的 child 补充同章节有界 sibling；设为 `false` 时保留旧邻块扩展 |
 | `QA_PARENT_CONTEXT_MAX_CHUNKS` | `5` | 每个结构父级窗口最多保留的 child 数（含 anchor） |
 | `QA_PARENT_CONTEXT_MAX_CHARS` | `3600` | 每个结构父级窗口的软字符预算；anchor 永不被丢弃 |
+| `QA_EVIDENCE_SPAN_ENABLED` | `true` | 在 Evidence Pack 预算前，从每个 canonical 长 chunk 选择一个感知 query 的连续原文区间 |
+| `QA_EVIDENCE_SPAN_MAX_CHARS_PER_DOC` | `420` | 每个 chunk 最多选择的正文字数；无法可靠匹配时 fail-open 保留当前可用全文 |
+| `QA_EVIDENCE_SPAN_CONTEXT_SENTENCES` | `1` | 证据命中句两侧各自最多保留的相邻句数 |
 | `QA_EVIDENCE_PACK_MAX_DOCS` | `8` | 不可变 QA 模型证据载荷的全局 chunk 上限；anchor 与已验证 carryover 仍是硬约束 |
 | `QA_EVIDENCE_PACK_MAX_CHARS` | `7200` | 最终渲染证据上下文的精确字符上限，含标签/ID/定位/正文/分隔符，不含 system/history/query |
 | `QA_ABSTAIN_ENABLED` | `true` | 检索置信度不足时在调用 LLM 前确定性拒答 |
@@ -717,7 +721,7 @@ python scripts/migrate_state.py --verify-only   # 校验导入结果
 
 - `rewritten_queries`：可选、经复核的 rewrite 输入，用于真实检索运行。
 - `evidence_requirements`：最多 3 个运行时查询计划，每项包含 `requirement_id`、`question`、`retrieval_query` 和 `recovery_query`。它们驱动带 requirement 归因的检索和有界恢复路径；`--verify-evidence` 会额外执行结构化闭集判断。
-- `gold_requirements`：只供 evaluator 使用的标准答案。每项给出 `requirement_id`，并至少提供 `acceptable_chunk_ids` 或 `acceptable_sources` 之一；优先标注 chunk，因为命中正确 PDF 里的错误文本块不应算作证据覆盖。
+- `gold_requirements`：只供 evaluator 使用的标准答案。每项给出 `requirement_id`，并至少提供 `acceptable_chunk_ids` 或 `acceptable_sources` 之一；优先标注 chunk，因为命中正确 PDF 里的错误文本块不应算作证据覆盖。还可增加互为替代的 `acceptable_spans`，每项为 `{chunk_id, start, end}`；offset 是 overlap/span 裁剪前 canonical child 正文中的 0-based 左闭右开位置。
 - `hard_negative_chunk_ids`：可选的已知干扰 chunk，用于衡量拒绝能力。
 
 下面是一个为便于阅读而格式化的 JSONL 对象（写入数据集时应放在同一物理行）：
@@ -735,14 +739,14 @@ python scripts/migrate_state.py --verify-only   # 校验导入结果
     {"requirement_id": "r2", "question": "费用是多少？", "retrieval_query": "申请费用", "recovery_query": "报名成本"}
   ],
   "gold_requirements": [
-    {"requirement_id": "r1", "acceptable_chunk_ids": ["deadline-chunk"]},
+    {"requirement_id": "r1", "acceptable_chunk_ids": ["deadline-chunk"], "acceptable_spans": [{"chunk_id": "deadline-chunk", "start": 120, "end": 168}]},
     {"requirement_id": "r2", "acceptable_chunk_ids": ["fee-chunk"]}
   ],
   "hard_negative_chunk_ids": ["old-policy-chunk"]
 }
 ```
 
-有标注时，报告会新增 `requirement_recall@k`、`all_requirements_covered@k` 和二值相关性 `evidence_ndcg@k`；chunk 级 gold 还会启用 `chunk_precision@k`，hard negative 会启用 `hard_negative_rejection@k`。`generation_requirement_coverage` 会用实际送入生成阶段的有界 Parent–Child 上下文检查相同 gold requirements。执行 verifier 时新增 `requirement_full_coverage_rate`；执行 adaptive recovery 时新增 `adaptive_retry_trigger_rate`，对确实重试的样本还会计算 `adaptive_rescue_rate`。`retrieval_query_count`、`parent_context_trigger_rate` 以及 parent/neighbor 扩展数量用于暴露发布成本和结构索引覆盖。trigger/count 指标不进入默认 baseline gate；证据覆盖、排序、干扰拒绝与救回指标在出现时可进入基线门禁。
+有标注时，报告会新增 `requirement_recall@k`、`all_requirements_covered@k` 和二值相关性 `evidence_ndcg@k`；chunk 级 gold 还会启用 `chunk_precision@k`，hard negative 会启用 `hard_negative_rejection@k`。`generation_requirement_coverage` 会用实际送入生成阶段的有界 Parent–Child 上下文检查相同 gold requirements。执行 verifier 时新增 `requirement_full_coverage_rate`；执行 adaptive recovery 时新增 `adaptive_retry_trigger_rate`，对确实重试的样本还会计算 `adaptive_rescue_rate`。`retrieval_query_count`、`parent_context_trigger_rate` 以及 parent/neighbor 扩展数量用于暴露发布成本和结构索引覆盖。Evidence span 的字符保留率、fallback 率及 gold span 裁剪前后召回率只属于发布诊断，永不进入默认 gate。trigger/count 指标同样不进入默认 baseline gate；证据覆盖、排序、干扰拒绝与救回指标在出现时可进入基线门禁。
 
 每条报告行还会保存 `retrieved_items`、`generation_context_items`、`evidence_requirement_assessments`、`missing_evidence_requirement_ids`、`retrieval_retry_count`、`adaptive_retrieval_rescued`、`retrieval_query_count`、`retrieval_ranking_count`、`retrieval_carryover_count`、parent/neighbor 扩展数量以及分 channel 计数 `retrieval_channel_counts`，因此可以把回归定位到规划、融合、结构补充、校验或恢复阶段，而不是只从最终来源列表反推。完整 QA trace 同样记录扩展数量，证据预览则保留章节身份和上下文归因元数据，便于灰度对比。
 

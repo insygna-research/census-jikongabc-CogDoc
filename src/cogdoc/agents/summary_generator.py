@@ -16,6 +16,7 @@ from cogdoc.graph.state import (
     SummarySectionPlan,
     SummarySectionResult,
 )
+from cogdoc.tools.evidence_rendering import render_evidence_context
 from cogdoc.tools.tokenizer import tokenize_mixed_text
 
 
@@ -118,23 +119,8 @@ def select_section_docs(
 
 # 格式化 summary context。
 def format_summary_context(docs: List[RetrievedDoc]) -> str:
-    # Document 标签属性是 citation checker 的唯一来源。
-    blocks = []
-    for doc in docs:
-        meta = doc.get("meta", {})
-        source = meta.get("source", "未知文件")
-        page = meta.get("page", 1)
-        chunk_id = meta.get("chunk_id", meta.get("chunk_index", 0))
-        chunk_context = str(meta.get("context", "") or "").strip()
-        body = doc["text"].strip()
-        if chunk_context:
-            body = f"定位上下文：\n{chunk_context}\n\n正文：\n{body}"
-        blocks.append(
-            f'<Document source="{source}" page="{page}" chunk_id="{chunk_id}">\n'
-            f"{body}\n"
-            f"</Document>"
-        )
-    return "\n\n".join(blocks)
+    # Summary、Compare、QA 与 claim verifier 共用同一模型可见证据口径。
+    return render_evidence_context(docs)
 
 
 # 构建 section citations。

@@ -1,10 +1,12 @@
 from cogdoc.agents.summary_generator import (
     attach_section_citations,
     build_section_citations,
+    format_summary_context,
     is_no_evidence_summary,
     select_section_docs,
     tokenize_for_section,
 )
+from cogdoc.tools.evidence_rendering import render_evidence_context
 
 
 # 构造测试用文档。
@@ -21,6 +23,22 @@ def _doc(text: str, idx: int) -> dict:
             "chunk_index": idx,
         },
     }
+
+
+def test_summary_and_compare_use_the_shared_claim_evidence_renderer():
+    doc = _doc("训练分为预训练和微调。", 0)
+    doc["meta"].update(
+        {
+            "section_path": "Methods > Training",
+            "context": "前文：模型结构。",
+        }
+    )
+
+    rendered = format_summary_context([doc])
+
+    assert rendered == render_evidence_context([doc])
+    assert "章节路径：Methods > Training" in rendered
+    assert "定位上下文：" in rendered
 
 
 # 验证 select section docs keeps relevant chunks in original order 场景。

@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from cogdoc.agents import evidence_verifier
@@ -11,6 +13,7 @@ from cogdoc.agents.evidence_verifier import (
 )
 from cogdoc.config.settings import Settings
 from cogdoc.graph.subgraphs import qa
+from cogdoc.tools.evidence_rendering import render_evidence_block
 
 
 def _settings(**overrides):
@@ -47,6 +50,25 @@ def _requirement(requirement_id: str, question: str) -> dict[str, str]:
         "retrieval_query": question,
         "recovery_query": question,
     }
+
+
+def test_evidence_payload_uses_generator_renderer_before_truncation():
+    doc = _doc("child:1", "paper.pdf", "训练分为预训练和微调。")
+    doc["meta"].update(
+        {
+            "section_path": "Methods > Training",
+            "context": "前文：模型结构。",
+        }
+    )
+    rendered = render_evidence_block(doc)
+    max_chars = len(rendered) - 7
+
+    row = json.loads(evidence_verifier._evidence_payload([doc], max_chars))[0]
+
+    assert row["text"] == rendered[:max_chars]
+    assert "章节路径：Methods > Training" in row["text"]
+    assert "定位上下文：" in row["text"]
+    assert evidence_verifier.Generator._build_context_string([doc]) == rendered
 
 
 # 精确事实问题进入校验，普通概念解释不增加额外模型调用。

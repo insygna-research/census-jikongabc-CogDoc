@@ -452,6 +452,55 @@ def test_deduped_requirement_attribution_is_materialized_for_verifier_selection(
     assert pack.kept_docs[0]["retrieval"]["matched_requirement_ids"] == ["r2"]
 
 
+def test_document_transform_runs_once_after_identity_and_requirement_merge():
+    anchor = _doc("shared", "anchor")
+    attributed = _doc("shared", "candidate")
+    attributed["retrieval"] = {"matched_requirement_ids": ["r2"]}
+    calls = []
+
+    def transform(doc, matched_requirement_ids):
+        calls.append((doc["meta"]["chunk_id"], matched_requirement_ids))
+        return {**doc, "text": "selected-span", "meta": dict(doc["meta"])}
+
+    pack = build_evidence_pack_from_sources(
+        anchors=[anchor],
+        verification_candidates=[attributed],
+        max_docs=1,
+        max_chars=100,
+        document_transform=transform,
+    )
+
+    assert calls == [("shared", ("r2",))]
+    assert pack.kept_docs[0]["text"] == "selected-span"
+    assert anchor["text"] == "anchor"
+
+
+def test_document_transform_can_downgrade_effective_requirement_coverage():
+    doc = _doc("shared", "r1 evidence then distant r2 evidence")
+    doc["retrieval"] = {"matched_requirement_ids": ["r1", "r2"]}
+
+    def transform(canonical_doc, _matched_requirement_ids):
+        transformed = {
+            **canonical_doc,
+            "text": "r1 evidence",
+            "meta": dict(canonical_doc["meta"]),
+            "retrieval": dict(canonical_doc["retrieval"]),
+        }
+        transformed["retrieval"]["matched_requirement_ids"] = ["r1"]
+        return transformed
+
+    pack = build_evidence_pack(
+        [EvidencePackCandidate(doc, matched_requirement_ids=("r1", "r2"))],
+        requirement_ids=["r1", "r2"],
+        max_docs=1,
+        max_chars=100,
+        document_transform=transform,
+    )
+
+    assert pack.kept[0].matched_requirement_ids == ("r1",)
+    assert pack.kept_docs[0]["retrieval"]["matched_requirement_ids"] == ["r1"]
+
+
 def test_membership_priority_and_natural_parent_presentation_are_separate():
     anchor = _doc("c1", "middle", child_order=1)
     left = _doc("c0", "left", child_order=0, context_anchor_chunk_id="c1")

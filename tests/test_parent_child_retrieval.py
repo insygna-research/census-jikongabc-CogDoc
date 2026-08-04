@@ -225,6 +225,89 @@ def test_evidence_pack_hard_budget_excess_fails_closed(monkeypatch):
     assert qa.retrieval_check({**state, **output}) == "abstain_node"
 
 
+def test_rerank_selects_one_traceable_span_for_the_shared_evidence_set(monkeypatch):
+    target = "报名截止日期为 2026 年 8 月 30 日。"
+    original_text = f"{'无关背景。' * 40}{target}{'附录说明。' * 40}"
+    anchor = _child(0)
+    anchor["text"] = original_text
+    anchor["meta"]["context"] = "只存在于旧定位上下文的秘密事实"
+    anchor["retrieval"] = {
+        "bm25_score": 12.0,
+        "matched_requirement_ids": ["r1"],
+    }
+    _install(
+        monkeypatch,
+        [anchor],
+        qa_evidence_span_max_chars_per_doc=120,
+        qa_evidence_span_context_sentences=0,
+    )
+    monkeypatch.setattr(qa.BGEReranker, "default_device", lambda: "cpu")
+    monkeypatch.setattr(qa, "log_event", lambda *args, **kwargs: None)
+
+    output = qa.rerank_node(
+        {
+            "query": "报名截止日期是什么？",
+            "doc_id": "kb",
+            "retrieved_docs": [anchor],
+            "evidence_requirements": [
+                {
+                    "requirement_id": "r1",
+                    "question": "报名截止日期是什么？",
+                    "retrieval_query": "报名 截止 日期",
+                    "recovery_query": "报名日期",
+                }
+            ],
+        }
+    )
+
+    packed = output["reranked_docs"][0]
+    assert packed["text"] == target
+    assert packed["meta"].get("context") is None
+    assert output["verification_docs"][0]["text"] == target
+    assert output["evidence_span_input_count"] == 1
+    assert output["evidence_span_output_count"] == 1
+    assert output["evidence_span_compressed_count"] == 1
+    assert output["evidence_span_fallback_count"] == 0
+    assert output["evidence_span_selected_chars"] == len(target)
+    assert output["evidence_span_input_chars"] == len(original_text)
+    assert output["evidence_span_reason_counts"] == {"query_span": 1}
+    retrieval = packed["retrieval"]
+    start = original_text.index(target)
+    assert retrieval["evidence_span_start"] == start
+    assert retrieval["evidence_span_end"] == start + len(target)
+    assert retrieval["evidence_text_start"] == start
+    assert retrieval["evidence_text_end"] == start + len(target)
+    assert retrieval["matched_requirement_ids"] == ["r1"]
+    public_evidence = qa._generation_evidence(packed)
+    assert public_evidence["retrieval"]["evidence_span_input_start"] == 0
+    assert public_evidence["retrieval"]["evidence_span_start"] == start
+    assert public_evidence["retrieval"]["evidence_span_matched_requirement_ids"] == [
+        "r1"
+    ]
+    assert not any(key.startswith("_evidence_") for key in public_evidence)
+    assert anchor["text"] == original_text
+    assert anchor["meta"]["context"] == "只存在于旧定位上下文的秘密事实"
+
+
+def test_disabling_evidence_spans_keeps_the_full_pack_view(monkeypatch):
+    anchor = _child(0)
+    anchor["text"] = "完整正文。" * 40
+    anchor["meta"]["context"] = "定位上下文"
+    anchor["retrieval"] = {"bm25_score": 12.0}
+    _install(monkeypatch, [anchor], qa_evidence_span_enabled=False)
+    monkeypatch.setattr(qa.BGEReranker, "default_device", lambda: "cpu")
+    monkeypatch.setattr(qa, "log_event", lambda *args, **kwargs: None)
+
+    output = qa.rerank_node(
+        {"query": "完整正文", "doc_id": "kb", "retrieved_docs": [anchor]}
+    )
+
+    assert output["reranked_docs"][0]["text"] == anchor["text"]
+    assert output["reranked_docs"][0]["meta"]["context"] == "定位上下文"
+    assert output["evidence_span_input_count"] == 0
+    assert output["evidence_span_output_count"] == 0
+
+
 def test_generation_evidence_omits_fake_structure_but_keeps_real_zero_indexes():
     legacy = qa._generation_evidence(_child(0, parent=None))
     structured = qa._generation_evidence(_child(0))

@@ -183,6 +183,13 @@ def _trace_config(
         "qa_parent_context_enabled": settings.qa_parent_context_enabled,
         "qa_parent_context_max_chunks": settings.qa_parent_context_max_chunks,
         "qa_parent_context_max_chars": settings.qa_parent_context_max_chars,
+        "qa_evidence_span_enabled": settings.qa_evidence_span_enabled,
+        "qa_evidence_span_max_chars_per_doc": (
+            settings.qa_evidence_span_max_chars_per_doc
+        ),
+        "qa_evidence_span_context_sentences": (
+            settings.qa_evidence_span_context_sentences
+        ),
         "qa_evidence_pack_max_docs": settings.qa_evidence_pack_max_docs,
         "qa_evidence_pack_max_chars": settings.qa_evidence_pack_max_chars,
         "qa_abstain_enabled": settings.qa_abstain_enabled,

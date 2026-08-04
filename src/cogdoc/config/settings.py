@@ -285,6 +285,22 @@ class Settings(BaseSettings):
         le=30000,
         validation_alias="QA_PARENT_CONTEXT_MAX_CHARS",
     )
+    # 在全局 pack 之前从长 chunk 中选择可回溯的连续原文区间。
+    qa_evidence_span_enabled: bool = Field(
+        default=True, validation_alias="QA_EVIDENCE_SPAN_ENABLED"
+    )
+    qa_evidence_span_max_chars_per_doc: int = Field(
+        default=420,
+        ge=120,
+        le=5000,
+        validation_alias="QA_EVIDENCE_SPAN_MAX_CHARS_PER_DOC",
+    )
+    qa_evidence_span_context_sentences: int = Field(
+        default=1,
+        ge=0,
+        le=5,
+        validation_alias="QA_EVIDENCE_SPAN_CONTEXT_SENTENCES",
+    )
     # Parent hydration 后再施加一次请求级证据预算；anchor/pinned 是不可丢硬约束。
     qa_evidence_pack_max_docs: int = Field(
         default=8,

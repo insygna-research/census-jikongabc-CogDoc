@@ -23,6 +23,9 @@ def test_settings_defaults_match_current_runtime_contract():
     assert settings.qa_parent_context_enabled is True
     assert settings.qa_parent_context_max_chunks == 5
     assert settings.qa_parent_context_max_chars == 3600
+    assert settings.qa_evidence_span_enabled is True
+    assert settings.qa_evidence_span_max_chars_per_doc == 420
+    assert settings.qa_evidence_span_context_sentences == 1
     assert settings.qa_evidence_pack_max_docs == 8
     assert settings.qa_evidence_pack_max_chars == 7200
     assert settings.qa_abstain_enabled is True
@@ -81,6 +84,9 @@ def test_settings_reads_environment_overrides(monkeypatch):
     monkeypatch.setenv("QA_PARENT_CONTEXT_ENABLED", "false")
     monkeypatch.setenv("QA_PARENT_CONTEXT_MAX_CHUNKS", "7")
     monkeypatch.setenv("QA_PARENT_CONTEXT_MAX_CHARS", "4200")
+    monkeypatch.setenv("QA_EVIDENCE_SPAN_ENABLED", "false")
+    monkeypatch.setenv("QA_EVIDENCE_SPAN_MAX_CHARS_PER_DOC", "480")
+    monkeypatch.setenv("QA_EVIDENCE_SPAN_CONTEXT_SENTENCES", "2")
     monkeypatch.setenv("QA_EVIDENCE_PACK_MAX_DOCS", "10")
     monkeypatch.setenv("QA_EVIDENCE_PACK_MAX_CHARS", "8400")
     monkeypatch.setenv("QA_ABSTAIN_MAX_VECTOR_DISTANCE", "0.75")
@@ -104,6 +110,9 @@ def test_settings_reads_environment_overrides(monkeypatch):
     assert settings.qa_parent_context_enabled is False
     assert settings.qa_parent_context_max_chunks == 7
     assert settings.qa_parent_context_max_chars == 4200
+    assert settings.qa_evidence_span_enabled is False
+    assert settings.qa_evidence_span_max_chars_per_doc == 480
+    assert settings.qa_evidence_span_context_sentences == 2
     assert settings.qa_evidence_pack_max_docs == 10
     assert settings.qa_evidence_pack_max_chars == 8400
     assert settings.qa_abstain_max_vector_distance == 0.75
@@ -118,6 +127,20 @@ def test_settings_reads_environment_overrides(monkeypatch):
     assert settings.claim_verification_max_claims == 24
     assert settings.qa_adaptive_retrieval_max_retries == 2
     assert settings.qa_adaptive_retrieval_max_top_k == 24
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("qa_evidence_span_max_chars_per_doc", 119),
+        ("qa_evidence_span_max_chars_per_doc", 5001),
+        ("qa_evidence_span_context_sentences", -1),
+        ("qa_evidence_span_context_sentences", 6),
+    ],
+)
+def test_settings_rejects_evidence_span_values_outside_safe_bounds(field, value):
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, **{field: value})
 
 
 # 验证节点可以独立选择后端和模型。

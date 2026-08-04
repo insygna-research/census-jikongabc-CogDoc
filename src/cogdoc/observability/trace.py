@@ -10,6 +10,11 @@ from cogdoc.tools.retriever.metadata import safe_retrieval_metadata
 
 TRACE_SCHEMA_VERSION = "v1"
 TRACE_PREVIEW_CHARS = 120
+_PRIVATE_EVIDENCE_KEY_PREFIXES = ("_evidence_",)
+_DOCUMENT_IDENTITY_META_KEYS = frozenset(("chunk_id", "knowledge_id"))
+_DOCUMENT_POSITION_META_KEYS = frozenset(
+    ("page", "page_start", "page_end", "chunk_index", "local_chunk_index")
+)
 
 
 def _nonnegative_int(value: Any) -> int:
@@ -44,12 +49,40 @@ def _preview(text: Any, limit: int = TRACE_PREVIEW_CHARS) -> str:
     return compact[:limit]
 
 
+def _is_private_evidence_key(value: Any) -> bool:
+    key = str(value)
+    return any(key.startswith(prefix) for prefix in _PRIVATE_EVIDENCE_KEY_PREFIXES)
+
+
+def _is_retrieved_doc(value: Mapping[str, Any]) -> bool:
+    if "text" not in value:
+        return False
+    meta = value.get("meta")
+    if not isinstance(meta, Mapping):
+        return False
+    has_identity = any(
+        meta.get(key) not in (None, "") for key in _DOCUMENT_IDENTITY_META_KEYS
+    )
+    has_source_position = bool(meta.get("source")) and any(
+        key in meta for key in _DOCUMENT_POSITION_META_KEYS
+    )
+    return has_identity or has_source_position or bool(meta.get("source_type"))
+
+
 # 将 LangChain / Pydantic 等运行期对象转成可写入 trace JSON 的结构。
 def _json_safe(value: Any) -> Any:
     if value is None or isinstance(value, str | int | float | bool):
         return value
     if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
+        # RetrievedDoc 的正文只保留短预览；pack/span 为跨轮恢复保存的私有
+        # 原文无论嵌套在哪一层都不得进入 trace。
+        if _is_retrieved_doc(value):
+            return _json_safe(_doc_ref(value))
+        return {
+            str(key): _json_safe(item)
+            for key, item in value.items()
+            if not _is_private_evidence_key(key)
+        }
     if isinstance(value, list | tuple | set):
         return [_json_safe(item) for item in value]
     if hasattr(value, "model_dump"):
@@ -73,8 +106,8 @@ def _json_safe(value: Any) -> Any:
 
 # 构建文档引用摘要。
 def _doc_ref(doc: Mapping[str, Any]) -> dict:
-    meta = doc.get("meta", {})
-    retrieval = doc.get("retrieval") or {}
+    meta = _mapping_or_empty(doc.get("meta"))
+    retrieval = _mapping_or_empty(doc.get("retrieval"))
     return {
         "chunk_id": meta.get("chunk_id", ""),
         "parent_chunk_id": meta.get("parent_chunk_id", ""),
@@ -233,6 +266,12 @@ def build_trace_step(
             output.get("neighbor_context_expanded_count")
         )
     for field in (
+        "evidence_span_input_count",
+        "evidence_span_output_count",
+        "evidence_span_compressed_count",
+        "evidence_span_fallback_count",
+        "evidence_span_input_chars",
+        "evidence_span_selected_chars",
         "evidence_pack_input_count",
         "evidence_pack_kept_count",
         "evidence_pack_dropped_count",
@@ -244,6 +283,13 @@ def build_trace_step(
     ):
         if field in output:
             step[field] = _nonnegative_int(output.get(field))
+    span_reason_counts = output.get("evidence_span_reason_counts")
+    if isinstance(span_reason_counts, Mapping):
+        step["evidence_span_reason_counts"] = {
+            _preview(reason, 80): _nonnegative_int(count)
+            for reason, count in span_reason_counts.items()
+            if _preview(reason, 80)
+        }
     drop_reason_counts = output.get("evidence_pack_drop_reason_counts")
     if isinstance(drop_reason_counts, Mapping):
         step["evidence_pack_drop_reason_counts"] = {

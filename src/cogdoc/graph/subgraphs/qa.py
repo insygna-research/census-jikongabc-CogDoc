@@ -2,7 +2,7 @@ import copy
 import logging
 import math
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from threading import RLock
 from typing import Any, cast
 from langchain_core.messages import AIMessage, SystemMessage
@@ -37,6 +37,7 @@ from cogdoc.tools.retriever.evidence_pack import (
     EvidencePack,
     build_evidence_pack_from_sources,
 )
+from cogdoc.tools.retriever.evidence_spans import EvidenceSpanSelector
 from cogdoc.tools.retriever.confidence import assess_retrieval_support
 from cogdoc.tools.retriever.fusion import select_rerank_candidates
 from cogdoc.tools.reranker import BGEReranker, skipped_cpu_rerank_docs
@@ -442,16 +443,72 @@ def _verification_candidates_with_context(
 
 def _build_qa_evidence_pack(
     *,
+    query: str,
+    evidence_requirements: Sequence[Mapping[str, Any]],
     anchors: list[RetrievedDoc],
     expanded_docs: list[RetrievedDoc],
     ranked_candidates: list[RetrievedDoc],
     pinned_chunk_ids: set[str],
     requirement_ids: list[str],
     settings: Any,
-) -> EvidencePack:
+) -> tuple[EvidencePack, dict[str, Any]]:
     """Build the one closed evidence set shared by verifier and generator."""
 
-    return build_evidence_pack_from_sources(
+    span_metrics: dict[str, Any] = {
+        "evidence_span_input_count": 0,
+        "evidence_span_output_count": 0,
+        "evidence_span_compressed_count": 0,
+        "evidence_span_fallback_count": 0,
+        "evidence_span_input_chars": 0,
+        "evidence_span_selected_chars": 0,
+        "evidence_span_reason_counts": {},
+    }
+    document_transform = None
+    if bool(getattr(settings, "qa_evidence_span_enabled", True)):
+        selector = EvidenceSpanSelector(
+            query=query,
+            evidence_requirements=evidence_requirements,
+            max_chars_per_doc=max(
+                1,
+                int(getattr(settings, "qa_evidence_span_max_chars_per_doc", 420)),
+            ),
+            context_sentences=max(
+                0,
+                int(getattr(settings, "qa_evidence_span_context_sentences", 1)),
+            ),
+        )
+
+        def select_span(
+            doc: RetrievedDoc, matched_requirement_ids: tuple[str, ...]
+        ) -> RetrievedDoc:
+            selected = selector.select(
+                doc, matched_requirement_ids=matched_requirement_ids
+            )
+            retrieval = selected.get("retrieval", {})
+            reason = str(retrieval.get("evidence_span_reason") or "")
+            original_chars = max(
+                0, int(retrieval.get("evidence_span_original_chars") or 0)
+            )
+            selected_chars = max(
+                0, int(retrieval.get("evidence_span_selected_chars") or 0)
+            )
+            span_metrics["evidence_span_input_count"] += 1
+            span_metrics["evidence_span_output_count"] += 1
+            span_metrics["evidence_span_input_chars"] += original_chars
+            span_metrics["evidence_span_selected_chars"] += selected_chars
+            span_metrics["evidence_span_compressed_count"] += int(
+                bool(retrieval.get("evidence_span_selected"))
+            )
+            span_metrics["evidence_span_fallback_count"] += int(
+                reason.startswith("fallback_")
+            )
+            reason_counts = span_metrics["evidence_span_reason_counts"]
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+            return selected
+
+        document_transform = select_span
+
+    pack = build_evidence_pack_from_sources(
         anchors=anchors,
         expanded_docs=expanded_docs,
         verification_candidates=ranked_candidates,
@@ -461,7 +518,9 @@ def _build_qa_evidence_pack(
         max_chars=settings.qa_evidence_pack_max_chars,
         document_char_cost=evidence_block_char_count,
         separator_chars=len(EVIDENCE_BLOCK_SEPARATOR),
+        document_transform=document_transform,
     )
+    return pack, span_metrics
 
 
 def _verification_docs_from_pack(
@@ -738,7 +797,15 @@ def rerank_node(state: GraphState) -> dict:
         for doc in expanded_docs
     )
     pinned_ids = set(state.get("evidence_verified_chunk_ids", []))
-    evidence_pack = _build_qa_evidence_pack(
+    raw_requirements = state.get("evidence_requirements", [])
+    evidence_requirements = [
+        requirement
+        for requirement in raw_requirements
+        if isinstance(requirement, Mapping)
+    ]
+    evidence_pack, span_metrics = _build_qa_evidence_pack(
+        query=query,
+        evidence_requirements=evidence_requirements,
         anchors=reranked_docs,
         expanded_docs=expanded_docs,
         ranked_candidates=ranked_candidates,
@@ -776,6 +843,7 @@ def rerank_node(state: GraphState) -> dict:
         "retrieval_confidence": support.score,
         "retrieval_abstained": retrieval_abstained,
         "retrieval_abstain_reason": retrieval_abstain_reason,
+        **span_metrics,
         **pack_metrics,
     }
     verification_pending = bool(
@@ -808,6 +876,7 @@ def rerank_node(state: GraphState) -> dict:
         adaptive_retrieval_retry_pending=retry_pending,
         retrieval_round=state.get("retrieval_round", 0),
         requirement_count=len(requirement_ids),
+        **span_metrics,
         **pack_metrics,
     )
     result = {
@@ -822,6 +891,7 @@ def rerank_node(state: GraphState) -> dict:
         "adaptive_retrieval_retry_pending": retry_pending,
         "parent_context_expanded_count": parent_context_expanded_count,
         "neighbor_context_expanded_count": neighbor_context_expanded_count,
+        **span_metrics,
         **pack_metrics,
     }
     # 补检索终轮若因置信度过低不再进入 verifier，不能把上一轮逐需求结论

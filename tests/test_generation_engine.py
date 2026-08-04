@@ -15,6 +15,7 @@ from cogdoc.tools.retriever.evidence_pack import (
 from cogdoc.tools.evidence_rendering import (
     EVIDENCE_BLOCK_SEPARATOR,
     evidence_block_char_count,
+    render_evidence_block,
 )
 from cogdoc.tools.retriever.vector_retriever import EmbeddingModelMismatchError
 from cogdoc.agents.qa_generator import Generator
@@ -130,6 +131,7 @@ def test_generator_prompt_includes_section_path_without_replacing_child_identity
 
     rendered = Generator._build_context_string(docs)
 
+    assert rendered == render_evidence_block(docs[0])
     assert "章节路径：Methods > Training" in rendered
     assert 'chunk_id="child:7"' in rendered
     assert "section:2" not in rendered

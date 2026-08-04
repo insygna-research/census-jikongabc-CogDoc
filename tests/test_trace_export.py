@@ -13,10 +13,16 @@ from cogdoc.observability.trace import (
 
 # 验证跟踪步骤只保留安全正文预览。
 def test_build_trace_step_keeps_only_safe_document_preview():
+    hidden_pack_source = "PACK_PRIVATE_SOURCE_MUST_NOT_ENTER_TRACE"
+    hidden_span_source = "SPAN_PRIVATE_SOURCE_MUST_NOT_ENTER_TRACE"
     output = {
         "retrieved_docs": [
             {
                 "text": "非常长的正文" * 100,
+                "_evidence_source_text": hidden_pack_source,
+                "_evidence_source_start": 0,
+                "_evidence_span_source_text": hidden_span_source,
+                "_evidence_span_source_start": 0,
                 "meta": {
                     "chunk_id": "chunk-1",
                     "source": "a.pdf",
@@ -34,6 +40,9 @@ def test_build_trace_step_keeps_only_safe_document_preview():
                     "evidence_text_start": 60,
                     "evidence_text_end": 240,
                     "evidence_trimmed_overlap_chars": 60,
+                    "evidence_span_selected": True,
+                    "evidence_span_start": 60,
+                    "evidence_span_end": 240,
                     "unsafe": "不应保留",
                 },
             }
@@ -57,9 +66,113 @@ def test_build_trace_step_keeps_only_safe_document_preview():
     assert step["evidence"][0]["retrieval"]["evidence_text_start"] == 60
     assert step["evidence"][0]["retrieval"]["evidence_text_end"] == 240
     assert step["evidence"][0]["retrieval"]["evidence_trimmed_overlap_chars"] == 60
+    assert step["evidence"][0]["retrieval"]["evidence_span_selected"] is True
+    assert step["evidence"][0]["retrieval"]["evidence_span_start"] == 60
+    assert step["evidence"][0]["retrieval"]["evidence_span_end"] == 240
     assert "unsafe" not in step["evidence"][0]["retrieval"]
     assert len(step["evidence"][0]["text_preview"]) <= 120
     assert "answer" not in step
+    assert step["output_snapshot"]["answer"] == "不应进入 trace 的完整答案"
+    snapshot_doc = step["output_snapshot"]["retrieved_docs"][0]
+    assert "text" not in snapshot_doc
+    assert len(snapshot_doc["text_preview"]) <= 120
+    assert snapshot_doc["retrieval"]["evidence_span_start"] == 60
+    serialized = json.dumps(step, ensure_ascii=False)
+    assert hidden_pack_source not in serialized
+    assert hidden_span_source not in serialized
+
+
+def test_trace_payload_recursively_sanitizes_documents_and_private_sources():
+    full_text_tail = "FULL_DOCUMENT_TAIL_MUST_NOT_ENTER_TRACE"
+    pack_private = "NESTED_PACK_PRIVATE_SOURCE"
+    span_private = "NESTED_SPAN_PRIVATE_SOURCE"
+    claim_text = "声明正文必须保留"
+    message_text = "消息正文必须保留"
+    doc = {
+        "text": "公开短预览" + ("甲" * 240) + full_text_tail,
+        "meta": {
+            "chunk_id": "chunk-span",
+            "source": "span.pdf",
+            "page": 2,
+            "page_start": 2,
+            "page_end": 2,
+        },
+        "retrieval": {
+            "evidence_span_selected": True,
+            "evidence_span_start": 80,
+            "evidence_span_end": 200,
+            "evidence_text_start": 96,
+            "evidence_text_end": 200,
+            "evidence_trimmed_overlap_chars": 16,
+            "unsafe": "drop-me",
+        },
+        "_evidence_source_text": pack_private,
+        "_evidence_source_start": 0,
+        "_evidence_span_source_text": span_private,
+        "_evidence_span_source_start": 0,
+    }
+    raw_step = {
+        "node_name": "rerank_node",
+        "error_class": None,
+        "evidence": [],
+        "output_snapshot": {"verification_docs": [doc]},
+    }
+
+    payload = build_trace_payload(
+        "trace-private",
+        "req-private",
+        "qa",
+        [raw_step],
+        input_payload={
+            "candidate_docs": [doc],
+            "messages": [{"role": "user", "text": message_text}],
+        },
+        output_payload={
+            "reranked_docs": [doc],
+            "claim_audit": {"claims": [{"claim_id": "c1", "text": claim_text}]},
+            "working_memory": {
+                "safe": "kept",
+                "_evidence_span_source_text": span_private,
+            },
+        },
+    )
+
+    for sanitized_doc in (
+        payload["input"]["candidate_docs"][0],
+        payload["output"]["reranked_docs"][0],
+        payload["steps"][0]["output_snapshot"]["verification_docs"][0],
+    ):
+        assert "text" not in sanitized_doc
+        assert sanitized_doc["chunk_id"] == "chunk-span"
+        assert sanitized_doc["retrieval"]["evidence_span_start"] == 80
+        assert sanitized_doc["retrieval"]["evidence_text_start"] == 96
+        assert "unsafe" not in sanitized_doc["retrieval"]
+        assert len(sanitized_doc["text_preview"]) <= 120
+
+    assert payload["input"]["messages"][0]["text"] == message_text
+    assert payload["output"]["claim_audit"]["claims"][0]["text"] == claim_text
+    assert payload["output"]["working_memory"] == {"safe": "kept"}
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert full_text_tail not in serialized
+    assert pack_private not in serialized
+    assert span_private not in serialized
+
+
+def test_trace_does_not_treat_an_unrelated_text_meta_mapping_as_a_document():
+    note = {
+        "text": "完整的非文档说明不能被截断",
+        "meta": {"format": "markdown", "author": "system"},
+    }
+
+    payload = build_trace_payload(
+        "trace-note",
+        "req-note",
+        "qa",
+        [],
+        output_payload={"note": note},
+    )
+
+    assert payload["output"]["note"] == note
 
 
 # 验证跟踪步骤使用显式检索截断值。
@@ -201,6 +314,39 @@ def test_build_trace_step_keeps_evidence_pack_budget_metadata():
     assert step["evidence_pack_anchor_count"] == 3
     assert step["evidence_pack_pinned_count"] == 1
     assert step["evidence_pack_over_budget"] is True
+
+
+def test_build_trace_step_keeps_sanitized_evidence_span_diagnostics():
+    step = build_trace_step(
+        "rerank_node",
+        {
+            "evidence_span_input_count": 4,
+            "evidence_span_output_count": 4,
+            "evidence_span_compressed_count": 2,
+            "evidence_span_fallback_count": 1,
+            "evidence_span_input_chars": 1800,
+            "evidence_span_selected_chars": 920,
+            "evidence_span_reason_counts": {
+                "query_span": 2,
+                "fallback_no_match": 1,
+                "negative": -3,
+                "": 9,
+            },
+        },
+        1.0,
+    )
+
+    assert step["evidence_span_input_count"] == 4
+    assert step["evidence_span_output_count"] == 4
+    assert step["evidence_span_compressed_count"] == 2
+    assert step["evidence_span_fallback_count"] == 1
+    assert step["evidence_span_input_chars"] == 1800
+    assert step["evidence_span_selected_chars"] == 920
+    assert step["evidence_span_reason_counts"] == {
+        "query_span": 2,
+        "fallback_no_match": 1,
+        "negative": 0,
+    }
 
 
 # 验证跟踪载荷包含审计字段。

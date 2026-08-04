@@ -16,6 +16,7 @@ from cogdoc.agents.answer_markers import (
 from cogdoc.agents.qa_generator import Generator
 from cogdoc.agents.structured_output import invoke_structured
 from cogdoc.config.settings import get_settings
+from cogdoc.tools.evidence_rendering import render_evidence_block
 
 
 CLAIM_AUDIT_BLOCKED_ANSWER = (
@@ -466,7 +467,7 @@ def _evidence_rows(
                 "source": str(meta.get("source") or ""),
                 "page": meta.get("page"),
                 "knowledge_id": str(meta.get("knowledge_id") or ""),
-                "text": str(doc.get("text") or "")[:max_chars_per_doc],
+                "text": render_evidence_block(doc)[:max_chars_per_doc],
             }
         )
     return rows

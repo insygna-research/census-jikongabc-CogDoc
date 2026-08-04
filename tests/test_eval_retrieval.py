@@ -126,6 +126,99 @@ def test_requirement_coverage_rate_measures_bounded_generation_context():
     )
 
 
+def test_evidence_span_gold_recall_uses_half_open_offsets_and_alternatives():
+    requirements = [
+        {
+            "requirement_id": "r1",
+            "acceptable_spans": [
+                {"chunk_id": "c1", "start": 10, "end": 20},
+                {"chunk_id": "c2", "start": 30, "end": 40},
+            ],
+        },
+        {
+            "requirement_id": "r2",
+            "acceptable_spans": [{"chunk_id": "c3", "start": 20, "end": 30}],
+        },
+    ]
+    selected = [
+        {"chunk_id": "c1", "start": 20, "end": 25},
+        {"chunk_id": "c2", "start": 30, "end": 40},
+        {"chunk_id": "c3", "start": 20, "end": 25},
+    ]
+
+    recall = eval_retrieval.evidence_span_gold_recall(
+        selected,
+        requirements,
+        start_key="start",
+        end_key="end",
+    )
+
+    # r1 uses its fully covered c2 alternative.  r2 retains half its gold.
+    assert recall == pytest.approx(0.75)
+
+
+def test_evidence_span_gold_recall_is_absent_without_valid_annotations():
+    assert (
+        eval_retrieval.evidence_span_gold_recall(
+            [{"chunk_id": "c1", "start": 0, "end": 10}],
+            [{"requirement_id": "r1", "acceptable_chunk_ids": ["c1"]}],
+            start_key="start",
+            end_key="end",
+        )
+        is None
+    )
+    assert (
+        eval_retrieval.evidence_span_gold_recall(
+            [{"chunk_id": "c1", "start": 0, "end": 10}],
+            [
+                {
+                    "requirement_id": "r1",
+                    "acceptable_spans": [
+                        {"chunk_id": "c1", "start": 4, "end": 4},
+                        {"chunk_id": "", "start": 0, "end": 2},
+                    ],
+                }
+            ],
+            start_key="start",
+            end_key="end",
+        )
+        is None
+    )
+
+
+def test_safe_context_item_exposes_offsets_without_private_source_text():
+    item = eval_retrieval._safe_context_item(
+        {
+            "text": "selected",
+            "_evidence_source_text": "pack private source",
+            "_evidence_span_source_text": "span private source",
+            "meta": {
+                "chunk_id": "c1",
+                "parent_chunk_id": "p1",
+                "source": "policy.pdf",
+            },
+            "retrieval": {
+                "evidence_span_input_start": 0,
+                "evidence_span_input_end": 100,
+                "evidence_span_start": 20,
+                "evidence_span_end": 60,
+                "evidence_text_start": 24,
+                "evidence_text_end": 60,
+                "evidence_span_selected": True,
+                "evidence_span_reason": "query_span",
+                "evidence_span_matched_requirement_ids": ["r1"],
+            },
+        }
+    )
+
+    assert item["chunk_id"] == "c1"
+    assert item["evidence_span_input_end"] == 100
+    assert item["evidence_text_start"] == 24
+    assert item["evidence_span_matched_requirement_ids"] == ["r1"]
+    assert "text" not in item
+    assert not any(key.startswith("_evidence_") for key in item)
+
+
 # 验证同一需求的多个可接受块不会重复抬高 nDCG。
 def test_requirement_ndcg_deduplicates_multiple_hits_for_one_requirement():
     metrics = evaluate_requirement_coverage(
@@ -189,6 +282,7 @@ def test_percentile_and_metric_direction():
     assert metric_direction("mrr") == "higher"
     assert metric_direction("latency_p95_ms") == "lower"
     assert metric_direction("no_answer_false_positive@5") == "lower"
+    assert metric_direction("evidence_span_fallback_rate") == "lower"
 
 
 # 验证空聚合结果为空字典。
@@ -416,6 +510,9 @@ def test_retrieval_run_eval_reports_layers_and_latency(monkeypatch):
     assert report["config"]["verify_evidence"] is True
     assert report["aggregate"]["latency_p95_ms"] >= 0.0
     assert report["rows"][0]["metrics"]["generation_requirement_coverage"] == 1.0
+    assert "evidence_span_gold_recall_post" not in report["aggregate"]
+    assert report["rows"][0]["evidence_span_gold_recall_post"] is None
+    assert report["config"]["span_annotated_queries"] == 0
     assert report["rows"][0]["parent_context_expanded_count"] == 1
     assert report["aggregate"]["parent_context_trigger_rate"] == 0.5
     assert report["by_layer"]["single-source"]["count"] == 1
@@ -435,6 +532,9 @@ def test_retrieve_result_adaptive_second_round_without_model_verifier(monkeypatc
         qa_adaptive_retrieval_max_top_k=12,
         qa_retrieval_max_queries=7,
         qa_rerank_top_n=1,
+        qa_evidence_span_enabled=True,
+        qa_evidence_span_max_chars_per_doc=420,
+        qa_evidence_span_context_sentences=1,
         qa_evidence_pack_max_docs=8,
         qa_evidence_pack_max_chars=7200,
         hybrid_rrf_k=60,
@@ -547,6 +647,9 @@ def test_retrieve_result_carries_verified_docs_into_second_round(monkeypatch):
         qa_adaptive_retrieval_max_top_k=12,
         qa_retrieval_max_queries=7,
         qa_rerank_top_n=2,
+        qa_evidence_span_enabled=True,
+        qa_evidence_span_max_chars_per_doc=420,
+        qa_evidence_span_context_sentences=1,
         qa_evidence_pack_max_docs=8,
         qa_evidence_pack_max_chars=7200,
         qa_evidence_verify_max_docs=4,
@@ -827,6 +930,18 @@ def test_retrieve_result_hydrates_parent_context_before_verifier(monkeypatch):
     assert result["evidence_pack_input_count"] == 3
     assert result["evidence_pack_kept_count"] == 3
     assert result["evidence_pack_dropped_count"] == 0
+    assert result["evidence_span_input_count"] == 3
+    assert result["evidence_span_output_count"] == 3
+    assert result["evidence_span_compressed_count"] == 0
+    assert result["evidence_span_fallback_count"] == 0
+    assert all(
+        "evidence_text_start" in item and "evidence_text_end" in item
+        for item in result["evidence_pack_context_items"]
+    )
+    assert all(
+        not any(key.startswith("_evidence_") for key in item)
+        for item in result["evidence_pack_context_items"]
+    )
     packed_ids = {item["chunk_id"] for item in result["evidence_pack_context_items"]}
     assert set(verifier_calls[0]) <= packed_ids
     assert result["evidence_supported"] is True
@@ -957,13 +1072,40 @@ def test_run_eval_reports_pack_diagnostics_without_baseline_gating(monkeypatch):
             "evidence_supported": True,
             "evidence_verification_reason": "not_required",
             "evidence_verified_chunk_ids": [],
-            "generation_context_items": [{"chunk_id": "kept", "source": "policy.pdf"}],
+            "generation_context_items": [
+                {
+                    "chunk_id": "kept",
+                    "source": "policy.pdf",
+                    "evidence_span_input_start": 0,
+                    "evidence_span_input_end": 100,
+                    "evidence_text_start": 20,
+                    "evidence_text_end": 60,
+                }
+            ],
+            "evidence_span_input_count": 2,
+            "evidence_span_output_count": 2,
+            "evidence_span_compressed_count": 1,
+            "evidence_span_fallback_count": 1,
+            "evidence_span_input_chars": 120,
+            "evidence_span_selected_chars": 80,
+            "evidence_span_reason_counts": {
+                "query_span": 1,
+                "fallback_no_match": 1,
+                "invalid-negative": -2,
+            },
             "evidence_pack_input_items": [
                 {"chunk_id": "kept", "source": "policy.pdf"},
                 {"chunk_id": "dropped", "source": "appendix.pdf"},
             ],
             "evidence_pack_context_items": [
-                {"chunk_id": "kept", "source": "policy.pdf"}
+                {
+                    "chunk_id": "kept",
+                    "source": "policy.pdf",
+                    "evidence_span_input_start": 0,
+                    "evidence_span_input_end": 100,
+                    "evidence_text_start": 20,
+                    "evidence_text_end": 60,
+                }
             ],
             "evidence_pack_input_count": 2,
             "evidence_pack_kept_count": 1,
@@ -987,6 +1129,9 @@ def test_run_eval_reports_pack_diagnostics_without_baseline_gating(monkeypatch):
                     {
                         "requirement_id": "r1",
                         "acceptable_chunk_ids": ["kept"],
+                        "acceptable_spans": [
+                            {"chunk_id": "kept", "start": 10, "end": 30}
+                        ],
                     },
                     {
                         "requirement_id": "r2",
@@ -1000,6 +1145,19 @@ def test_run_eval_reports_pack_diagnostics_without_baseline_gating(monkeypatch):
     )
 
     row = report["rows"][0]
+    assert row["evidence_span_input_count"] == 2
+    assert row["evidence_span_output_count"] == 2
+    assert row["evidence_span_compressed_count"] == 1
+    assert row["evidence_span_fallback_count"] == 1
+    assert row["evidence_span_input_chars"] == 120
+    assert row["evidence_span_selected_chars"] == 80
+    assert row["evidence_span_reason_counts"] == {
+        "query_span": 1,
+        "fallback_no_match": 1,
+        "invalid-negative": 0,
+    }
+    assert row["evidence_span_gold_recall_pre"] == 1.0
+    assert row["evidence_span_gold_recall_post"] == 0.5
     assert row["evidence_pack_input_count"] == 2
     assert row["evidence_pack_kept_count"] == 1
     assert row["evidence_pack_input_chars"] == 120
@@ -1009,7 +1167,21 @@ def test_run_eval_reports_pack_diagnostics_without_baseline_gating(monkeypatch):
     assert row["evidence_pack_requirement_coverage_pre"] == 1.0
     assert row["evidence_pack_requirement_coverage_post"] == 0.5
     assert report["aggregate"]["evidence_pack_dropped_count"] == 1.0
+    assert report["aggregate"]["evidence_span_selected_chars"] == 80.0
+    assert report["aggregate"]["evidence_span_retained_char_ratio"] == pytest.approx(
+        2 / 3
+    )
+    assert report["aggregate"]["evidence_span_fallback_rate"] == 0.5
+    assert report["aggregate"]["evidence_span_gold_recall_pre"] == 1.0
+    assert report["aggregate"]["evidence_span_gold_recall_post"] == 0.5
+    assert report["config"]["span_annotated_queries"] == 1
+    assert report["config"]["span_annotated_requirements"] == 1
+    assert report["config"]["qa_evidence_span_enabled"] is True
     assert not any(
         metric.startswith("evidence_pack_")
+        for metric in report["baseline_gated_metrics"]
+    )
+    assert not any(
+        metric.startswith("evidence_span_")
         for metric in report["baseline_gated_metrics"]
     )

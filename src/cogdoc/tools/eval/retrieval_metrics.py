@@ -17,7 +17,11 @@ RETRIEVAL_COVERAGE_PROFILES = {
         "no-answer": 20,
     },
 }
-LOWER_IS_BETTER_PREFIXES = ("latency_", "no_answer_false_positive@")
+LOWER_IS_BETTER_PREFIXES = (
+    "latency_",
+    "no_answer_false_positive@",
+    "evidence_span_fallback_rate",
+)
 
 
 # 计算atk。

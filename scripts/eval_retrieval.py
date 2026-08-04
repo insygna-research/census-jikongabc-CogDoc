@@ -6,7 +6,7 @@ import statistics
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List, Mapping, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "src") not in sys.path:
@@ -47,7 +47,154 @@ DIAGNOSTIC_METRICS = {
     "parent_context_expanded_count",
     "neighbor_context_expanded_count",
 }
-DIAGNOSTIC_METRIC_PREFIXES = ("evidence_pack_",)
+DIAGNOSTIC_METRIC_PREFIXES = ("evidence_pack_", "evidence_span_")
+
+EVIDENCE_SPAN_COUNT_METRICS = (
+    "evidence_span_input_count",
+    "evidence_span_output_count",
+    "evidence_span_compressed_count",
+    "evidence_span_fallback_count",
+    "evidence_span_input_chars",
+    "evidence_span_selected_chars",
+)
+
+
+def _nonnegative_int_or_none(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return normalized if normalized >= 0 else None
+
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _nonnegative_int(value: Any) -> int:
+    normalized = _nonnegative_int_or_none(value)
+    return normalized if normalized is not None else 0
+
+
+def _safe_context_item(doc: Mapping[str, Any]) -> dict[str, Any]:
+    """Serialize only evidence identity and source offsets, never private text."""
+
+    meta = _mapping(doc.get("meta"))
+    retrieval = _mapping(doc.get("retrieval"))
+    item: dict[str, Any] = {
+        "chunk_id": str(meta.get("chunk_id") or ""),
+        "parent_chunk_id": str(meta.get("parent_chunk_id") or ""),
+        "source": str(meta.get("source") or ""),
+        "section_path": str(meta.get("section_path") or ""),
+        "context_expansion": str(retrieval.get("context_expansion") or "anchor"),
+    }
+    for field in (
+        "evidence_span_input_start",
+        "evidence_span_input_end",
+        "evidence_span_start",
+        "evidence_span_end",
+        "evidence_text_start",
+        "evidence_text_end",
+        "evidence_span_original_chars",
+        "evidence_span_selected_chars",
+    ):
+        normalized = _nonnegative_int_or_none(retrieval.get(field))
+        if normalized is not None:
+            item[field] = normalized
+    if "evidence_span_input_start" not in item and "evidence_text_start" in item:
+        item["evidence_span_input_start"] = item["evidence_text_start"]
+    if "evidence_span_input_end" not in item and "evidence_text_end" in item:
+        item["evidence_span_input_end"] = item["evidence_text_end"]
+    if "evidence_span_selected" in retrieval:
+        item["evidence_span_selected"] = bool(retrieval.get("evidence_span_selected"))
+    if retrieval.get("evidence_span_reason"):
+        item["evidence_span_reason"] = str(retrieval.get("evidence_span_reason"))[:80]
+    raw_requirement_ids = retrieval.get("evidence_span_matched_requirement_ids")
+    if isinstance(raw_requirement_ids, Sequence) and not isinstance(
+        raw_requirement_ids, (str, bytes)
+    ):
+        item["evidence_span_matched_requirement_ids"] = [
+            str(requirement_id)
+            for requirement_id in raw_requirement_ids[:3]
+            if str(requirement_id)
+        ]
+    return item
+
+
+def _acceptable_gold_spans(
+    requirement: Mapping[str, Any],
+) -> tuple[tuple[str, int, int], ...]:
+    raw_spans = requirement.get("acceptable_spans")
+    if not isinstance(raw_spans, Sequence) or isinstance(raw_spans, (str, bytes)):
+        return ()
+    spans: list[tuple[str, int, int]] = []
+    for raw_span in raw_spans:
+        if not isinstance(raw_span, Mapping):
+            continue
+        chunk_id = str(raw_span.get("chunk_id") or "").strip()
+        start = _nonnegative_int_or_none(raw_span.get("start"))
+        end = _nonnegative_int_or_none(raw_span.get("end"))
+        if chunk_id and start is not None and end is not None and end > start:
+            spans.append((chunk_id, start, end))
+    return tuple(spans)
+
+
+def _annotated_span_requirement_count(
+    requirements: Sequence[Mapping[str, Any]],
+) -> int:
+    return sum(
+        bool(_acceptable_gold_spans(requirement)) for requirement in requirements
+    )
+
+
+def evidence_span_gold_recall(
+    context_items: Sequence[Mapping[str, Any]],
+    gold_requirements: Sequence[Mapping[str, Any]],
+    *,
+    start_key: str,
+    end_key: str,
+) -> float | None:
+    """Mean best character recall over atomic requirements with span gold.
+
+    ``acceptable_spans`` are alternatives for one atomic requirement.  Offsets
+    are zero-based, half-open positions in the canonical child text.  Invalid
+    optional annotations are ignored, and an entirely unannotated row produces
+    no metric instead of a misleading zero.
+    """
+
+    annotated = [
+        spans
+        for requirement in gold_requirements
+        if (spans := _acceptable_gold_spans(requirement))
+    ]
+    if not annotated:
+        return None
+
+    actual_by_chunk: dict[str, list[tuple[int, int]]] = {}
+    for item in context_items:
+        if not isinstance(item, Mapping):
+            continue
+        chunk_id = str(item.get("chunk_id") or "").strip()
+        start = _nonnegative_int_or_none(item.get(start_key))
+        end = _nonnegative_int_or_none(item.get(end_key))
+        if chunk_id and start is not None and end is not None and end > start:
+            actual_by_chunk.setdefault(chunk_id, []).append((start, end))
+
+    requirement_scores: list[float] = []
+    for alternatives in annotated:
+        best = 0.0
+        for chunk_id, gold_start, gold_end in alternatives:
+            gold_chars = gold_end - gold_start
+            for actual_start, actual_end in actual_by_chunk.get(chunk_id, []):
+                overlap = max(
+                    0,
+                    min(gold_end, actual_end) - max(gold_start, actual_start),
+                )
+                best = max(best, overlap / gold_chars)
+        requirement_scores.append(best)
+    return statistics.mean(requirement_scores)
 
 
 def _is_diagnostic_metric(metric: str) -> bool:
@@ -135,6 +282,15 @@ def retrieve_result(
     verification_docs: List[RetrievedDoc] = []
     pre_pack_docs: List[RetrievedDoc] = []
     packed_docs: List[RetrievedDoc] = []
+    span_metrics: dict[str, Any] = {
+        "evidence_span_input_count": 0,
+        "evidence_span_output_count": 0,
+        "evidence_span_compressed_count": 0,
+        "evidence_span_fallback_count": 0,
+        "evidence_span_input_chars": 0,
+        "evidence_span_selected_chars": 0,
+        "evidence_span_reason_counts": {},
+    }
     pack_metrics: dict = {
         "evidence_pack_input_count": 0,
         "evidence_pack_kept_count": 0,
@@ -232,7 +388,13 @@ def retrieve_result(
             generation_docs,
             ranked_docs,
         )
-        evidence_pack = _build_qa_evidence_pack(
+        evidence_pack, span_metrics = _build_qa_evidence_pack(
+            query=query,
+            evidence_requirements=[
+                requirement
+                for requirement in evidence_requirements
+                if isinstance(requirement, Mapping)
+            ],
             anchors=decision_docs,
             expanded_docs=generation_docs,
             ranked_candidates=ranked_docs,
@@ -378,18 +540,7 @@ def retrieve_result(
             for doc in ranked_docs
         ],
         "generation_context_items": [
-            {
-                "chunk_id": str(doc.get("meta", {}).get("chunk_id") or ""),
-                "parent_chunk_id": str(
-                    doc.get("meta", {}).get("parent_chunk_id") or ""
-                ),
-                "source": str(doc.get("meta", {}).get("source") or ""),
-                "section_path": str(doc.get("meta", {}).get("section_path") or ""),
-                "context_expansion": str(
-                    doc.get("retrieval", {}).get("context_expansion") or "anchor"
-                ),
-            }
-            for doc in generation_docs
+            _safe_context_item(doc) for doc in generation_docs
         ],
         "evidence_pack_input_items": [
             {
@@ -398,13 +549,7 @@ def retrieve_result(
             }
             for doc in pre_pack_docs
         ],
-        "evidence_pack_context_items": [
-            {
-                "chunk_id": str(doc.get("meta", {}).get("chunk_id") or ""),
-                "source": str(doc.get("meta", {}).get("source") or ""),
-            }
-            for doc in packed_docs
-        ],
+        "evidence_pack_context_items": [_safe_context_item(doc) for doc in packed_docs],
         "supported": supported,
         "first_stage_supported": bool(initial_supported),
         "confidence": support.score,
@@ -442,6 +587,7 @@ def retrieve_result(
         "parent_context_expanded_count": parent_context_expanded_count,
         "neighbor_context_expanded_count": neighbor_context_expanded_count,
         "retrieval_feedback_error": retrieval_feedback_error,
+        **span_metrics,
         **pack_metrics,
     }
     return result
@@ -457,6 +603,7 @@ def run_eval(
 ) -> dict:
     top_k = max(k_values)
     rows: List[dict] = []
+    settings = get_settings()
 
     # 模型加载、设备选择和首轮内核初始化单独计时，不污染稳态请求 P95。
     warmup_item = items[0]
@@ -532,6 +679,26 @@ def run_eval(
         metrics["neighbor_context_expanded_count"] = float(
             retrieval_result.get("neighbor_context_expanded_count", 0) or 0
         )
+        for metric_name in EVIDENCE_SPAN_COUNT_METRICS:
+            metrics[metric_name] = float(retrieval_result.get(metric_name, 0) or 0)
+        span_input_chars = int(
+            retrieval_result.get("evidence_span_input_chars", 0) or 0
+        )
+        span_selected_chars = int(
+            retrieval_result.get("evidence_span_selected_chars", 0) or 0
+        )
+        if span_input_chars > 0:
+            metrics["evidence_span_retained_char_ratio"] = (
+                span_selected_chars / span_input_chars
+            )
+        span_eligible_count = int(
+            retrieval_result.get("evidence_span_compressed_count", 0) or 0
+        ) + int(retrieval_result.get("evidence_span_fallback_count", 0) or 0)
+        if span_eligible_count > 0:
+            metrics["evidence_span_fallback_rate"] = (
+                int(retrieval_result.get("evidence_span_fallback_count", 0) or 0)
+                / span_eligible_count
+            )
         for metric_name in (
             "evidence_pack_input_count",
             "evidence_pack_kept_count",
@@ -548,6 +715,8 @@ def run_eval(
         )
         pack_requirement_coverage_pre: float | None = None
         pack_requirement_coverage_post: float | None = None
+        span_gold_recall_pre: float | None = None
+        span_gold_recall_post: float | None = None
         if item.get("gold_requirements"):
             pack_requirement_coverage_pre = requirement_coverage_rate(
                 retrieval_result.get("evidence_pack_input_items", []),
@@ -567,6 +736,22 @@ def run_eval(
                 retrieval_result.get("generation_context_items", []),
                 item["gold_requirements"],
             )
+            span_context_items = retrieval_result.get("evidence_pack_context_items", [])
+            span_gold_recall_pre = evidence_span_gold_recall(
+                span_context_items,
+                item["gold_requirements"],
+                start_key="evidence_span_input_start",
+                end_key="evidence_span_input_end",
+            )
+            span_gold_recall_post = evidence_span_gold_recall(
+                span_context_items,
+                item["gold_requirements"],
+                start_key="evidence_text_start",
+                end_key="evidence_text_end",
+            )
+            if span_gold_recall_pre is not None:
+                metrics["evidence_span_gold_recall_pre"] = span_gold_recall_pre
+                metrics["evidence_span_gold_recall_post"] = span_gold_recall_post
         if item["expected_sources"]:
             metrics["answerable_acceptance_rate"] = (
                 1.0 if retrieval_result["supported"] else 0.0
@@ -634,6 +819,28 @@ def run_eval(
                 "generation_context_items": retrieval_result.get(
                     "generation_context_items", []
                 ),
+                "evidence_span_input_count": int(
+                    retrieval_result.get("evidence_span_input_count", 0) or 0
+                ),
+                "evidence_span_output_count": int(
+                    retrieval_result.get("evidence_span_output_count", 0) or 0
+                ),
+                "evidence_span_compressed_count": int(
+                    retrieval_result.get("evidence_span_compressed_count", 0) or 0
+                ),
+                "evidence_span_fallback_count": int(
+                    retrieval_result.get("evidence_span_fallback_count", 0) or 0
+                ),
+                "evidence_span_input_chars": span_input_chars,
+                "evidence_span_selected_chars": span_selected_chars,
+                "evidence_span_reason_counts": {
+                    str(reason): _nonnegative_int(count)
+                    for reason, count in _mapping(
+                        retrieval_result.get("evidence_span_reason_counts")
+                    ).items()
+                },
+                "evidence_span_gold_recall_pre": span_gold_recall_pre,
+                "evidence_span_gold_recall_post": span_gold_recall_post,
                 "evidence_pack_input_items": retrieval_result.get(
                     "evidence_pack_input_items", []
                 ),
@@ -702,6 +909,33 @@ def run_eval(
             "requirement_annotated_queries": sum(
                 bool(item.get("gold_requirements")) for item in items
             ),
+            "span_annotated_queries": sum(
+                any(
+                    _acceptable_gold_spans(requirement)
+                    for requirement in item.get("gold_requirements", [])
+                    if isinstance(requirement, Mapping)
+                )
+                for item in items
+            ),
+            "span_annotated_requirements": sum(
+                _annotated_span_requirement_count(
+                    [
+                        requirement
+                        for requirement in item.get("gold_requirements", [])
+                        if isinstance(requirement, Mapping)
+                    ]
+                )
+                for item in items
+            ),
+            "qa_evidence_span_enabled": settings.qa_evidence_span_enabled,
+            "qa_evidence_span_max_chars_per_doc": (
+                settings.qa_evidence_span_max_chars_per_doc
+            ),
+            "qa_evidence_span_context_sentences": (
+                settings.qa_evidence_span_context_sentences
+            ),
+            "qa_evidence_pack_max_docs": settings.qa_evidence_pack_max_docs,
+            "qa_evidence_pack_max_chars": settings.qa_evidence_pack_max_chars,
             "warmup_latency_ms": warmup_latency_ms,
         },
         "aggregate": aggregate_metrics,
@@ -792,6 +1026,25 @@ def print_report(report: dict) -> None:
                 f"drops={row.get('evidence_pack_drop_reason_counts', {})} "
                 f"over_budget={row.get('evidence_pack_over_budget', False)}"
             )
+        if row.get("evidence_span_input_count") or row.get(
+            "evidence_span_fallback_count"
+        ):
+            print(
+                "        evidence_span="
+                f"docs={row.get('evidence_span_input_count', 0)}"
+                f"->{row.get('evidence_span_output_count', 0)} "
+                f"chars={row.get('evidence_span_input_chars', 0)}"
+                f"->{row.get('evidence_span_selected_chars', 0)} "
+                f"compressed={row.get('evidence_span_compressed_count', 0)} "
+                f"fallback={row.get('evidence_span_fallback_count', 0)} "
+                f"reasons={row.get('evidence_span_reason_counts', {})}"
+            )
+            if row.get("evidence_span_gold_recall_pre") is not None:
+                print(
+                    "        gold_span_recall="
+                    f"{row['evidence_span_gold_recall_pre']:.4f}"
+                    f"->{row['evidence_span_gold_recall_post']:.4f}"
+                )
         if cfg.get("verify_evidence"):
             print(
                 "        evidence_verify="

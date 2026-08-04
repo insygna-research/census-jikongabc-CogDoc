@@ -12,6 +12,7 @@ from cogdoc.agents.conversation_memory import (
 from cogdoc.agents.qa_generator import Generator
 from cogdoc.agents.structured_output import invoke_structured
 from cogdoc.config.settings import Settings, get_settings
+from cogdoc.tools.evidence_rendering import render_evidence_block
 
 
 EVIDENCE_VERIFIER_SYSTEM_PROMPT = """你是 RAG 证据充分性校验器。你的任务不是回答问题，而是判断给定证据是否直接包含回答问题所需的全部事实。
@@ -319,7 +320,7 @@ def _evidence_payload(docs: Sequence[Mapping[str, Any]], max_chars_per_doc: int)
                 "page_start": meta.get("page_start", meta.get("page", 0)),
                 "page_end": meta.get("page_end", meta.get("page", 0)),
                 "matched_requirement_ids": sorted(_matched_requirement_ids(doc)),
-                "text": str(doc.get("text") or "")[:max_chars_per_doc],
+                "text": render_evidence_block(doc)[:max_chars_per_doc],
             }
         )
     return json.dumps(rows, ensure_ascii=False)

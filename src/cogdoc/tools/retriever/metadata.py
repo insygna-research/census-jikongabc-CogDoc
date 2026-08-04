@@ -28,6 +28,17 @@ SAFE_RETRIEVAL_METADATA_KEYS = {
     "evidence_text_start",
     "evidence_text_end",
     "evidence_trimmed_overlap_chars",
+    "evidence_span_selected",
+    "evidence_span_input_start",
+    "evidence_span_input_end",
+    "evidence_span_start",
+    "evidence_span_end",
+    "evidence_span_original_chars",
+    "evidence_span_selected_chars",
+    "evidence_span_score",
+    "evidence_span_matched_terms",
+    "evidence_span_matched_requirement_ids",
+    "evidence_span_reason",
 }
 
 _STRUCTURE_STRING_META_FIELDS = (
