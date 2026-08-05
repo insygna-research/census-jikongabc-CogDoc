@@ -572,7 +572,7 @@ def test_runtime_qa_plan_uses_generic_closed_set_verifier_and_gate(monkeypatch):
     monkeypatch.setattr(evidence_verifier, "get_settings", lambda: _settings())
     monkeypatch.setattr(
         evidence_unit_verifier.Generator,
-        "_get_client_for_node",
+        "get_client_for_node",
         lambda *_args, **_kwargs: object(),
     )
 
