@@ -17,8 +17,12 @@ from cogdoc.config.settings import get_settings  # noqa: E402
 from cogdoc.graph.state import RetrievedDoc  # noqa: E402
 from cogdoc.tools.eval.retrieval_metrics import (  # noqa: E402
     aggregate,
+    annotation_coverage_stats,
     audit_coverage,
     coverage_minimums,
+    evidence_metric_minimums,
+    evidence_metric_sample_kind,
+    evaluate_evidence_unit_outcomes,
     evaluate_query,
     evaluate_requirement_coverage,
     evaluate_thresholds,
@@ -47,7 +51,11 @@ DIAGNOSTIC_METRICS = {
     "parent_context_expanded_count",
     "neighbor_context_expanded_count",
 }
-DIAGNOSTIC_METRIC_PREFIXES = ("evidence_pack_", "evidence_span_")
+DIAGNOSTIC_METRIC_PREFIXES = (
+    "evidence_pack_",
+    "evidence_span_",
+    "no_evidence_unit_",
+)
 
 EVIDENCE_SPAN_COUNT_METRICS = (
     "evidence_span_input_count",
@@ -126,6 +134,8 @@ def _safe_context_item(doc: Mapping[str, Any]) -> dict[str, Any]:
 def _acceptable_gold_spans(
     requirement: Mapping[str, Any],
 ) -> tuple[tuple[str, int, int], ...]:
+    if not str(requirement.get("requirement_id") or "").strip():
+        return ()
     raw_spans = requirement.get("acceptable_spans")
     if not isinstance(raw_spans, Sequence) or isinstance(raw_spans, (str, bytes)):
         return ()
@@ -345,6 +355,7 @@ def retrieve_result(
         current_docs = pipeline_result.docs
         ranked_docs, retrieval_carryover_count = _carry_verified_docs(
             {
+                "messages": [],
                 "retrieval_retry_count": retry_count,
                 "evidence_verified_chunk_ids": list(pinned_ids),
                 "evidence_requirement_assessments": list(
@@ -536,6 +547,11 @@ def retrieve_result(
             {
                 "chunk_id": str(doc.get("meta", {}).get("chunk_id") or ""),
                 "source": str(doc.get("meta", {}).get("source") or ""),
+                "matched_unit_ids": list(
+                    doc.get("retrieval", {}).get("matched_unit_ids")
+                    or doc.get("retrieval", {}).get("matched_requirement_ids")
+                    or []
+                ),
             }
             for doc in ranked_docs
         ],
@@ -600,6 +616,7 @@ def run_eval(
     rerank: bool,
     verify_evidence: bool = False,
     is_local_verifier: bool = False,
+    evidence_metric_minimum_samples: Mapping[str, Any] | None = None,
 ) -> dict:
     top_k = max(k_values)
     rows: List[dict] = []
@@ -653,6 +670,16 @@ def run_eval(
                 item.get("gold_requirements", []),
                 k_values,
                 hard_negative_chunk_ids=item.get("hard_negative_chunk_ids", []),
+            )
+        )
+        metrics.update(
+            evaluate_evidence_unit_outcomes(
+                retrieval_result.get("items") or [],
+                item.get("expected_unit_statuses"),
+                k_values,
+                hard_negative_chunk_ids_by_unit=item.get(
+                    "hard_negative_chunk_ids_by_unit"
+                ),
             )
         )
         retry_count = int(retrieval_result.get("retrieval_retry_count", 0) or 0)
@@ -717,7 +744,10 @@ def run_eval(
         pack_requirement_coverage_post: float | None = None
         span_gold_recall_pre: float | None = None
         span_gold_recall_post: float | None = None
-        if item.get("gold_requirements"):
+        has_effective_gold = any(
+            metric.startswith("requirement_recall@") for metric in metrics
+        )
+        if has_effective_gold:
             pack_requirement_coverage_pre = requirement_coverage_rate(
                 retrieval_result.get("evidence_pack_input_items", []),
                 item["gold_requirements"],
@@ -736,22 +766,22 @@ def run_eval(
                 retrieval_result.get("generation_context_items", []),
                 item["gold_requirements"],
             )
-            span_context_items = retrieval_result.get("evidence_pack_context_items", [])
-            span_gold_recall_pre = evidence_span_gold_recall(
-                span_context_items,
-                item["gold_requirements"],
-                start_key="evidence_span_input_start",
-                end_key="evidence_span_input_end",
-            )
-            span_gold_recall_post = evidence_span_gold_recall(
-                span_context_items,
-                item["gold_requirements"],
-                start_key="evidence_text_start",
-                end_key="evidence_text_end",
-            )
-            if span_gold_recall_pre is not None:
-                metrics["evidence_span_gold_recall_pre"] = span_gold_recall_pre
-                metrics["evidence_span_gold_recall_post"] = span_gold_recall_post
+        span_context_items = retrieval_result.get("evidence_pack_context_items", [])
+        span_gold_recall_pre = evidence_span_gold_recall(
+            span_context_items,
+            item.get("gold_requirements", []),
+            start_key="evidence_span_input_start",
+            end_key="evidence_span_input_end",
+        )
+        span_gold_recall_post = evidence_span_gold_recall(
+            span_context_items,
+            item.get("gold_requirements", []),
+            start_key="evidence_text_start",
+            end_key="evidence_text_end",
+        )
+        if span_gold_recall_pre is not None and span_gold_recall_post is not None:
+            metrics["evidence_span_gold_recall_pre"] = span_gold_recall_pre
+            metrics["evidence_span_gold_recall_post"] = span_gold_recall_post
         if item["expected_sources"]:
             metrics["answerable_acceptance_rate"] = (
                 1.0 if retrieval_result["supported"] else 0.0
@@ -889,7 +919,37 @@ def run_eval(
             }
         )
 
+    annotation_stats = annotation_coverage_stats(items)
     aggregate_metrics = _aggregate_rows(rows)
+    metric_denominators = _metric_denominators(
+        rows,
+        aggregate_metrics,
+        annotation_stats["effective_sample_counts"],
+    )
+    sample_minimums = evidence_metric_minimums(evidence_metric_minimum_samples)
+    baseline_gated_metrics: list[str] = []
+    baseline_skipped_metrics: dict[str, dict[str, Any]] = {}
+    for metric in aggregate_metrics:
+        if metric_direction(metric) != "higher":
+            continue
+        sample_kind = evidence_metric_sample_kind(metric)
+        if sample_kind is not None:
+            denominator = metric_denominators.get(metric, 0)
+            required = sample_minimums[sample_kind]
+            if denominator < required:
+                baseline_skipped_metrics[metric] = {
+                    "sample_kind": sample_kind,
+                    "denominator": denominator,
+                    "required": required,
+                    "reason": "insufficient_samples",
+                }
+                continue
+            # Post-pack/span gold metrics are intentionally promoted only after
+            # their independent query denominator reaches the maturity floor.
+            baseline_gated_metrics.append(metric)
+            continue
+        if not _is_diagnostic_metric(metric):
+            baseline_gated_metrics.append(metric)
     by_layer = {
         layer: {
             "count": len(layer_rows),
@@ -927,6 +987,8 @@ def run_eval(
                 )
                 for item in items
             ),
+            **annotation_stats,
+            "evidence_metric_minimum_samples": sample_minimums,
             "qa_evidence_span_enabled": settings.qa_evidence_span_enabled,
             "qa_evidence_span_max_chars_per_doc": (
                 settings.qa_evidence_span_max_chars_per_doc
@@ -939,12 +1001,9 @@ def run_eval(
             "warmup_latency_ms": warmup_latency_ms,
         },
         "aggregate": aggregate_metrics,
-        "baseline_gated_metrics": sorted(
-            metric
-            for metric in aggregate_metrics
-            if metric_direction(metric) == "higher"
-            and not _is_diagnostic_metric(metric)
-        ),
+        "metric_denominators": metric_denominators,
+        "baseline_gated_metrics": sorted(baseline_gated_metrics),
+        "baseline_skipped_metrics": dict(sorted(baseline_skipped_metrics.items())),
         "metric_directions": {
             metric: metric_direction(metric) for metric in aggregate_metrics
         },
@@ -962,6 +1021,31 @@ def _aggregate_rows(rows: List[dict]) -> Dict[str, float]:
     result["latency_mean_ms"] = statistics.mean(latencies)
     result["latency_p95_ms"] = percentile(latencies, 95)
     return result
+
+
+def _metric_denominators(
+    rows: Sequence[Mapping[str, Any]],
+    aggregate_metrics: Mapping[str, float],
+    effective_sample_counts: Mapping[str, int],
+) -> Dict[str, int]:
+    denominators = {
+        metric: sum(metric in row.get("metrics", {}) for row in rows)
+        for metric in aggregate_metrics
+    }
+    for metric, denominator in denominators.items():
+        sample_kind = evidence_metric_sample_kind(metric)
+        if sample_kind is not None:
+            # A runtime metric may occasionally be emitted for a malformed draft
+            # annotation. Such a row is observable, but it is not an effective
+            # independent gold sample and therefore cannot mature a release gate.
+            denominators[metric] = min(
+                denominator,
+                effective_sample_counts.get(sample_kind, 0),
+            )
+    for metric in ("latency_mean_ms", "latency_p95_ms"):
+        if metric in aggregate_metrics:
+            denominators[metric] = len(rows)
+    return denominators
 
 
 # 按字段分组报告行。
@@ -1077,6 +1161,18 @@ def print_coverage(coverage: dict) -> None:
         print(f"  缺少 layer: {coverage['missing_layers']}")
     if coverage["insufficient_layers"]:
         print(f"  数量不足: {coverage['insufficient_layers']}")
+    print(f"  evidence_samples={coverage['effective_sample_counts']}")
+    print(f"  evidence_units={coverage['effective_annotation_counts']}")
+    print(f"  evidence_minimums={coverage['minimum_annotation_counts']}")
+    invalid_samples = {
+        kind: count
+        for kind, count in coverage["invalid_sample_counts"].items()
+        if count
+    }
+    if invalid_samples:
+        print(f"  无效标注: {invalid_samples}")
+    if coverage["insufficient_annotations"]:
+        print(f"  证据标注数量不足: {coverage['insufficient_annotations']}")
     if coverage["is_coverage_complete"]:
         print("  覆盖完整")
     print()
@@ -1162,7 +1258,10 @@ def main() -> int:
         "--coverage-profile",
         choices=("smoke", "baseline"),
         default="smoke",
-        help="smoke 每层至少 1 条；baseline 要求 40/20/20/20 共 100 条",
+        help=(
+            "smoke 每层至少 1 条；baseline 要求 40/20/20/20 共 100 条，"
+            "并检查证据标注分母"
+        ),
     )
     parser.add_argument(
         "--gate",
@@ -1180,13 +1279,30 @@ def main() -> int:
             "--coverage-only 不能与 --check-coverage、--json、--baseline 或 --gate 同时使用"
         )
 
+    threshold_config = None
+    if args.gate:
+        threshold_config = json.loads(args.gate.read_text(encoding="utf-8"))
+    configured_sample_minimums = (
+        threshold_config.get("minimum_samples", {}) if threshold_config else {}
+    )
+    if not isinstance(configured_sample_minimums, Mapping):
+        parser.error("gate.minimum_samples 必须是对象")
+    try:
+        coverage_requirements = coverage_minimums(
+            args.coverage_profile,
+            annotation_minimums=configured_sample_minimums,
+        )
+        metric_sample_minimums = evidence_metric_minimums(configured_sample_minimums)
+    except ValueError as exc:
+        parser.error(str(exc))
+
     eval_set = args.eval_set or resolve_default_eval_set()
     items = load_eval_set(eval_set)
     if not items:
         print(f"评测集为空: {eval_set}")
         return 1
 
-    coverage = audit_coverage(items, coverage_minimums(args.coverage_profile))
+    coverage = audit_coverage(items, coverage_requirements)
     if args.coverage_only:
         print_coverage(coverage)
         return 0 if coverage["is_coverage_complete"] else 1
@@ -1197,11 +1313,16 @@ def main() -> int:
         args.rerank,
         verify_evidence=args.verify_evidence,
         is_local_verifier=args.local_verifier,
+        evidence_metric_minimum_samples=metric_sample_minimums,
     )
     threshold_gate = None
-    if args.gate:
-        threshold_config = json.loads(args.gate.read_text(encoding="utf-8"))
-        threshold_gate = evaluate_thresholds(report["aggregate"], threshold_config)
+    if threshold_config is not None:
+        threshold_gate = evaluate_thresholds(
+            report["aggregate"],
+            threshold_config,
+            metric_denominators=report["metric_denominators"],
+            minimum_samples=metric_sample_minimums,
+        )
         report["threshold_gate"] = threshold_gate
     print_report(report)
     if threshold_gate:
@@ -1209,9 +1330,18 @@ def main() -> int:
         for row in threshold_gate["rows"]:
             current = "-" if row["current"] is None else f"{row['current']:.4f}"
             status = "通过" if row["passed"] else "失败"
+            sample_suffix = ""
+            if row.get("minimum_samples") is not None:
+                sample_count = (
+                    "-" if row.get("sample_count") is None else row["sample_count"]
+                )
+                sample_suffix = (
+                    f" samples={sample_count}/{row['minimum_samples']}"
+                    f" reason={row.get('failure_reason') or '-'}"
+                )
             print(
                 f"  {row['metric']:<34} {current} "
-                f"{row['bound']}={row['limit']:.4f}  {status}"
+                f"{row['bound']}={row['limit']:.4f}  {status}{sample_suffix}"
             )
         print()
     if args.check_coverage:

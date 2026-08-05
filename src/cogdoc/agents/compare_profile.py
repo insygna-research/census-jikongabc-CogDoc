@@ -2,14 +2,18 @@ from typing import List, Tuple
 from langchain_core.messages import HumanMessage, SystemMessage
 from cogdoc.agents.qa_generator import Generator
 from cogdoc.agents.summary_generator import (
+    EVIDENCE_UNIT_FAILURE_MESSAGE,
+    ensure_evidence_ids,
     generate_section_cell,
     run_section_cells,
     tokenize_for_section,
 )
+from cogdoc.agents.no_evidence import NO_EVIDENCE_MARKER
 from cogdoc.graph.state import (
     CompareDimensionPlan,
     CompareCell,
     DocumentProfile,
+    EvidenceLedgerEntry,
     RetrievedDoc,
     SummarySectionPlan,
 )
@@ -113,6 +117,23 @@ def _dimension_as_section_plan(dimension: CompareDimensionPlan) -> SummarySectio
     )
 
 
+def ensure_compare_evidence_ids(
+    docs_by_source: dict[str, List[RetrievedDoc]], sources: List[str]
+) -> Tuple[dict[str, List[RetrievedDoc]], List[EvidenceLedgerEntry]]:
+    """Freeze one source-major EID registry before any profile worker starts."""
+
+    master_docs = [doc for source in sources for doc in docs_by_source.get(source, [])]
+    annotated_docs, evidence_ledger = ensure_evidence_ids(master_docs)
+    cursor = 0
+    annotated_by_source: dict[str, List[RetrievedDoc]] = {}
+    for source in sources:
+        source_count = len(docs_by_source.get(source, []))
+        if source_count:
+            annotated_by_source[source] = annotated_docs[cursor : cursor + source_count]
+        cursor += source_count
+    return annotated_by_source, evidence_ledger
+
+
 # 生成对比 messages。
 def _compare_messages(source: str, plan: SummarySectionPlan, query: str, context: str):
     # 首轮提示禁止模型自造引用，引用由共享 helper 统一绑定。
@@ -165,47 +186,152 @@ class DocumentProfileAgent:
         query = state.get("query", "")
         is_local = state.get("is_local", False)
 
-        if len(docs_by_source) < 2 or not dimensions:
+        raw_unit_results = state.get("evidence_unit_results")
+        unit_results = raw_unit_results if isinstance(raw_unit_results, list) else None
+        if (len(docs_by_source) < 2 and unit_results is None) or not dimensions:
             return {"document_profiles": [], "compare_dimensions": dimensions}
 
-        llm = Generator._get_client_for_node("compare_profile", is_local=is_local)
+        if unit_results is None:
+            docs_by_source, evidence_ledger = ensure_compare_evidence_ids(
+                docs_by_source, sources
+            )
+        else:
+            evidence_ledger = list(state.get("evidence_ledger") or [])
+
+        generation_ready_statuses = {"ready", "supported", "contradictory"}
+        batch_can_generate = bool(state.get("evidence_unit_batch_can_generate", True))
+        needs_generation = unit_results is None or (
+            batch_can_generate
+            and any(
+                isinstance(item, dict)
+                and item.get("status") in generation_ready_statuses
+                and item.get("gate_action", "generate") == "generate"
+                for item in unit_results
+            )
+        )
+        llm = None
+        client_error = ""
+        if needs_generation:
+            try:
+                llm = Generator._get_client_for_node(
+                    "compare_profile", is_local=is_local
+                )
+            except Exception as exc:
+                client_error = type(exc).__name__
 
         # 按 source-major / dimension-minor 拍平任务，依赖保序返回回填矩阵。
-        tasks: List[Tuple[str, CompareDimensionPlan, List[RetrievedDoc], List]] = []
+        tasks: List[Tuple[str, CompareDimensionPlan, List[RetrievedDoc]]] = []
         for source in sources:
             docs = docs_by_source.get(source, [])
-            if not docs:
+            if not docs and unit_results is None:
                 continue
-            doc_tokens = [(doc, tokenize_for_section(doc["text"])) for doc in docs]
             for dimension in dimensions:
-                tasks.append((source, dimension, docs, doc_tokens))
+                tasks.append((source, dimension, docs))
 
         # 构建 cell。
         def build_cell(
-            task: Tuple[str, CompareDimensionPlan, List[RetrievedDoc], List],
+            task: Tuple[str, CompareDimensionPlan, List[RetrievedDoc]],
         ) -> CompareCell:
-            source, dimension, docs, doc_tokens = task
+            source, dimension, docs = task
             plan = _dimension_as_section_plan(dimension)
-            # 每个 cell 走 Summary 共享的证据绑定和无依据规则。
-            content, evidence = generate_section_cell(
-                llm,
-                source,
-                plan,
-                docs,
-                query,
-                is_local,
-                doc_tokens,
-                _compare_messages,
-                _compare_retry_messages,
-                max_chunks=LOCAL_COMPARE_CELL_CONTEXT_CHUNKS
-                if is_local
-                else COMPARE_CELL_CONTEXT_CHUNKS,
+            unit_result = next(
+                (
+                    item
+                    for item in unit_results or []
+                    if isinstance(item, dict)
+                    and isinstance(item.get("binding"), dict)
+                    and item["binding"].get("source") == source
+                    and item["binding"].get("dimension_id") == dimension["dimension_id"]
+                ),
+                None,
             )
+            status = str(unit_result.get("status") or "") if unit_result else ""
+            unit_id = str(unit_result.get("unit_id") or "") if unit_result else ""
+            gate_action = (
+                str(unit_result.get("gate_action") or "") if unit_result else ""
+            )
+            if status == "no_evidence":
+                return CompareCell(
+                    dimension_id=dimension["dimension_id"],
+                    source=source,
+                    content=f"{NO_EVIDENCE_MARKER}。",
+                    unit_id=unit_id,
+                    evidence=[],
+                    status=status,
+                )
+            if unit_result is not None and (
+                status not in generation_ready_statuses
+                or gate_action not in {"", "generate"}
+                or not batch_can_generate
+            ):
+                return CompareCell(
+                    dimension_id=dimension["dimension_id"],
+                    source=source,
+                    content=EVIDENCE_UNIT_FAILURE_MESSAGE,
+                    unit_id=unit_id,
+                    evidence=[],
+                    status=status or "generation_error",
+                    failure_stage=(
+                        "verification"
+                        if status == "verification_error"
+                        or gate_action not in {"", "generate"}
+                        else "retrieval"
+                    ),
+                    error_class=str(unit_result.get("error_class") or ""),
+                )
+            if llm is None:
+                return CompareCell(
+                    dimension_id=dimension["dimension_id"],
+                    source=source,
+                    content=EVIDENCE_UNIT_FAILURE_MESSAGE,
+                    unit_id=unit_id,
+                    evidence=[],
+                    status="generation_error",
+                    failure_stage="generation",
+                    error_class=client_error or "GeneratorUnavailable",
+                )
+            cell_docs = (
+                list(unit_result.get("selected_docs") or [])
+                if unit_result is not None
+                else docs
+            )
+            cell_tokens = [
+                (doc, tokenize_for_section(doc["text"])) for doc in cell_docs
+            ]
+            # 每个 cell 走 Summary 共享的证据绑定和无依据规则。
+            try:
+                content, evidence = generate_section_cell(
+                    llm,
+                    source,
+                    plan,
+                    cell_docs,
+                    query,
+                    is_local,
+                    cell_tokens,
+                    _compare_messages,
+                    _compare_retry_messages,
+                    max_chunks=LOCAL_COMPARE_CELL_CONTEXT_CHUNKS
+                    if is_local
+                    else COMPARE_CELL_CONTEXT_CHUNKS,
+                )
+            except Exception as exc:
+                return CompareCell(
+                    dimension_id=dimension["dimension_id"],
+                    source=source,
+                    content=EVIDENCE_UNIT_FAILURE_MESSAGE,
+                    unit_id=unit_id,
+                    evidence=[],
+                    status="generation_error",
+                    failure_stage="generation",
+                    error_class=type(exc).__name__,
+                )
             return CompareCell(
                 dimension_id=dimension["dimension_id"],
                 source=source,
                 content=content,
+                unit_id=unit_id,
                 evidence=evidence,
+                status="generated",
             )
 
         cells = run_section_cells(tasks, build_cell, is_local)
@@ -220,6 +346,8 @@ class DocumentProfileAgent:
         ]
 
         return {
+            "compare_docs_by_source": docs_by_source,
+            "evidence_ledger": evidence_ledger,
             "compare_dimensions": dimensions,
             "document_profiles": profiles,
             "steps_trace": [

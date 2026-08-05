@@ -346,6 +346,112 @@ def build_trace_step(
             for item in list(output.get("evidence_requirements") or [])[:5]
             if isinstance(item, Mapping)
         ]
+    if output.get("evidence_units"):
+        step["evidence_units"] = [
+            {
+                "unit_id": _preview(item.get("unit_id"), 40),
+                "task_kind": _preview(item.get("task_kind"), 40),
+                "label": _preview(item.get("label"), 120),
+                "retrieval_query": _preview(item.get("retrieval_query"), 160),
+                "recovery_query": _preview(item.get("recovery_query"), 160),
+                "allowed_sources": [
+                    _preview(source, 160)
+                    for source in list(item.get("allowed_sources") or [])[:5]
+                ],
+                "admission_group": _preview(item.get("admission_group"), 40),
+                "max_retrieval_retries": _nonnegative_int(
+                    item.get("max_retrieval_retries")
+                ),
+                "binding": _json_safe(dict(item.get("binding") or {})),
+            }
+            for item in list(output.get("evidence_units") or [])[:30]
+            if isinstance(item, Mapping)
+        ]
+    if output.get("evidence_unit_results"):
+        step["evidence_unit_results"] = [
+            {
+                "unit_id": _preview(item.get("unit_id"), 40),
+                "status": _preview(item.get("status"), 40),
+                "retrieval_round": _nonnegative_int(item.get("retrieval_round")),
+                "candidate_count": _nonnegative_int(item.get("candidate_count")),
+                "selected_count": _nonnegative_int(item.get("selected_count")),
+                "selected_chars": _nonnegative_int(item.get("selected_chars")),
+                "reason_code": _preview(item.get("reason_code"), 80),
+                "error_class": _preview(item.get("error_class"), 80),
+                "grounding_evidence_ids": [
+                    _preview(evidence_id, 40)
+                    for evidence_id in list(
+                        item.get("grounding_evidence_ids") or []
+                    )[:8]
+                ],
+                "retry_attempted": bool(item.get("retry_attempted", False)),
+                "gate_action": _preview(item.get("gate_action"), 24),
+                "gate_reason_code": _preview(item.get("gate_reason_code"), 80),
+                "selected_chunk_ids": [
+                    _preview(_mapping_or_empty(doc.get("meta")).get("chunk_id"), 120)
+                    for doc in list(item.get("selected_docs") or [])[:8]
+                    if isinstance(doc, Mapping)
+                ],
+            }
+            for item in list(output.get("evidence_unit_results") or [])[:30]
+            if isinstance(item, Mapping)
+        ]
+    if isinstance(output.get("evidence_unit_metrics"), Mapping):
+        step["evidence_unit_metrics"] = _json_safe(
+            dict(output["evidence_unit_metrics"])
+        )
+    if output.get("evidence_unit_retry_history"):
+        step["evidence_unit_retry_history"] = [
+            [_preview(unit_id, 40) for unit_id in list(round_ids)[:30]]
+            for round_ids in list(output.get("evidence_unit_retry_history") or [])[:10]
+            if isinstance(round_ids, (list, tuple))
+        ]
+    if isinstance(output.get("evidence_unit_verification_metrics"), Mapping):
+        step["evidence_unit_verification_metrics"] = _json_safe(
+            dict(output["evidence_unit_verification_metrics"])
+        )
+    if output.get("evidence_unit_verification_protocol_errors"):
+        step["evidence_unit_verification_protocol_errors"] = [
+            _preview(error, 120)
+            for error in list(
+                output.get("evidence_unit_verification_protocol_errors") or []
+            )[:12]
+        ]
+    if output.get("evidence_unit_verifier_error"):
+        step["evidence_unit_verifier_error"] = _preview(
+            output.get("evidence_unit_verifier_error"), 80
+        )
+    if output.get("evidence_unit_gate_decisions"):
+        step["evidence_unit_gate_decisions"] = [
+            {
+                "unit_id": _preview(item.get("unit_id"), 40),
+                "action": _preview(item.get("action"), 24),
+                "verification_status": _preview(
+                    item.get("verification_status"), 40
+                ),
+                "retrieval_round": _nonnegative_int(
+                    item.get("retrieval_round")
+                ),
+                "retries_remaining": _nonnegative_int(
+                    item.get("retries_remaining")
+                ),
+                "reason_code": _preview(item.get("reason_code"), 80),
+            }
+            for item in list(output.get("evidence_unit_gate_decisions") or [])[:30]
+            if isinstance(item, Mapping)
+        ]
+    if isinstance(output.get("evidence_unit_gate_metrics"), Mapping):
+        step["evidence_unit_gate_metrics"] = _json_safe(
+            dict(output["evidence_unit_gate_metrics"])
+        )
+    if "evidence_unit_batch_can_generate" in output:
+        step["evidence_unit_batch_can_generate"] = bool(
+            output.get("evidence_unit_batch_can_generate")
+        )
+    if output.get("evidence_unit_adapter_outcome"):
+        step["evidence_unit_adapter_outcome"] = _preview(
+            output.get("evidence_unit_adapter_outcome"), 40
+        )
     if output.get("steps_trace"):
         step["steps_trace"] = [
             {
@@ -360,6 +466,10 @@ def build_trace_step(
     count_fields = {
         "rewritten_queries": "rewritten_query_count",
         "evidence_requirements": "evidence_requirement_count",
+        "evidence_units": "evidence_unit_count",
+        "evidence_unit_results": "evidence_unit_result_count",
+        "evidence_unit_assessments": "evidence_unit_assessment_count",
+        "evidence_unit_gate_decisions": "evidence_unit_gate_decision_count",
         "retrieved_docs": "retrieved_count",
         "reranked_docs": "reranked_count",
         "verification_docs": "verification_candidate_count",

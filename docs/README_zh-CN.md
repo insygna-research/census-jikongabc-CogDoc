@@ -33,6 +33,7 @@
 - **派生知识审核闭环** — 支持手动新增知识、保存已校验答案、把纠错/无依据反馈转成待审核知识卡片；每条知识可绑定来源、检测冲突、扫描过期、创建修订版本，并支持批量通过/驳回、归档和删除。
 
 - **反馈分析与归因检索调权** — 赞踩、纠错、评分、问题类型和 evidence 上下文按 `trace_id` 落盘；正向信号可提升被引用 chunk，负向信号只有在 `feedback_type=bad_retrieval` 时才惩罚它们。`skip_retrieval_feedback=true` 可让单条反馈不参与调权，所有调权记录仍可审核、可回滚。
+- **证据级检索评测数据飞轮** — 只有完整成功的服务端 trace 加显式 `thumbs_down` / `bad_retrieval` 才会生成未标注草稿，统一覆盖 QA requirement、Summary section 和 Compare source×dimension；gold chunk/span 与 hard negative 只能由授权审核者补充，索引代、chunk 身份契约或来源 SHA 变化后审批和导出都会 fail closed。
 
 - **Trace 可观测、审核队列与 webhook** — 每次请求可导出安全 JSON trace，包含请求配置、节点耗时、改写、证据预览与错误摘要；网页端只展示当前对话的 trace，并把待审核/过期知识、反馈分析、检索调权聚合成审核队列，也可在新待审核知识产生时投递 webhook。
 
@@ -40,7 +41,7 @@
 
 ## 功能演示
 
-1. **网页端对话、引用与证据。** 选一个知识库，自然语言提问，看着答案流式生成，再展开引用来源和证据片段，并打 👍/👎 反馈。
+1. **网页端对话、引用与证据。** 选一个知识库，自然语言提问，实时查看执行进度，再接收已完成终态处理的答案，展开引用来源和证据片段，并打 👍/👎 反馈。
 
    <img src="./images/web-chat.png" alt="网页端对话" width="800">
 
@@ -124,7 +125,7 @@ make frontend       # 终端 2：Streamlit 网页端（自动在浏览器打开�
 1. **侧栏 → 知识库** — 新建一个库，或选择已有的库。
 2. **侧栏 → 文档** — 上传 PDF 并入库；进度面板会轮询后台入库任务直到完成。
 3. **对话** — 新建对话或重开历史对话（会话和知识库持久化进 URL，刷新后续上同一对话）。
-4. **聊天** — 选模式（`auto` / `qa` / `summary` / `compare`），提问，读流式答案及其引用来源、证据片段和 👍/👎 反馈。
+4. **聊天** — 选模式（`auto` / `qa` / `summary` / `compare`），提问，查看实时进度，再读取已完成终态处理的答案及其引用来源、证据片段和 👍/👎 反馈。
 5. 在侧栏打开 **本地 Ollama 模式** 即可把生成切到本地模型。
 6. 打开 **调试**，只查看当前对话的请求 trace；也可以用 **检索调试** 直接调用 `/v1/retrieve`，检查命中 chunk、重排分数和 retrieval 元数据。
 7. 切到主视图里的 **派生知识**，可以新增知识、审核待处理/过期项、查看反馈分析、启用/禁用检索调权、导出审核队列，并在文档变化后扫描过期绑定。
@@ -156,9 +157,18 @@ Streamlit 前端只是 FastAPI 服务上的瘦客户端——你也可以直接�
 | `GET /v1/review-queue`、`GET /v1/review-queue/export` | 汇总并导出审核队列 |
 | `GET /v1/feedback-loop-metrics` | 返回反馈 / 审核 / 调权闭环指标 |
 | `GET /v1/retrieval-feedback`、`POST /v1/retrieval-feedback/{id}/enable`、`POST /v1/retrieval-feedback/{id}/disable` | 查看或回滚反馈生成的检索调权 |
+| `GET /v1/retrieval-eval-drafts`、`GET /v1/retrieval-eval-drafts/{id}` | 查看证据单元标注草稿及实时过期状态 |
+| `POST /v1/retrieval-eval-drafts/{id}/review` | 带 revision 乐观并发校验地通过或驳回草稿 |
+| `GET /v1/retrieval-eval-drafts/export` | 导出已通过且未过期的 training/release-gate 数据；QA 专用格式会显式报告被排除的 Summary/Compare 草稿 |
 | `GET /healthz`、`GET /readyz`、`GET /metrics` | 健康、就绪、Prometheus 指标 |
 
+`/v1/chat/stream` 始终会流式发送生命周期和节点进度事件。QA、Summary 和
+Compare 的中间模型文本可能包含内部 Evidence ID，且尚未通过终态处理，
+因此会被有意缓冲；客户端不会收到逐 token 正文，而是在常规 `final` 事件前，
+通过单个 `token` 事件收到最终答案。其他任务保留实时模型 token，除非全局声明校验门禁要求缓冲。
+
 若配置了 `COGDOC_API_KEYS`，`/v1` 请求会被鉴权并限流；不配 key 时 `/v1` 对外开放（服务启动时会打告警日志）。
+证据评测的列表、审核和导出接口必须另外配置独立的 `COGDOC_EVAL_REVIEW_API_KEYS` 才会启用。审核者身份由服务端对 key 取指纹得到，不落盘原始 key，也不接受客户端自报 actor。
 
 ### 分层记忆
 
@@ -518,7 +528,7 @@ chunk_id = sha256:{source_sha256}:src:{source_name}:p{page_start}-p{page_end}:c{
 - **生成 + 引用自愈** — `Generator`（OpenAI 兼容；云端 `deepseek-chat` 或本地 `qwen2.5:7b`，`temperature = 0.2`）把文档包装为 `<Document source=… page=… chunk_id=…>` 并强制 `[source:Pn]` 标签。`validate_citations_native`（Rust）返回结构化的 `missing_citations` / `invalid_sources` / `invalid_pages`；`citation_node` 把失败转成 critique，循环 `generate → citation` 至 `max_iteration_count`（默认 `2`）。只有通过物理引用校验的回答才会离开任务子图。
 - **父图声明审计与有限修复（可选）** — 设置 `CLAIM_VERIFICATION_ENABLED=true` 后，QA、Summary、Compare 会在各自的物理引用校验之后进入父图 `claim_audit_node`。`ClaimEvidenceVerifierAgent` 把候选答案拆成事实声明，分批只依据每条声明显式引用的证据判定 `supported`、`unsupported` 或 `insufficient`。失败后进入 `claim_repair_node`；修订答案必须先通过确定性引用复检，再重新执行语义审计。修复次数由 `CLAIM_VERIFICATION_MAX_REPAIR_ATTEMPTS` 限定（默认 `1`）。校验器异常、修复器异常、修复后引用在次数耗尽时仍非法，或语义审计最终仍失败，都会通过 `claim_block_node` fail-closed：用稳定拒答替换候选答案，并清空其引用/evidence。语义门禁默认关闭，便于部署先建立经人工复核的基线再启用。
 
-  开启门禁后，候选模型 token 在审计完成前都不可信，因此 `/v1/chat/stream` 会缓冲候选文本，不向客户端泄露临时答案；节点进度事件仍会流式发送。父图后处理完成（通过、有意 `not_run` 或产生 fail-closed 拒答）后，服务会把最终答案作为单个 token 事件发送，随后照常发送 `final` 事件。
+  QA、Summary 和 Compare 始终缓冲候选模型 token，因为中间文本可能包含内部 Evidence ID，且尚未完成最终渲染。开启本门禁后，它审计的其他路由候选也保持相同缓冲规则。节点进度事件仍会流式发送；父图后处理完成（通过、有意 `not_run` 或产生 fail-closed 拒答）后，服务会把最终答案作为单个 token 事件发送，随后照常发送 `final` 事件。
 
 **Summary 子图** — `document_loader` 选定一个点名文档（若语料库只有一篇则可自动选中；多文档歧义 query 返回可操作提示），`section_planner` 默认固定为背景与目标、方案与流程、规则与要求、价值与产出、限制与注意事项五个章节（也可由 state 传入自定义标题），`section_summary` 逐章节生成一段短摘要（模型只写正文，`[source:Pn]` 由程序按所用 chunk 确定性绑定），`global_summary` 整合答案并复跑引用校验。无依据章节不带引用、不带 evidence。
 
@@ -617,7 +627,7 @@ python scripts/migrate_state.py --apply         # 导入旧状态
 python scripts/migrate_state.py --verify-only   # 校验导入结果
 ```
 
-只有三步全部成功后，才能把 `.env` 改为 `COGDOC_STATE_BACKEND=sqlite`。统一 SQLite 后端会把会话、索引任务、反馈记录、反馈分析、派生知识以及检索反馈/调权状态共同存入 `COGDOC_DATA_DIR/state.db`；后四项就是从旧存储迁移的四类反馈/知识状态。
+只有三步全部成功后，才能把 `.env` 改为 `COGDOC_STATE_BACKEND=sqlite`。统一 SQLite 后端会把会话、索引任务、反馈记录、反馈分析、派生知识、检索反馈/调权状态以及检索评测草稿共同存入 `COGDOC_DATA_DIR/state.db`；后五项就是从旧存储迁移的五类反馈/知识/评测状态。
 
 `COGDOC_FEEDBACK_STORE` 仅为仍在使用旧版独立反馈后端的部署保留兼容性。它不能选择统一状态后端；迁移后不应使用它代替 `COGDOC_STATE_BACKEND`。
 
@@ -635,6 +645,7 @@ python scripts/migrate_state.py --verify-only   # 校验导入结果
 | `COGDOC_FEEDBACK_STORE` | `jsonl` | 反馈存储后端；设为 `sqlite` 时使用数据库并导出逐行对象副本 |
 | `COGDOC_DERIVED_KNOWLEDGE_INDEX_AUTO_REFRESH` | `false` | 知识审核变更后在后台重建派生知识向量索引 |
 | `COGDOC_API_KEYS` | 未设置 | 逗号分隔的 API key；为空则关闭 API 鉴权 |
+| `COGDOC_EVAL_REVIEW_API_KEYS` | 未设置 | 证据评测列表/审核/导出的独立管理 key；为空时这些接口保持关闭 |
 | `RATE_LIMIT_PER_MINUTE` | `120` | 受保护 API 路由的令牌桶补充速率 |
 | `RATE_LIMIT_BURST` | `120` | 令牌桶突发容量；`<=0` 表示关闭限流 |
 | `COGDOC_MAX_UPLOAD_MB` | `50` | 网页/API 上传 PDF 的单文件大小上限 |
@@ -713,7 +724,7 @@ python scripts/migrate_state.py --verify-only   # 校验导入结果
 
 离线评测使用 `eval/` 下的本地 JSONL。`make eval-suite` 是默认轻量门禁：它会审计检索和质量评测集覆盖，运行质量指标，按用例类型和层级输出摘要，默认跳过依赖模型的真实检索。`make eval-suite-report` 写入 `eval/eval_suite_report.json`；`make eval-suite-baseline` 对比 `eval/eval_suite_baseline.json` 的聚合指标、类型指标和分层质量指标；`make eval-suite-update-baseline` 在复核后刷新这份基线。生成的报告和基线文件都被 Git 忽略。
 
-真实检索配置要求 `eval/retrieval_eval.jsonl` 至少包含 100 条已复核问题：单源 40 条、多源 20 条、困难 20 条、无答案 20 条。`make eval-retrieval-baseline` 记录复核后的参考运行；`make eval-retrieval-gate` 对比相关性基线，并执行本地 `eval/retrieval_gate.json` 中的绝对阈值，文件结构参考 `eval/retrieval_gate.example.json`。报告会给出整体和分层的 MRR/Recall/Hit、平均延迟与 P95 延迟；模型加载和首轮初始化会单独记为 warmup，不计入稳态延迟。`answerable_acceptance_rate` 和 `no_answer_abstention_rate` 直接衡量确定性一阶段门禁。被一阶段放行的精确事实问题，以及支持度高于 `QA_EVIDENCE_VERIFY_BORDERLINE_MIN_SCORE` 的边界候选，会在生成前进入结构化证据充分性校验。无答案样本还会报告 `no_answer_false_positive@k`，该指标只表示检索器是否返回候选，不代表任一门禁已放行，也不能等同于生成答案已产生事实错误。默认的向量距离/BM25 阈值由本地已复核集标定，更换语料或嵌入模型后应重新标定。
+真实检索配置要求 `eval/retrieval_eval.jsonl` 至少包含 100 条已复核问题：单源 40 条、多源 20 条、困难 20 条、无答案 20 条。baseline 覆盖配置还要求至少 20 条有效 `evidence_requirements`、20 条有效 `gold_requirements`、20 条 chunk gold、10 条 span gold 和 10 条 hard-negative 样本；这里按独立 query 计数，而不是把同一 query 内的多个 requirement 当成多个独立样本。`smoke` 配置仍只验证四层数据可运行，因此干净 checkout 的示例集保持兼容，但示例中的一条证据标注不会被误认为成熟发布门禁。`make eval-retrieval-baseline` 记录复核后的参考运行；`make eval-retrieval-gate` 对比相关性基线，并执行本地 `eval/retrieval_gate.json` 中的绝对阈值，文件结构参考 `eval/retrieval_gate.example.json`。报告会给出整体和分层的 MRR/Recall/Hit、平均延迟与 P95 延迟；模型加载和首轮初始化会单独记为 warmup，不计入稳态延迟。`answerable_acceptance_rate` 和 `no_answer_abstention_rate` 直接衡量确定性一阶段门禁。被一阶段放行的精确事实问题，以及支持度高于 `QA_EVIDENCE_VERIFY_BORDERLINE_MIN_SCORE` 的边界候选，会在生成前进入结构化证据充分性校验。无答案样本还会报告 `no_answer_false_positive@k`，该指标只表示检索器是否返回候选，不代表任一门禁已放行，也不能等同于生成答案已产生事实错误。默认的向量距离/BM25 阈值由本地已复核集标定，更换语料或嵌入模型后应重新标定。
 
 ### 感知 requirement 的检索评测数据
 
@@ -746,7 +757,11 @@ python scripts/migrate_state.py --verify-only   # 校验导入结果
 }
 ```
 
-有标注时，报告会新增 `requirement_recall@k`、`all_requirements_covered@k` 和二值相关性 `evidence_ndcg@k`；chunk 级 gold 还会启用 `chunk_precision@k`，hard negative 会启用 `hard_negative_rejection@k`。`generation_requirement_coverage` 会用实际送入生成阶段的有界 Parent–Child 上下文检查相同 gold requirements。执行 verifier 时新增 `requirement_full_coverage_rate`；执行 adaptive recovery 时新增 `adaptive_retry_trigger_rate`，对确实重试的样本还会计算 `adaptive_rescue_rate`。`retrieval_query_count`、`parent_context_trigger_rate` 以及 parent/neighbor 扩展数量用于暴露发布成本和结构索引覆盖。Evidence span 的字符保留率、fallback 率及 gold span 裁剪前后召回率只属于发布诊断，永不进入默认 gate。trigger/count 指标同样不进入默认 baseline gate；证据覆盖、排序、干扰拒绝与救回指标在出现时可进入基线门禁。
+有标注时，报告会新增 `requirement_recall@k`、`all_requirements_covered@k` 和二值相关性 `evidence_ndcg@k`；chunk 级 gold 还会启用 `chunk_precision@k`，hard negative 会启用 `hard_negative_rejection@k`。`generation_requirement_coverage` 会用实际送入生成阶段的有界 Parent–Child 上下文检查相同 gold requirements。执行 verifier 时新增 `requirement_full_coverage_rate`；执行 adaptive recovery 时新增 `adaptive_retry_trigger_rate`，对确实重试的样本还会计算 `adaptive_rescue_rate`。`retrieval_query_count`、`parent_context_trigger_rate` 以及 parent/neighbor 扩展数量用于暴露发布成本和结构索引覆盖。
+
+报告中的 `effective_sample_counts` / `effective_annotation_counts` 分别记录有效 query 分母和标注单元数，`metric_denominators` 则给出每个实际聚合指标的 query 分母。默认情况下，requirement、chunk、span、hard-negative 以及生成上下文覆盖指标只有达到 20/20/10/10 等对应成熟度下限后才会进入 `baseline_gated_metrics`；分母不足的指标仍会出现在 aggregate 中，但会列入 `baseline_skipped_metrics`，不能由一条高分样本提升发布门禁。Evidence span 的字符保留率、fallback 率和裁剪前 gold recall 仍只属于发布诊断；裁剪后的 `evidence_span_gold_recall_post` 达到 span gold 分母后才可进入门禁。trigger/count 指标同样不进入默认 baseline gate。
+
+`retrieval_gate.json` 可用 `minimum_samples` 覆盖五类标注的最小 query 数；这些数值同时约束 coverage、历史 baseline 指标选择和绝对阈值。还可用 `metric_minimum_samples` 为某个绝对指标设置更严格的独立分母。绝对 gate 行会记录 `sample_count`、`minimum_samples` 和 `failure_reason`，因此指标值达标但分母不足时仍会 fail closed。推荐配置见 `eval/retrieval_gate.example.json`。
 
 每条报告行还会保存 `retrieved_items`、`generation_context_items`、`evidence_requirement_assessments`、`missing_evidence_requirement_ids`、`retrieval_retry_count`、`adaptive_retrieval_rescued`、`retrieval_query_count`、`retrieval_ranking_count`、`retrieval_carryover_count`、parent/neighbor 扩展数量以及分 channel 计数 `retrieval_channel_counts`，因此可以把回归定位到规划、融合、结构补充、校验或恢复阶段，而不是只从最终来源列表反推。完整 QA trace 同样记录扩展数量，证据预览则保留章节身份和上下文归因元数据，便于灰度对比。
 

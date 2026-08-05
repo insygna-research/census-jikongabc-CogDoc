@@ -1,3 +1,5 @@
+import json
+
 from cogdoc.agents import claim_evidence_verifier
 from cogdoc.agents.answer_markers import (
     NO_RELEVANT_CONTENT_ANSWER,
@@ -20,6 +22,7 @@ from cogdoc.agents.claim_evidence_verifier import (
 )
 from cogdoc.config.settings import Settings
 from cogdoc.tools.evidence_rendering import render_evidence_block
+from cogdoc.tools.citation_ledger import assign_evidence_ids
 
 
 def _settings(**overrides):
@@ -197,6 +200,22 @@ def _assessment(
     )
 
 
+def _evidence_assessment(
+    *, verdict: str, evidence_ids: list[str]
+) -> ClaimAssessmentBatch:
+    return ClaimAssessmentBatch(
+        assessments=[
+            ClaimAssessment(
+                claim_id="c1",
+                verdict=verdict,
+                evidence_ids=evidence_ids,
+                reason="证据直接支持该声明",
+                confidence=0.98,
+            )
+        ]
+    )
+
+
 def _stub_verifier(monkeypatch, output: ClaimAssessmentBatch) -> None:
     monkeypatch.setattr(claim_evidence_verifier, "get_settings", _settings)
     monkeypatch.setattr(
@@ -217,6 +236,12 @@ def test_claim_extraction_keeps_citation_after_sentence_punctuation_attached():
     assert len(units) == 1
     assert units[0]["text"] == "报名截止日期是 8 月 30 日。[guide.pdf:P2]"
     assert units[0]["citation_refs"] == ["document:guide.pdf:P2"]
+
+
+def test_claim_extraction_accepts_canonical_four_digit_evidence_id():
+    units = extract_claim_units("事实由精确证据支持。[E1000]")
+
+    assert units[0]["citation_refs"] == ["E1000"]
 
 
 def test_claim_extraction_audits_markdown_heading_and_fenced_code_contents():
@@ -292,6 +317,230 @@ def test_claim_audit_accepts_supported_claim_with_cited_evidence(monkeypatch):
         "unsupported_claim_rate": 0.0,
     }
     assert audit["claims"][0]["supporting_chunk_ids"] == ["chunk:guide:2"]
+
+
+def test_claim_audit_eid_cannot_borrow_same_page_sibling(monkeypatch):
+    first = _doc("报名截止日期是 8 月 30 日。", chunk_id="chunk:guide:first")
+    second = _doc("报名截止日期是 9 月 30 日。", chunk_id="chunk:guide:second")
+    annotated, ledger = assign_evidence_ids([first, second])
+    _stub_verifier(
+        monkeypatch,
+        _evidence_assessment(verdict="supported", evidence_ids=["E002"]),
+    )
+
+    result = ClaimEvidenceVerifierAgent.audit(
+        {
+            "task_type": "qa",
+            "query": "报名截止日期是什么时候？",
+            "answer": "报名截止日期是 9 月 30 日。[E001]",
+            "critique": "",
+            "reranked_docs": annotated,
+            "evidence_ledger": ledger,
+            "is_local": False,
+        }
+    )
+
+    claim = result["claim_audit"]["claims"][0]
+    assert result["claim_audit_passed"] is False
+    assert claim["cited_evidence_ids"] == ["E001"]
+    assert claim["supporting_evidence_ids"] == []
+    assert claim["cited_chunk_ids"] == ["chunk:guide:first"]
+    assert claim["verdict"] == "insufficient"
+
+
+def test_claim_audit_eid_accepts_only_exact_referenced_view(monkeypatch):
+    first = _doc("报名截止日期是 8 月 30 日。", chunk_id="chunk:guide:first")
+    second = _doc("报名截止日期是 9 月 30 日。", chunk_id="chunk:guide:second")
+    annotated, ledger = assign_evidence_ids([first, second])
+    _stub_verifier(
+        monkeypatch,
+        _evidence_assessment(verdict="supported", evidence_ids=["E002"]),
+    )
+
+    result = ClaimEvidenceVerifierAgent.audit(
+        {
+            "task_type": "qa",
+            "query": "报名截止日期是什么时候？",
+            "answer": "报名截止日期是 9 月 30 日。[E002]",
+            "critique": "",
+            "reranked_docs": annotated,
+            "evidence_ledger": ledger,
+            "is_local": False,
+        }
+    )
+
+    claim = result["claim_audit"]["claims"][0]
+    assert result["claim_audit_passed"] is True
+    assert claim["supporting_evidence_ids"] == ["E002"]
+    assert claim["supporting_chunk_ids"] == ["chunk:guide:second"]
+
+
+def test_claim_audit_rejects_malformed_explicit_evidence_ledger(monkeypatch):
+    monkeypatch.setattr(claim_evidence_verifier, "get_settings", _settings)
+
+    result = ClaimEvidenceVerifierAgent.audit(
+        {
+            **_state("报名截止日期是 8 月 30 日。[E001]"),
+            # 字段一旦出现就选择 EID 协议；畸形值不得悄悄回退到旧页码协议。
+            "evidence_ledger": {"E001": "not-a-ledger-sequence"},
+        }
+    )
+
+    assert result["claim_audit_passed"] is False
+    assert result["claim_audit"]["status"] == "error"
+    assert result["claim_audit"]["reason_code"] == "evidence_ledger_invalid"
+
+
+def test_claim_audit_dynamically_batches_by_evidence_union(monkeypatch):
+    raw_docs = [
+        _doc(f"事实 {index}", chunk_id=f"chunk:guide:{index}") for index in range(1, 17)
+    ]
+    annotated, ledger = assign_evidence_ids(raw_docs)
+    answer = "\n".join(
+        f"事实 {claim}。[E{claim * 2 - 1:03d}][E{claim * 2:03d}]"
+        for claim in range(1, 9)
+    )
+    captured_batches: list[list[str]] = []
+    monkeypatch.setattr(claim_evidence_verifier, "get_settings", _settings)
+    monkeypatch.setattr(
+        claim_evidence_verifier.Generator,
+        "_get_client_for_node",
+        lambda *args, **kwargs: object(),
+    )
+
+    def fake_invoke(llm, schema, messages):
+        content = messages[1]["content"]
+        claims = json.loads(
+            content.split("【候选声明 JSON】\n", 1)[1].split(
+                "\n\n【允许证据 JSON】", 1
+            )[0]
+        )
+        visible_ids = sorted(
+            {
+                evidence_id
+                for claim in claims
+                for evidence_id in claim["allowed_evidence_ids"]
+            }
+        )
+        captured_batches.append(visible_ids)
+        return ClaimAssessmentBatch(
+            assessments=[
+                ClaimAssessment(
+                    claim_id=claim["claim_id"],
+                    verdict="supported",
+                    evidence_ids=[claim["allowed_evidence_ids"][0]],
+                    reason="证据直接支持",
+                    confidence=0.99,
+                )
+                for claim in claims
+            ]
+        )
+
+    monkeypatch.setattr(claim_evidence_verifier, "invoke_structured", fake_invoke)
+
+    result = ClaimEvidenceVerifierAgent.audit(
+        {
+            "task_type": "qa",
+            "query": "列出事实",
+            "answer": answer,
+            "critique": "",
+            "reranked_docs": annotated,
+            "evidence_ledger": ledger,
+            "is_local": False,
+        }
+    )
+
+    assert result["claim_audit_passed"] is True
+    assert result["claim_audit"]["verifier"]["call_count"] == 2
+    assert all(len(batch) <= 8 for batch in captured_batches)
+    assert all(claim["cited_evidence_ids"] for claim in result["claim_audit"]["claims"])
+
+
+def test_claim_audit_fails_closed_when_one_claim_exceeds_doc_limit(monkeypatch):
+    raw_docs = [
+        _doc(f"事实 {index}", chunk_id=f"chunk:guide:{index}") for index in range(1, 10)
+    ]
+    annotated, ledger = assign_evidence_ids(raw_docs)
+    answer = "一个过宽声明。" + "".join(f"[E{index:03d}]" for index in range(1, 10))
+    monkeypatch.setattr(claim_evidence_verifier, "get_settings", _settings)
+    monkeypatch.setattr(
+        claim_evidence_verifier.Generator,
+        "_get_client_for_node",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("an over-limit claim must fail before creating a client")
+        ),
+    )
+
+    result = ClaimEvidenceVerifierAgent.audit(
+        {
+            "task_type": "qa",
+            "query": "列出事实",
+            "answer": answer,
+            "critique": "",
+            "reranked_docs": annotated,
+            "evidence_ledger": ledger,
+            "is_local": False,
+        }
+    )
+
+    claim = result["claim_audit"]["claims"][0]
+    assert result["claim_audit_passed"] is False
+    assert result["claim_audit"]["status"] == "failed"
+    assert result["claim_audit"]["verifier"]["call_count"] == 0
+    assert claim["verdict"] == "insufficient"
+    assert len(claim["cited_evidence_ids"]) == 9
+    assert "超过校验器单批上限" in claim["reason"]
+
+
+def test_claim_audit_allows_only_deterministic_no_evidence_units(monkeypatch):
+    annotated, ledger = assign_evidence_ids([_doc()])
+    monkeypatch.setattr(claim_evidence_verifier, "get_settings", _settings)
+
+    result = ClaimEvidenceVerifierAgent.audit(
+        {
+            "task_type": "summary",
+            "answer": "# 摘要\n文档中未明确说明。",
+            "summary_docs": annotated,
+            "summary_section_results": [
+                {
+                    "section_id": "limits",
+                    "title": "限制",
+                    "content": "文档中未明确说明。",
+                    "evidence": [],
+                }
+            ],
+            "evidence_ledger": ledger,
+        }
+    )
+
+    assert result["claim_audit_passed"] is True
+    assert result["claim_audit"]["status"] == "not_run"
+    assert result["claim_audit"]["reason_code"] == "no_evidence_units"
+
+
+def test_claim_audit_no_evidence_marker_cannot_hide_second_fact(monkeypatch):
+    annotated, ledger = assign_evidence_ids([_doc()])
+    monkeypatch.setattr(claim_evidence_verifier, "get_settings", _settings)
+
+    result = ClaimEvidenceVerifierAgent.audit(
+        {
+            "task_type": "summary",
+            "answer": "文档中未明确说明。截止日期是 9 月 30 日。",
+            "summary_docs": annotated,
+            "summary_section_results": [
+                {
+                    "section_id": "limits",
+                    "title": "限制",
+                    "content": "文档中未明确说明。截止日期是 9 月 30 日。",
+                    "evidence": [],
+                }
+            ],
+            "evidence_ledger": ledger,
+        }
+    )
+
+    assert result["claim_audit_passed"] is False
+    assert result["claim_audit"]["reason_code"] == "evidence_citation_rejected"
 
 
 def test_summary_claim_audit_rejects_unseen_same_page_chunk(monkeypatch):

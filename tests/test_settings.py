@@ -36,6 +36,9 @@ def test_settings_defaults_match_current_runtime_contract():
     assert settings.qa_evidence_verify_max_docs == 3
     assert settings.qa_evidence_verify_max_chars_per_doc == 1600
     assert settings.qa_evidence_verify_borderline_min_score == 0.75
+    assert settings.evidence_unit_verify_enabled is True
+    assert settings.evidence_unit_verify_max_chars_per_doc == 1200
+    assert settings.evidence_unit_verify_max_units_per_batch == 8
     assert settings.qa_retrieval_max_queries == 7
     assert settings.qa_adaptive_retrieval_enabled is True
     assert settings.qa_adaptive_retrieval_max_retries == 1
@@ -65,6 +68,7 @@ def test_settings_defaults_match_current_runtime_contract():
     assert settings.cogdoc_log_to_console is False
     assert settings.cogdoc_trace_enabled is True
     assert settings.cogdoc_trace_dir == "logs/traces"
+    assert settings.eval_review_api_key_set == set()
     assert settings.cogdoc_ocr_enabled is False
     assert settings.cogdoc_ocr_provider == "tesseract"
     assert settings.cogdoc_ocr_binary == "tesseract"
@@ -89,6 +93,9 @@ def test_settings_reads_environment_overrides(monkeypatch):
     monkeypatch.setenv("QA_EVIDENCE_SPAN_CONTEXT_SENTENCES", "2")
     monkeypatch.setenv("QA_EVIDENCE_PACK_MAX_DOCS", "10")
     monkeypatch.setenv("QA_EVIDENCE_PACK_MAX_CHARS", "8400")
+    monkeypatch.setenv("EVIDENCE_UNIT_VERIFY_ENABLED", "false")
+    monkeypatch.setenv("EVIDENCE_UNIT_VERIFY_MAX_CHARS_PER_DOC", "900")
+    monkeypatch.setenv("EVIDENCE_UNIT_VERIFY_MAX_UNITS_PER_BATCH", "5")
     monkeypatch.setenv("QA_ABSTAIN_MAX_VECTOR_DISTANCE", "0.75")
     monkeypatch.setenv("COGDOC_MEMORY_SEMANTIC_ENABLED", "false")
     monkeypatch.setenv("COGDOC_MEMORY_RETRIEVAL_SHORT_LIMIT", "6")
@@ -101,6 +108,7 @@ def test_settings_reads_environment_overrides(monkeypatch):
     monkeypatch.setenv("CLAIM_VERIFICATION_MAX_CLAIMS", "24")
     monkeypatch.setenv("QA_ADAPTIVE_RETRIEVAL_MAX_RETRIES", "2")
     monkeypatch.setenv("QA_ADAPTIVE_RETRIEVAL_MAX_TOP_K", "24")
+    monkeypatch.setenv("COGDOC_EVAL_REVIEW_API_KEYS", "review-a, review-b")
 
     settings = get_settings()
 
@@ -116,6 +124,9 @@ def test_settings_reads_environment_overrides(monkeypatch):
     assert settings.qa_evidence_pack_max_docs == 10
     assert settings.qa_evidence_pack_max_chars == 8400
     assert settings.qa_abstain_max_vector_distance == 0.75
+    assert settings.evidence_unit_verify_enabled is False
+    assert settings.evidence_unit_verify_max_chars_per_doc == 900
+    assert settings.evidence_unit_verify_max_units_per_batch == 5
     assert settings.memory_semantic_enabled is False
     assert settings.memory_retrieval_short_limit == 6
     assert settings.memory_retrieval_recent_pin == 2
@@ -127,6 +138,7 @@ def test_settings_reads_environment_overrides(monkeypatch):
     assert settings.claim_verification_max_claims == 24
     assert settings.qa_adaptive_retrieval_max_retries == 2
     assert settings.qa_adaptive_retrieval_max_top_k == 24
+    assert settings.eval_review_api_key_set == {"review-a", "review-b"}
 
 
 @pytest.mark.parametrize(

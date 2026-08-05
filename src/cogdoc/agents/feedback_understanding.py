@@ -1,6 +1,8 @@
 from collections.abc import Mapping
 from typing import Any, TypedDict
 
+from cogdoc.tools.public_citation_ledger import validate_public_citation_ledger
+
 
 class FeedbackTarget(TypedDict):
     trace_id: Any
@@ -38,6 +40,57 @@ _BAD_RETRIEVAL_TERMS = (
 )
 
 
+def _legacy_target_items(payload: Mapping[str, Any]) -> list[dict[str, str]]:
+    targets: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for field in ("citations", "evidence"):
+        for item in payload.get(field) or []:
+            if not isinstance(item, Mapping):
+                continue
+            chunk_id = str(item.get("chunk_id") or "").strip()
+            if not chunk_id or chunk_id in seen:
+                continue
+            seen.add(chunk_id)
+            targets.append(
+                {
+                    "chunk_id": chunk_id,
+                    "source": str(item.get("source") or "").strip(),
+                    "source_type": str(item.get("source_type") or "document").strip(),
+                }
+            )
+    return targets
+
+
+def _ledger_target_items(
+    payload: Mapping[str, Any],
+) -> list[dict[str, str]] | None:
+    if "citation_ledger" not in payload:
+        return None
+    raw_ledger = payload.get("citation_ledger")
+    # 空账本保留旧反馈语义；trace 路径会先把 citations/evidence 原子替换成
+    # 服务端可信快照，因此这里的 fallback 不会混入客户端伪造目标。
+    if raw_ledger == []:
+        return None
+    if not isinstance(raw_ledger, list):
+        return []
+    validation = validate_public_citation_ledger(
+        payload.get("answer"),
+        raw_ledger,
+        evidence=payload.get("evidence_ledger") or payload.get("evidence"),
+        require_evidence=True,
+    )
+    return list(validation.targets) if validation.is_valid else []
+
+
+# 从反馈载荷读取可归因分块。非空 ledger 必须完整通过闭集和 occurrence
+# 校验；失败时安全地不归因，不再退回更宽泛的 evidence 并误罚分块。
+def feedback_target_items(payload: Mapping[str, Any]) -> list[dict[str, str]]:
+    ledger_targets = _ledger_target_items(payload)
+    if ledger_targets is not None:
+        return ledger_targets
+    return _legacy_target_items(payload)
+
+
 # 读取文本字段。
 def _text(payload: Mapping[str, Any], *keys: str) -> str:
     for key in keys:
@@ -50,19 +103,16 @@ def _text(payload: Mapping[str, Any], *keys: str) -> str:
 # 读取引用目标。
 def _target(payload: Mapping[str, Any]) -> FeedbackTarget:
     chunk_ids, sources, source_types = [], [], set()
-    for field in ("citations", "evidence"):
-        for item in payload.get(field) or []:
-            if not isinstance(item, Mapping):
-                continue
-            chunk_id = str(item.get("chunk_id") or "").strip()
-            source = str(item.get("source") or "").strip()
-            source_type = str(item.get("source_type") or "document").strip()
-            if chunk_id and chunk_id not in chunk_ids:
-                chunk_ids.append(chunk_id)
-            if source and source not in sources:
-                sources.append(source)
-            if source_type:
-                source_types.add(source_type)
+    for item in feedback_target_items(payload):
+        chunk_id = item["chunk_id"]
+        source = item["source"]
+        source_type = item["source_type"]
+        if chunk_id not in chunk_ids:
+            chunk_ids.append(chunk_id)
+        if source and source not in sources:
+            sources.append(source)
+        if source_type:
+            source_types.add(source_type)
     if len(source_types) > 1:
         source_type = "mixed"
     elif source_types:

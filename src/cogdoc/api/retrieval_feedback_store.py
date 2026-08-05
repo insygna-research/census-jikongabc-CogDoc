@@ -7,15 +7,19 @@ import re
 import unicodedata
 from datetime import datetime, timezone
 from threading import RLock
-from typing import Any
+from typing import Any, TypeAlias
 from uuid import uuid4
 
+from cogdoc.agents.feedback_understanding import feedback_target_items
 from cogdoc.config.settings import get_settings
 from cogdoc.api.persistence import connect_sqlite
 
 
 # 空文件修改时间标记。
 _MISSING_MTIME = -1.0
+
+_RetrievalFeedbackRows: TypeAlias = list[dict[str, Any]]
+_TargetChunks: TypeAlias = list[dict[str, str]]
 
 
 # 返回当前协调世界时时间字符串。
@@ -68,28 +72,18 @@ def _attributed_feedback_weight(payload: dict[str, Any]) -> tuple[int, float]:
 
 
 # 从反馈载荷抽取被评价的分块。
-def _target_chunks(payload: dict[str, Any]) -> list[dict[str, str]]:
-    targets = []
-    seen = set()
-    for field in ("citations", "evidence"):
-        for item in payload.get(field) or []:
-            if not isinstance(item, dict):
-                continue
-            chunk_id = str(item.get("chunk_id") or "")
-            if not chunk_id or chunk_id in seen:
-                continue
-            seen.add(chunk_id)
-            targets.append(
-                {
-                    "chunk_id": chunk_id,
-                    "source_type": str(item.get("source_type") or "document"),
-                }
-            )
-    return targets
+def _target_chunks(payload: dict[str, Any]) -> _TargetChunks:
+    return [
+        {
+            "chunk_id": item["chunk_id"],
+            "source_type": item["source_type"],
+        }
+        for item in feedback_target_items(payload)
+    ]
 
 
 # 读取调权记录的目标分块，兼容旧版单 chunk 记录。
-def _record_targets(row: dict[str, Any]) -> list[dict[str, str]]:
+def _record_targets(row: dict[str, Any]) -> _TargetChunks:
     raw_targets = row.get("target_chunks")
     targets = []
     seen = set()
@@ -123,7 +117,9 @@ def _feedback_group_key(row: dict[str, Any]) -> str:
     return str(row.get("feedback_id") or row.get("retrieval_feedback_id") or "")
 
 
-def _aggregate_retrieval_feedback_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _aggregate_retrieval_feedback_group(
+    rows: _RetrievalFeedbackRows,
+) -> dict[str, Any]:
     latest = sorted(
         rows, key=lambda row: str(row.get("created_at") or ""), reverse=True
     )[0]
@@ -175,7 +171,7 @@ class RetrievalFeedbackStore:
     # 从用户反馈生成调权记录。
     def record_from_feedback(
         self, feedback_id: str, payload: dict[str, Any]
-    ) -> list[dict[str, Any]]:
+    ) -> _RetrievalFeedbackRows:
         kb_id = _required_text(payload, "kb_id")
         query_text = _required_text(payload, "query")
         if not kb_id or not query_text:
@@ -242,11 +238,11 @@ class RetrievalFeedbackStore:
         kb_id: str,
         enabled: bool | None = None,
         limit: int = 100,
-    ) -> list[dict[str, Any]]:
+    ) -> _RetrievalFeedbackRows:
         with self._lock:
             rows = list(self._latest_cached().values())
         rows = [row for row in rows if row.get("kb_id") == kb_id]
-        grouped: dict[str, list[dict[str, Any]]] = {}
+        grouped: dict[str, _RetrievalFeedbackRows] = {}
         for row in rows:
             grouped.setdefault(_feedback_group_key(row), []).append(row)
         aggregated = [
@@ -262,7 +258,7 @@ class RetrievalFeedbackStore:
         with self._lock:
             rows = list(self._latest_cached().values())
         rows = [row for row in rows if row.get("kb_id") == kb_id]
-        grouped: dict[str, list[dict[str, Any]]] = {}
+        grouped: dict[str, _RetrievalFeedbackRows] = {}
         for row in rows:
             grouped.setdefault(_feedback_group_key(row), []).append(row)
         aggregated = [
@@ -283,7 +279,7 @@ class RetrievalFeedbackStore:
             self._rewrite_history(rows)
 
     # 导出折叠后的当前快照，供 JSONL 与 SQLite 存储之间迁移。
-    def export_records(self) -> list[dict[str, Any]]:
+    def export_records(self) -> _RetrievalFeedbackRows:
         with self._lock:
             return [
                 json.loads(json.dumps(row, ensure_ascii=False))
@@ -291,7 +287,7 @@ class RetrievalFeedbackStore:
             ]
 
     # 按稳定标识追加新快照；相同快照重复导入不会扩张历史。
-    def import_records(self, records: list[dict[str, Any]]) -> dict[str, int]:
+    def import_records(self, records: _RetrievalFeedbackRows) -> dict[str, int]:
         incoming = [
             json.loads(json.dumps(record, ensure_ascii=False)) for record in records
         ]
@@ -368,8 +364,8 @@ class RetrievalFeedbackStore:
         return latest
 
     # 读取全部历史快照。
-    def _read_history(self) -> list[dict[str, Any]]:
-        rows = []
+    def _read_history(self) -> _RetrievalFeedbackRows:
+        rows: _RetrievalFeedbackRows = []
         if not os.path.exists(self._path):
             return rows
         with open(self._path, encoding="utf-8") as f:
@@ -386,7 +382,7 @@ class RetrievalFeedbackStore:
         self._cache_latest = None
 
     # 重写历史。
-    def _rewrite_history(self, rows: list[dict[str, Any]]) -> None:
+    def _rewrite_history(self, rows: _RetrievalFeedbackRows) -> None:
         tmp_path = f"{self._path}.tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
             for row in rows:
@@ -432,7 +428,7 @@ class SqliteRetrievalFeedbackStore(RetrievalFeedbackStore):
     # 从用户反馈生成调权记录。
     def record_from_feedback(
         self, feedback_id: str, payload: dict[str, Any]
-    ) -> list[dict[str, Any]]:
+    ) -> _RetrievalFeedbackRows:
         kb_id = _required_text(payload, "kb_id")
         query_text = _required_text(payload, "query")
         if not kb_id or not query_text:
@@ -501,14 +497,14 @@ class SqliteRetrievalFeedbackStore(RetrievalFeedbackStore):
         kb_id: str,
         enabled: bool | None = None,
         limit: int = 100,
-    ) -> list[dict[str, Any]]:
+    ) -> _RetrievalFeedbackRows:
         with self._lock:
             raw_rows = self._conn.execute(
                 "SELECT data FROM retrieval_feedback_records "
                 "WHERE kb_id=? ORDER BY rowid ASC",
                 (kb_id,),
             ).fetchall()
-        grouped: dict[str, list[dict[str, Any]]] = {}
+        grouped: dict[str, _RetrievalFeedbackRows] = {}
         for (raw_data,) in raw_rows:
             row = json.loads(raw_data)
             grouped.setdefault(_feedback_group_key(row), []).append(row)
@@ -527,7 +523,7 @@ class SqliteRetrievalFeedbackStore(RetrievalFeedbackStore):
                 "SELECT data FROM retrieval_feedback_records WHERE kb_id=?",
                 (kb_id,),
             ).fetchall()
-        grouped: dict[str, list[dict[str, Any]]] = {}
+        grouped: dict[str, _RetrievalFeedbackRows] = {}
         for (raw_data,) in raw_rows:
             row = json.loads(raw_data)
             grouped.setdefault(_feedback_group_key(row), []).append(row)
@@ -603,7 +599,7 @@ class SqliteRetrievalFeedbackStore(RetrievalFeedbackStore):
                 raise
 
     # 导出折叠后的当前快照，按首次写入顺序保持稳定。
-    def export_records(self) -> list[dict[str, Any]]:
+    def export_records(self) -> _RetrievalFeedbackRows:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT data FROM retrieval_feedback_records ORDER BY rowid ASC"
@@ -611,7 +607,7 @@ class SqliteRetrievalFeedbackStore(RetrievalFeedbackStore):
         return [json.loads(row[0]) for row in rows]
 
     # 事务性 upsert；同一批数据可安全重复导入。
-    def import_records(self, records: list[dict[str, Any]]) -> dict[str, int]:
+    def import_records(self, records: _RetrievalFeedbackRows) -> dict[str, int]:
         incoming = [
             json.loads(json.dumps(record, ensure_ascii=False)) for record in records
         ]

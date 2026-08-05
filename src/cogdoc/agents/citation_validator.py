@@ -1,5 +1,10 @@
 import re
+from collections.abc import Mapping, Sequence
 from typing import List, Dict, Any
+
+from cogdoc.tools.citation_ledger import (
+    validate_evidence_citations as _validate_evidence_citations,
+)
 from cogdoc.tools.rust_core_loader import ensure_rust_core
 
 
@@ -48,6 +53,13 @@ def _document_docs(valid_docs: List[Dict[str, Any]]) -> list[Dict[str, Any]]:
 
 # 定义引用校验器。
 class CitationValidatorAgent:
+    # 严格校验本次响应冻结的 Evidence ID；不接受物理页码引用。
+    @staticmethod
+    def validate_evidence_citations(
+        answer: str, ledger: Sequence[Mapping[str, Any]]
+    ) -> Dict[str, Any]:
+        return _validate_evidence_citations(answer, ledger)
+
     # 校验引用。
     @staticmethod
     def validate_citations(

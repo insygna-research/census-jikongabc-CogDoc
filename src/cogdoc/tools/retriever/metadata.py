@@ -3,6 +3,7 @@ from typing import Any
 
 
 SAFE_RETRIEVAL_METADATA_KEYS = {
+    "evidence_id",
     "search_channel",
     "context_anchor_chunk_id",
     "context_expansion",
@@ -22,6 +23,7 @@ SAFE_RETRIEVAL_METADATA_KEYS = {
     "matched_queries",
     "matched_channels",
     "matched_requirement_ids",
+    "matched_unit_ids",
     "best_query_rank",
     "original_query_hit",
     "retrieval_round",
@@ -38,6 +40,7 @@ SAFE_RETRIEVAL_METADATA_KEYS = {
     "evidence_span_score",
     "evidence_span_matched_terms",
     "evidence_span_matched_requirement_ids",
+    "evidence_span_matched_unit_ids",
     "evidence_span_reason",
 }
 

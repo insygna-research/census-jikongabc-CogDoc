@@ -16,6 +16,7 @@ from cogdoc.api.ingest import IndexJobManager, KnowledgeBaseRegistry
 from cogdoc.api.metrics import Metrics, MetricsMiddleware
 from cogdoc.api.persistence import SqliteJobStore, SqliteSessionStore
 from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
+from cogdoc.api.retrieval_eval_draft_store import RetrievalEvalDraftStore
 from cogdoc.api.routes import (
     agent_router,
     chat_router,
@@ -23,6 +24,7 @@ from cogdoc.api.routes import (
     feedback_router,
     health_router,
     knowledge_router,
+    retrieval_eval_drafts_router,
     traces_router,
 )
 from cogdoc.api.schemas import ErrorCode, build_error_response
@@ -65,6 +67,10 @@ def _default_retrieval_feedback_store():
     return StateRuntime.default_retrieval_feedback_store()
 
 
+def _default_retrieval_eval_draft_store():
+    return StateRuntime.default_retrieval_eval_draft_store()
+
+
 # 构建未捕获异常响应。
 def _unhandled_error_response(exc: Exception) -> JSONResponse:
     # 线程池关闭竞争窗口的调度异常归为暂时不可用，其余未预期异常归为内部错误；都不漏栈。
@@ -83,19 +89,21 @@ def create_app(
     *,
     chat_runner: ChatRunner | None = None,
     chat_stream_runner: Callable | None = None,
-    session_store: SessionStore | None = None,
+    session_store: SessionStore | SqliteSessionStore | None = None,
     kb_registry: KnowledgeBaseRegistry | None = None,
     index_jobs: IndexJobManager | None = None,
     feedback_store: FeedbackStore | None = None,
     feedback_analysis_store: FeedbackAnalysisStore | None = None,
     knowledge_store: DerivedKnowledgeStore | None = None,
     retrieval_feedback_store: RetrievalFeedbackStore | None = None,
+    retrieval_eval_draft_store: RetrievalEvalDraftStore | None = None,
     state_runtime: StateRuntime | None = None,
     webhook_dispatcher: WebhookDispatcher | None = None,
     derived_knowledge_index_refresher: Callable | None = None,
     derived_knowledge_index_statuser: Callable | None = None,
     close_state_runtime_on_shutdown: bool | None = None,
     api_keys: set[str] | None = None,
+    eval_review_api_keys: set[str] | None = None,
     rate_limiter: TokenBucketRateLimiter | None = None,
     offload_workers: int | None = None,
 ) -> FastAPI:
@@ -157,9 +165,9 @@ def create_app(
             app.state.lifecycle_status = "stopping"
             # 每步独立容错，进程锁放最外层，避免某个关闭异常跳过后续清理。
             try:
-                sweeper = getattr(app.state, "sweeper", None)
-                if sweeper is not None:
-                    sweeper.stop()
+                active_sweeper = getattr(app.state, "sweeper", None)
+                if active_sweeper is not None:
+                    active_sweeper.stop()
             except Exception as exc:
                 log_event(
                     "shutdown",
@@ -248,14 +256,20 @@ def create_app(
         feedback_analysis_store,
         knowledge_store,
         retrieval_feedback_store,
+        retrieval_eval_draft_store,
     )
-    if state_runtime is not None and any(store is not None for store in store_overrides):
-        raise ValueError("state_runtime cannot be combined with individual store overrides")
+    if state_runtime is not None and any(
+        store is not None for store in store_overrides
+    ):
+        raise ValueError(
+            "state_runtime cannot be combined with individual store overrides"
+        )
     runtime = state_runtime or StateRuntime.from_settings(
         feedback_store=feedback_store,
         feedback_analysis_store=feedback_analysis_store,
         knowledge_store=knowledge_store,
         retrieval_feedback_store=retrieval_feedback_store,
+        retrieval_eval_draft_store=retrieval_eval_draft_store,
     )
     app.state.state_runtime = runtime
     app.state.close_state_runtime_on_shutdown = (
@@ -304,25 +318,33 @@ def create_app(
     app.state.feedback_analysis_store = runtime.feedback_analysis_store
     app.state.knowledge_store = runtime.knowledge_store
     app.state.retrieval_feedback_store = runtime.retrieval_feedback_store
+    app.state.retrieval_eval_draft_store = runtime.retrieval_eval_draft_store
     app.state.webhook_dispatcher = webhook_dispatcher or WebhookDispatcher()
 
     # 访问控制留空则鉴权关闭，限流默认按配置令牌桶。
     settings = get_settings()
+    resolved_review_keys = (
+        settings.eval_review_api_key_set
+        if eval_review_api_keys is None
+        else set(eval_review_api_keys)
+    )
+    app.state.eval_review_api_keys = resolved_review_keys
     app.state.derived_knowledge_index_auto_refresh = (
         settings.cogdoc_derived_knowledge_index_auto_refresh
     )
     app.state.derived_knowledge_index_refresher = (
-        derived_knowledge_index_refresher
-        or runtime.refresh_derived_knowledge_index
+        derived_knowledge_index_refresher or runtime.refresh_derived_knowledge_index
     )
     app.state.derived_knowledge_index_statuser = (
-        derived_knowledge_index_statuser
-        or runtime.derived_knowledge_index_status
+        derived_knowledge_index_statuser or runtime.derived_knowledge_index_status
     )
     app.state.derived_knowledge_index_error_recorder = (
         runtime.record_derived_knowledge_index_error
     )
-    resolved_keys = settings.api_key_set if api_keys is None else api_keys
+    resolved_keys = set(settings.api_key_set if api_keys is None else api_keys)
+    # Review keys are administrator credentials and therefore also authenticate
+    # ordinary endpoints; keeping one union avoids middleware rejecting them first.
+    resolved_keys.update(resolved_review_keys)
     resolved_limiter = rate_limiter or build_rate_limiter(
         settings.rate_limit_per_minute, settings.rate_limit_burst
     )
@@ -347,6 +369,7 @@ def create_app(
     app.include_router(documents_router)
     app.include_router(feedback_router)
     app.include_router(knowledge_router)
+    app.include_router(retrieval_eval_drafts_router)
     app.include_router(traces_router)
     return app
 

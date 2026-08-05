@@ -52,6 +52,10 @@ class Settings(BaseSettings):
 
     # 访问控制：密钥逗号分隔，留空则关闭鉴权。
     cogdoc_api_keys: str = Field(default="", validation_alias="COGDOC_API_KEYS")
+    # 评测审核是高权限写操作；未配置独立密钥时审核/导出接口保持关闭。
+    cogdoc_eval_review_api_keys: str = Field(
+        default="", validation_alias="COGDOC_EVAL_REVIEW_API_KEYS"
+    )
     # 限流令牌桶：每分钟补充速率 + 突发容量；容量<=0 关闭限流。
     rate_limit_per_minute: int = Field(
         default=120, validation_alias="RATE_LIMIT_PER_MINUTE"
@@ -350,6 +354,22 @@ class Settings(BaseSettings):
         le=1.0,
         validation_alias="QA_EVIDENCE_VERIFY_BORDERLINE_MIN_SCORE",
     )
+    # Summary/Compare and future task agents share this closed-set unit gate.
+    evidence_unit_verify_enabled: bool = Field(
+        default=True, validation_alias="EVIDENCE_UNIT_VERIFY_ENABLED"
+    )
+    evidence_unit_verify_max_chars_per_doc: int = Field(
+        default=1200,
+        ge=200,
+        le=10000,
+        validation_alias="EVIDENCE_UNIT_VERIFY_MAX_CHARS_PER_DOC",
+    )
+    evidence_unit_verify_max_units_per_batch: int = Field(
+        default=8,
+        ge=1,
+        le=64,
+        validation_alias="EVIDENCE_UNIT_VERIFY_MAX_UNITS_PER_BATCH",
+    )
     # 多部分问题按证据需求组织候选；首次覆盖不足时只允许一次有界深召回。
     qa_retrieval_max_queries: int = Field(
         default=7,
@@ -584,6 +604,14 @@ class Settings(BaseSettings):
         # 解析逗号分隔的密钥列表，空集合表示鉴权关闭。
         return {k.strip() for k in self.cogdoc_api_keys.split(",") if k.strip()}
 
+    @property
+    def eval_review_api_key_set(self) -> set[str]:
+        return {
+            key.strip()
+            for key in self.cogdoc_eval_review_api_keys.split(",")
+            if key.strip()
+        }
+
     # 处理状态库路径。
     @property
     def state_db_path(self) -> str:
@@ -620,6 +648,10 @@ class Settings(BaseSettings):
     @property
     def retrieval_feedback_path(self) -> str:
         return str(self.data_dir / "feedback" / "retrieval_feedback.jsonl")
+
+    @property
+    def retrieval_eval_drafts_path(self) -> str:
+        return str(self.data_dir / "feedback" / "retrieval_eval_drafts.jsonl")
 
     # 返回根目录。
     @property

@@ -2,6 +2,7 @@ from cogdoc.service.retrieval_pipeline import (
     DERIVED_KNOWLEDGE_CHANNEL,
     HYBRID_CHANNEL,
     RetrievalQuery,
+    RetrievalScope,
     build_retrieval_queries,
     retrieve_candidate_pool,
 )
@@ -205,5 +206,73 @@ def test_pipeline_bypasses_feedback_failure_and_marks_result():
     assert result.ranking_count == 1
     assert result.channel_counts == {
         HYBRID_CHANNEL: 2,
+        DERIVED_KNOWLEDGE_CHANNEL: 0,
+    }
+
+
+class _ScopedEngine:
+    def __init__(self):
+        self.calls = []
+
+    def search(self, query, top_k, *, scope):
+        self.calls.append((query, top_k, scope))
+        return [_doc("document")]
+
+
+class _ScopedKnowledge:
+    def __init__(self):
+        self.calls = []
+
+    def search(self, kb_id, query, top_k, *, scope):
+        self.calls.append((kb_id, query, top_k, scope))
+        return [_doc("knowledge")]
+
+
+def test_pipeline_forwards_one_scope_to_every_enabled_channel():
+    scope = RetrievalScope(allowed_sources=("a.pdf",))
+    engine = _ScopedEngine()
+    knowledge = _ScopedKnowledge()
+
+    result = retrieve_candidate_pool(
+        engine,
+        knowledge,
+        None,
+        kb_id="kb",
+        original_query="query",
+        queries=[RetrievalQuery("query", is_original=True)],
+        top_k=4,
+        rrf_k=60,
+        scope=scope,
+    )
+
+    assert engine.calls == [("query", 4, scope)]
+    assert knowledge.calls == [("kb", "query", 4, scope)]
+    assert result.channel_counts == {
+        HYBRID_CHANNEL: 1,
+        DERIVED_KNOWLEDGE_CHANNEL: 1,
+    }
+
+
+def test_pipeline_scope_can_disable_derived_knowledge_without_calling_it():
+    scope = RetrievalScope(allowed_sources=("a.pdf",), include_derived_knowledge=False)
+    engine = _ScopedEngine()
+    knowledge = _ScopedKnowledge()
+
+    result = retrieve_candidate_pool(
+        engine,
+        knowledge,
+        None,
+        kb_id="kb",
+        original_query="query",
+        queries=[RetrievalQuery("query", is_original=True)],
+        top_k=4,
+        rrf_k=60,
+        scope=scope,
+    )
+
+    assert engine.calls == [("query", 4, scope)]
+    assert knowledge.calls == []
+    assert result.channel_counts == {
+        HYBRID_CHANNEL: 1,
         DERIVED_KNOWLEDGE_CHANNEL: 0,
     }

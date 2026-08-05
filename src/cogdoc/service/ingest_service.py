@@ -10,7 +10,7 @@ from cogdoc.api.derived_knowledge_store import (
     DerivedKnowledgeStore,
 )
 from cogdoc.config.settings import get_settings
-from cogdoc.graph.subgraphs.qa import RetrieverFactory
+from cogdoc.service.retriever_factory import RetrieverFactory
 from cogdoc.observability.logger import log_event
 from cogdoc.service.kb_epoch import shared_epoch_store
 from cogdoc.service.kb_lifecycle import (

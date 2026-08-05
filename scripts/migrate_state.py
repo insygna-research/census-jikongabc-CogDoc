@@ -9,7 +9,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shutil
 import sqlite3
 import sys
 import tempfile
@@ -28,6 +27,10 @@ from cogdoc.api.retrieval_feedback_store import (
     RetrievalFeedbackStore,
     SqliteRetrievalFeedbackStore,
 )
+from cogdoc.api.retrieval_eval_draft_store import (
+    RetrievalEvalDraftStore,
+    SqliteRetrievalEvalDraftStore,
+)
 from cogdoc.config.settings import get_settings
 from cogdoc.service.process_lock import (
     acquire_single_instance_lock,
@@ -35,7 +38,7 @@ from cogdoc.service.process_lock import (
 )
 
 
-MIGRATION_VERSION = 1
+MIGRATION_VERSION = 2
 
 
 class MigrationError(RuntimeError):
@@ -74,6 +77,10 @@ def _source_stores(data_dir: Path) -> tuple[dict[str, Any], list[Any]]:
             str(feedback_jsonl),
             str(data_dir / "feedback" / "bad_cases.jsonl"),
         )
+    retrieval_eval_drafts = RetrievalEvalDraftStore(
+        str(data_dir / "feedback" / "retrieval_eval_drafts.jsonl")
+    )
+    close_after.append(retrieval_eval_drafts)
     return {
         "feedback": feedback,
         "feedback_analysis": FeedbackAnalysisStore(
@@ -85,6 +92,7 @@ def _source_stores(data_dir: Path) -> tuple[dict[str, Any], list[Any]]:
         "retrieval_feedback": RetrievalFeedbackStore(
             str(data_dir / "feedback" / "retrieval_feedback.jsonl")
         ),
+        "retrieval_eval_drafts": retrieval_eval_drafts,
     }, close_after
 
 
@@ -99,6 +107,7 @@ def _target_stores(db_path: Path, scratch: Path) -> dict[str, Any]:
         "feedback_analysis": SqliteFeedbackAnalysisStore(str(db_path)),
         "derived_knowledge": SqliteDerivedKnowledgeStore(str(db_path)),
         "retrieval_feedback": SqliteRetrievalFeedbackStore(str(db_path)),
+        "retrieval_eval_drafts": SqliteRetrievalEvalDraftStore(str(db_path)),
     }
 
 
@@ -258,7 +267,9 @@ def migrate_state(
 
             return {
                 "ok": True,
-                "operation": "verify" if verify_only else ("apply" if apply else "dry-run"),
+                "operation": "verify"
+                if verify_only
+                else ("apply" if apply else "dry-run"),
                 "data_dir": str(data_dir),
                 "database": str(target_db),
                 "source_digest": source_digest,

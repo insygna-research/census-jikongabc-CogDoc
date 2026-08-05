@@ -58,6 +58,62 @@ def test_sqlite_feedback_store_records_lists_counts_and_exports(tmp_path):
     assert _read_jsonl(tmp_path / "bad_cases.jsonl")[0]["trace_id"] == "t2"
 
 
+# 非纠错坏样本保留安全公开 ledger，供离线 occurrence 完整性诊断。
+def test_feedback_bad_case_eval_draft_keeps_public_citation_ledger(tmp_path):
+    store = SqliteFeedbackStore(
+        db_path=str(tmp_path / "feedback.db"),
+        feedback_path=str(tmp_path / "feedback.jsonl"),
+        bad_cases_path=str(tmp_path / "bad_cases.jsonl"),
+    )
+    answer = "结论[a.pdf:P1]。"
+    start = answer.index("[a.pdf:P1]")
+    ledger = [
+        {
+            "evidence_id": "E001",
+            "chunk_id": "c1",
+            "source_type": "document",
+            "source": "a.pdf",
+            "page": 1,
+            "span_start": 0,
+            "span_end": 20,
+            "occurrences": [
+                {
+                    "index": 0,
+                    "answer_start": start,
+                    "answer_end": start + len("[a.pdf:P1]"),
+                }
+            ],
+        }
+    ]
+    evidence_ledger = [
+        {
+            "evidence_id": "E001",
+            "chunk_id": "c1",
+            "source_type": "document",
+            "source": "a.pdf",
+            "page": 1,
+            "span_start": 0,
+            "span_end": 20,
+            "display_citation": "[a.pdf:P1]",
+        }
+    ]
+
+    store.record(
+        {
+            "kb_id": "kb",
+            "trace_id": "t-ledger",
+            "feedback": "thumbs_down",
+            "answer": answer,
+            "citation_ledger": ledger,
+            "evidence_ledger": evidence_ledger,
+        }
+    )
+
+    bad_case = _read_jsonl(tmp_path / "bad_cases.jsonl")[0]
+    assert bad_case["eval_draft"]["citation_ledger"] == ledger
+    assert bad_case["eval_draft"]["evidence_ledger"] == evidence_ledger
+
+
 # 验证数据库反馈存储同一回答只保留第一条赞踩反馈。
 def test_sqlite_feedback_store_deduplicates_quick_trace_feedback(tmp_path):
     store = SqliteFeedbackStore(

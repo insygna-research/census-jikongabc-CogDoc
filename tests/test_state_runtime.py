@@ -10,6 +10,10 @@ from cogdoc.api.feedback_analysis_store import FeedbackAnalysisStore
 from cogdoc.api.feedback_store import FeedbackStore
 from cogdoc.api.ingest import IndexJobManager
 from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
+from cogdoc.api.retrieval_eval_draft_store import (
+    RetrievalEvalDraftStore,
+    SqliteRetrievalEvalDraftStore,
+)
 from cogdoc.api.session_store import SessionStore
 from cogdoc.config.settings import Settings
 from cogdoc.state_runtime import StateRuntime
@@ -28,18 +32,23 @@ def test_state_runtime_preserves_injected_store_identity(tmp_path):
     retrieval_feedback_store = RetrievalFeedbackStore(
         path=str(tmp_path / "retrieval_feedback.jsonl")
     )
+    retrieval_eval_draft_store = RetrievalEvalDraftStore(
+        path=str(tmp_path / "retrieval_eval_drafts.jsonl")
+    )
 
     runtime = StateRuntime.from_settings(
         feedback_store=feedback_store,
         feedback_analysis_store=feedback_analysis_store,
         knowledge_store=knowledge_store,
         retrieval_feedback_store=retrieval_feedback_store,
+        retrieval_eval_draft_store=retrieval_eval_draft_store,
     )
 
     assert runtime.feedback_store is feedback_store
     assert runtime.feedback_analysis_store is feedback_analysis_store
     assert runtime.knowledge_store is knowledge_store
     assert runtime.retrieval_feedback_store is retrieval_feedback_store
+    assert runtime.retrieval_eval_draft_store is retrieval_eval_draft_store
     assert runtime.derived_knowledge_retriever.store is knowledge_store
     assert runtime.derived_knowledge_retriever is runtime.derived_knowledge_retriever
 
@@ -56,6 +65,7 @@ def test_state_runtime_close_is_idempotent_and_closes_unique_stores():
     shared = Store()
     analysis = Store()
     knowledge = Store()
+    drafts = Store()
     runtime = StateRuntime(
         feedback_store=shared,
         feedback_analysis_store=analysis,
@@ -63,6 +73,7 @@ def test_state_runtime_close_is_idempotent_and_closes_unique_stores():
         retrieval_feedback_store=shared,
         derived_knowledge_index_persist_directory="/tmp/cogdoc-test-index",
         derived_knowledge_index_state_directory="/tmp/cogdoc-test-index-state",
+        retrieval_eval_draft_store=drafts,
     )
 
     runtime.close()
@@ -72,6 +83,7 @@ def test_state_runtime_close_is_idempotent_and_closes_unique_stores():
     assert shared.close_count == 1
     assert analysis.close_count == 1
     assert knowledge.close_count == 1
+    assert drafts.close_count == 1
     with pytest.raises(RuntimeError, match="closed"):
         _ = runtime.derived_knowledge_index
     with pytest.raises(RuntimeError, match="closed"):
@@ -184,11 +196,33 @@ def test_state_runtime_uses_explicit_settings_for_all_jsonl_paths(tmp_path):
     assert runtime.knowledge_store._path == settings.derived_knowledge_path
     assert runtime.retrieval_feedback_store._path == settings.retrieval_feedback_path
     assert (
+        runtime.retrieval_eval_draft_store._path == settings.retrieval_eval_drafts_path
+    )
+    assert (
         runtime.derived_knowledge_index_persist_directory == settings.chroma_persist_dir
     )
     assert runtime.derived_knowledge_index_state_directory == str(
         settings.data_dir / "knowledge" / "derived_index_state"
     )
+
+
+def test_state_runtime_uses_unified_sqlite_for_retrieval_eval_drafts(tmp_path):
+    settings = Settings(
+        _env_file=None,
+        cogdoc_data_dir=str(tmp_path),
+        cogdoc_state_backend="sqlite",
+    )
+    runtime = StateRuntime.from_settings(settings)
+    try:
+        assert isinstance(
+            runtime.retrieval_eval_draft_store, SqliteRetrievalEvalDraftStore
+        )
+        database = runtime.retrieval_eval_draft_store._conn.execute(
+            "PRAGMA database_list"
+        ).fetchone()[2]
+        assert database == settings.state_db_path
+    finally:
+        runtime.close()
 
 
 # 验证同一进程两个显式 data_dir 即使使用相同 kb_id，也不会共享派生知识 collection。
@@ -264,6 +298,9 @@ def test_create_app_binds_one_state_runtime_to_all_entry_points(tmp_path):
         assert app.state.feedback_analysis_store is runtime.feedback_analysis_store
         assert app.state.knowledge_store is runtime.knowledge_store
         assert app.state.retrieval_feedback_store is runtime.retrieval_feedback_store
+        assert (
+            app.state.retrieval_eval_draft_store is runtime.retrieval_eval_draft_store
+        )
         assert app.state.index_jobs._knowledge_store is runtime.knowledge_store
         assert isinstance(app.state.chat_runner, partial)
         assert app.state.chat_runner.keywords["state_runtime"] is runtime
@@ -328,6 +365,11 @@ def test_create_app_rejects_mixed_runtime_and_store_overrides(tmp_path):
 
     with pytest.raises(ValueError, match="state_runtime"):
         create_app(state_runtime=runtime, feedback_store=runtime.feedback_store)
+    with pytest.raises(ValueError, match="state_runtime"):
+        create_app(
+            state_runtime=runtime,
+            retrieval_eval_draft_store=runtime.retrieval_eval_draft_store,
+        )
 
 
 # 验证 CLI 删库镜像 API 清理四类 runtime 状态。
@@ -360,6 +402,7 @@ def test_cli_delete_kb_clears_all_runtime_stores(monkeypatch):
     console.feedback_store = Store("feedback")
     console.feedback_analysis_store = Store("analysis")
     console.retrieval_feedback_store = Store("retrieval")
+    console.retrieval_eval_draft_store = Store("eval-drafts")
     console.registry = Registry()
     console.sessions = Sessions()
     monkeypatch.setattr(cli_module, "kb_write_lock", lock)
@@ -373,6 +416,7 @@ def test_cli_delete_kb_clears_all_runtime_stores(monkeypatch):
         ("feedback", "kb"),
         ("analysis", "kb"),
         ("retrieval", "kb"),
+        ("eval-drafts", "kb"),
         ("sessions", "kb"),
         ("registry", "kb"),
     ]
@@ -405,6 +449,7 @@ def test_cli_delete_kb_keeps_registry_when_session_cleanup_fails(monkeypatch):
     console.feedback_store = Store()
     console.feedback_analysis_store = Store()
     console.retrieval_feedback_store = Store()
+    console.retrieval_eval_draft_store = Store()
     console.registry = Registry()
     console.sessions = Sessions()
     monkeypatch.setattr(cli_module, "kb_write_lock", lock)

@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal, cast
 from langchain_core.messages import AIMessage
 from langgraph.graph import StateGraph, START, END
 from cogdoc.graph.state import GraphState
@@ -11,10 +11,17 @@ from cogdoc.agents.claim_evidence_verifier import (
     ClaimRepairAgent,
     block_unfaithful_answer,
     documents_for_state,
+    matching_claim_audit_exemption,
+    state_has_only_no_evidence_units,
 )
 from cogdoc.agents.citation_validator import CitationValidatorAgent
 from cogdoc.config.settings import get_settings
 from cogdoc.observability.logger import log_event
+from cogdoc.tools.citation_ledger import (
+    CitationLedgerError,
+    render_display_citations,
+    validate_evidence_citations,
+)
 
 
 UNKNOWN_RESPONSE = (
@@ -69,7 +76,7 @@ def claim_audit_check(state: GraphState) -> str:
     audit = state.get("claim_audit") or {}
     status = str(audit.get("status") or "not_run")
     if status in {"not_run", "passed", "repaired"}:
-        return END
+        return "citation_finalize_node"
     if status == "failed" and int(state.get("claim_repair_count", 0) or 0) < (
         get_settings().claim_verification_max_repair_attempts
     ):
@@ -98,10 +105,15 @@ def claim_repair_check(state: GraphState) -> str:
 
 
 def claim_repair_citation_node(state: GraphState) -> dict:
-    result = CitationValidatorAgent.validate_citations(
-        str(state.get("answer") or ""),
-        documents_for_state(state),
-    )
+    if state.get("evidence_ledger") is not None:
+        result = CitationValidatorAgent.validate_evidence_citations(
+            str(state.get("answer") or ""), state.get("evidence_ledger", [])
+        )
+    else:
+        result = CitationValidatorAgent.validate_citations(
+            str(state.get("answer") or ""),
+            cast(list[dict[str, Any]], documents_for_state(state)),
+        )
     return {
         "claim_repair_citation_valid": bool(result.get("is_valid")),
         "claim_repair_critique": str(result.get("critique") or ""),
@@ -130,6 +142,81 @@ def claim_block_node(state: GraphState) -> dict:
     return output
 
 
+def _final_answer_update(state: GraphState, answer: str) -> dict[str, Any]:
+    output: dict[str, Any] = {"answer": answer}
+    messages = state.get("messages", [])
+    last_message = messages[-1] if messages else None
+    message_id = getattr(last_message, "id", None)
+    output["messages"] = [
+        AIMessage(content=answer, id=message_id)
+        if message_id
+        else AIMessage(content=answer)
+    ]
+    return output
+
+
+def citation_finalize_node(state: GraphState) -> dict:
+    """Render audited internal EIDs exactly once at the parent workflow boundary."""
+
+    ledger = state.get("evidence_ledger")
+    if ledger is None:
+        return {"citation_ledger": []}
+    raw_answer = str(state.get("answer") or "")
+    # API/session 都发布 strip 后的答案；occurrence 必须以同一字符串为坐标系。
+    answer = raw_answer.strip()
+    if not answer:
+        output: dict[str, Any] = {"citation_ledger": []}
+        if answer != raw_answer:
+            output.update(_final_answer_update(state, answer))
+        return output
+    exempt = bool(
+        matching_claim_audit_exemption(
+            state,
+            answer=answer,
+            task_type=str(state.get("task_type") or ""),
+        )
+    )
+    if exempt or state_has_only_no_evidence_units(state):
+        no_evidence_check = validate_evidence_citations(
+            answer, ledger, require_citation=False
+        )
+        if no_evidence_check.get("is_valid") and not no_evidence_check.get(
+            "evidence_ids"
+        ):
+            output = {"citation_ledger": []}
+            if answer != raw_answer:
+                output.update(_final_answer_update(state, answer))
+            return output
+        return block_unfaithful_answer(
+            state, reason_code="citation_ledger_finalize_failed"
+        )
+    if not ledger:
+        empty_ledger_check = validate_evidence_citations(
+            answer, ledger, require_citation=False
+        )
+        if empty_ledger_check.get("is_valid") and not empty_ledger_check.get(
+            "evidence_ids"
+        ):
+            output = {"citation_ledger": []}
+            if answer != raw_answer:
+                output.update(_final_answer_update(state, answer))
+            return output
+        return block_unfaithful_answer(
+            state, reason_code="citation_ledger_finalize_failed"
+        )
+    try:
+        rendered = render_display_citations(answer, ledger)
+    except CitationLedgerError:
+        return block_unfaithful_answer(
+            state, reason_code="citation_ledger_finalize_failed"
+        )
+    final_output: dict[str, Any] = {
+        "citation_ledger": list(rendered.entries),
+    }
+    final_output.update(_final_answer_update(state, rendered.answer))
+    return final_output
+
+
 workflow = StateGraph(GraphState)
 
 workflow.add_node("intent_router", RouterAgent.route_intent)
@@ -141,6 +228,7 @@ workflow.add_node("claim_audit_node", claim_audit_node)
 workflow.add_node("claim_repair_node", claim_repair_node)
 workflow.add_node("claim_repair_citation_node", claim_repair_citation_node)
 workflow.add_node("claim_block_node", claim_block_node)
+workflow.add_node("citation_finalize_node", citation_finalize_node)
 
 workflow.add_edge(START, "intent_router")
 
@@ -163,7 +251,7 @@ workflow.add_conditional_edges(
     {
         "claim_repair_node": "claim_repair_node",
         "claim_block_node": "claim_block_node",
-        END: END,
+        "citation_finalize_node": "citation_finalize_node",
     },
 )
 workflow.add_conditional_edges(
@@ -184,6 +272,7 @@ workflow.add_conditional_edges(
     },
 )
 workflow.add_edge("claim_block_node", END)
-workflow.add_edge("unknown_node", END)
+workflow.add_edge("citation_finalize_node", END)
+workflow.add_edge("unknown_node", "citation_finalize_node")
 
 app = workflow.compile()

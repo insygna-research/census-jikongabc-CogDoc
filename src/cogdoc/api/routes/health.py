@@ -67,9 +67,7 @@ def _readiness_snapshot(request: Request) -> tuple[bool, dict[str, Any]]:
         native_ready = True
     except RuntimeError:
         native_ready = False
-    components["rust_core"] = _component(
-        "ready" if native_ready else "not_ready"
-    )
+    components["rust_core"] = _component("ready" if native_ready else "not_ready")
 
     auth_enabled = bool(getattr(app_state, "auth_enabled", False))
     components["authentication"] = _component(
@@ -78,9 +76,7 @@ def _readiness_snapshot(request: Request) -> tuple[bool, dict[str, Any]]:
     components["ocr"] = _ocr_readiness_component()
 
     ready = all(
-        item["status"] == "ready"
-        for item in components.values()
-        if item["required"]
+        item["status"] == "ready" for item in components.values() if item["required"]
     )
     payload = {
         "status": "ready" if ready else "not_ready",
@@ -98,7 +94,7 @@ async def healthz():
 
 
 @router.get("/health/live")
-def health_live():
+async def health_live():
     return {
         "status": "alive",
         "timestamp": datetime.now(timezone.utc).isoformat(),

@@ -33,6 +33,7 @@ A local RAG knowledge-base console for individuals and teams, built on **LangGra
 - **Derived knowledge review loop** — manually add knowledge, save validated answers, or turn corrections / no-evidence feedback into pending knowledge cards with source bindings, conflict groups, stale scans, revisions, batch approve/reject, and archive/delete flows.
 
 - **Feedback analysis and attributed retrieval tuning** — thumbs-up/down, corrections, ratings, issue types, and evidence context are persisted by `trace_id`; positive signals may boost cited chunks, while negative signals penalize them only when `feedback_type=bad_retrieval`. `skip_retrieval_feedback=true` disables tuning for an entry, and every tuning record remains reviewable and rollbackable.
+- **Evidence-level retrieval-eval flywheel** — a complete successful server trace plus an explicit `thumbs_down` / `bad_retrieval` signal creates an unlabelled review draft for QA requirements, Summary sections, or Compare source×dimension cells. Gold chunks/spans and hard negatives can only be added by an authorized reviewer; approvals and exports fail closed when the index generation, chunk identity contract, or source SHA has changed.
 
 - **Trace observability, review queue, and webhooks** — every request can export a safe JSON trace with config, node timings, rewrites, evidence previews, and errors; the web UI scopes traces to the current conversation, aggregates pending/stale knowledge and feedback into a review queue, and can emit webhook events for new pending knowledge.
 
@@ -40,7 +41,7 @@ A local RAG knowledge-base console for individuals and teams, built on **LangGra
 
 ## Feature Walkthrough
 
-1. **Web chat with citations and evidence.** Pick a knowledge base, ask in natural language, watch the answer stream, then inspect citation sources, evidence snippets, and feedback controls.
+1. **Web chat with citations and evidence.** Pick a knowledge base, ask in natural language, watch live execution progress, then receive the finalized answer and inspect its citation sources, evidence snippets, and feedback controls.
 
    <img src="./docs/images/web-chat.png" alt="Web chat" width="800">
 
@@ -124,7 +125,7 @@ In the browser:
 1. **Sidebar → Knowledge base** — create a KB, or select an existing one.
 2. **Sidebar → Documents** — upload a PDF and ingest it; a progress panel polls the background index job until it finishes.
 3. **Conversations** — start a new conversation or reopen a previous one (session and KB persist in the URL, so a refresh resumes the same chat).
-4. **Chat** — pick a mode (`auto` / `qa` / `summary` / `compare`), ask, and read the streamed answer with its citation sources, evidence snippets, and 👍/👎 feedback.
+4. **Chat** — pick a mode (`auto` / `qa` / `summary` / `compare`), ask, watch live progress, and read the finalized answer with its citation sources, evidence snippets, and 👍/👎 feedback.
 5. Toggle **Local Ollama mode** in the sidebar to route generation to the local model.
 6. Open **Debug** to inspect traces for the current conversation only, or use **Retrieval debug** to call `/v1/retrieve` directly and inspect chunk hits, rerank scores, and retrieval metadata.
 7. Switch the main view to **Derived Knowledge** to create knowledge, review pending/stale items, inspect feedback analysis, enable/disable retrieval tuning, export the review queue, and scan for stale bindings after document changes.
@@ -156,9 +157,20 @@ The Streamlit app is a thin client over the FastAPI service — you can hit it d
 | `GET /v1/review-queue`, `GET /v1/review-queue/export` | Summarize and export the review queue |
 | `GET /v1/feedback-loop-metrics` | Return feedback / review / tuning loop metrics |
 | `GET /v1/retrieval-feedback`, `POST /v1/retrieval-feedback/{id}/enable`, `POST /v1/retrieval-feedback/{id}/disable` | Inspect or roll back feedback-derived retrieval tuning |
+| `GET /v1/retrieval-eval-drafts`, `GET /v1/retrieval-eval-drafts/{id}` | Review pending evidence-unit annotations and their live stale status |
+| `POST /v1/retrieval-eval-drafts/{id}/review` | Approve/reject a draft with optimistic revision checking |
+| `GET /v1/retrieval-eval-drafts/export` | Export approved, non-stale training or release-gate rows; QA-only export reports excluded Summary/Compare drafts explicitly |
 | `GET /healthz`, `GET /readyz`, `GET /metrics` | Health, readiness, Prometheus metrics |
 
+`/v1/chat/stream` always streams lifecycle and node-progress events. For QA,
+Summary, and Compare, model text is intentionally buffered because intermediate
+output can contain internal Evidence IDs and has not yet passed finalization; the
+client receives the finalized answer as one `token` event immediately before the
+normal `final` event, not as token-by-token prose. Other tasks retain live model
+tokens unless the global claim-verification gate requires buffering.
+
 If `COGDOC_API_KEYS` is configured, `/v1` requests are authenticated and rate-limited; with no keys set, `/v1` is open (the server logs a warning at startup).
+Evidence-eval list/review/export routes remain disabled until the independent `COGDOC_EVAL_REVIEW_API_KEYS` set is configured. Reviewer identities are server-derived key fingerprints; raw keys and client-provided actor names are never persisted.
 
 ### Layered memory
 
@@ -213,7 +225,7 @@ python scripts/migrate_state.py --apply         # import legacy state
 python scripts/migrate_state.py --verify-only   # verify the imported state
 ```
 
-Only after all three steps succeed should `.env` be changed to `COGDOC_STATE_BACKEND=sqlite`. The unified SQLite backend stores sessions, index jobs, feedback records, feedback analyses, derived knowledge, and retrieval-feedback/tuning state together in `COGDOC_DATA_DIR/state.db`. The latter four are the feedback/knowledge state families migrated from their legacy stores.
+Only after all three steps succeed should `.env` be changed to `COGDOC_STATE_BACKEND=sqlite`. The unified SQLite backend stores sessions, index jobs, feedback records, feedback analyses, derived knowledge, retrieval-feedback/tuning state, and retrieval-eval drafts together in `COGDOC_DATA_DIR/state.db`. The latter five are the feedback/knowledge/evaluation state families migrated from their legacy stores.
 
 `COGDOC_FEEDBACK_STORE` remains only for compatibility with deployments that still select the legacy standalone feedback backend. It does not select the unified backend and should not be used instead of `COGDOC_STATE_BACKEND` after migration.
 
@@ -563,7 +575,7 @@ chunk_id = sha256:{source_sha256}:src:{source_name}:p{page_start}-p{page_end}:c{
 - **Generation + citation self-heal** — `Generator` (OpenAI-compatible; cloud `deepseek-chat` or local `qwen2.5:7b`, `temperature = 0.2`) wraps docs as `<Document source=… page=… chunk_id=…>` and forces `[source:Pn]` tags. `validate_citations_native` (Rust) returns structured `missing_citations` / `invalid_sources` / `invalid_pages`; `citation_node` turns failures into a critique and loops `generate → citation` up to `max_iteration_count` (default `2`). Only physically validated answers leave the task subgraphs.
 - **Parent-graph claim audit and bounded repair (opt-in)** — with `CLAIM_VERIFICATION_ENABLED=true`, QA, Summary, and Compare outputs enter `claim_audit_node` after their physical citation checks. `ClaimEvidenceVerifierAgent` splits the candidate into factual claims, batches them, and labels each `supported`, `unsupported`, or `insufficient` using only the evidence explicitly cited by that claim. A failure enters `claim_repair_node`; the revised answer must pass the deterministic citation checker and then a fresh semantic audit. Repair attempts are capped by `CLAIM_VERIFICATION_MAX_REPAIR_ATTEMPTS` (default `1`). A verifier error, repair error, invalid repaired citation after the limit, or exhausted semantic audit fails closed through `claim_block_node`, which replaces the candidate with a stable refusal and clears its citations/evidence. The semantic gate is disabled by default so deployments can establish a reviewed baseline before enabling it.
 
-  Candidate model tokens are untrusted while this gate is enabled, so `/v1/chat/stream` buffers them instead of exposing provisional text. Node progress events still stream; once parent post-processing completes (pass, an intentional `not_run`, or fail-closed refusal), the final answer is emitted as one token event followed by the normal `final` event.
+  QA, Summary, and Compare always buffer candidate model tokens because their intermediate text can contain internal Evidence IDs and has not yet passed final rendering. Enabling this gate preserves the same buffering rule for any other routed candidate it audits. Node progress events still stream; once parent post-processing completes (pass, an intentional `not_run`, or fail-closed refusal), the finalized answer is emitted as one token event followed by the normal `final` event.
 
 **Summary subgraph** — `document_loader` selects one named document (or the only document in the corpus; ambiguous multi-document queries get an actionable message), `section_planner` fixes the sections to background/goals, solution/process, rules/requirements, value/output, and limitations/notes unless custom titles are supplied in state, `section_summary` writes one short paragraph per section (model writes prose only; `[source:Pn]` tags are bound deterministically from the chunks it used), and `global_summary` assembles the answer and re-runs the citation checker. No-evidence sections carry no citation and no evidence.
 
@@ -635,6 +647,7 @@ CogDoc/
 | `COGDOC_FEEDBACK_STORE` | `jsonl` | Feedback storage backend; set `sqlite` to use SQLite with JSONL export |
 | `COGDOC_DERIVED_KNOWLEDGE_INDEX_AUTO_REFRESH` | `false` | Rebuild approved derived-knowledge vectors in the background after review changes |
 | `COGDOC_API_KEYS` | unset | Comma-separated API keys; empty disables API auth |
+| `COGDOC_EVAL_REVIEW_API_KEYS` | unset | Independent admin keys for evidence-eval list/review/export; empty keeps those routes disabled |
 | `RATE_LIMIT_PER_MINUTE` | `120` | Token-bucket refill rate for protected API routes |
 | `RATE_LIMIT_BURST` | `120` | Token-bucket burst capacity; `<=0` disables rate limiting |
 | `COGDOC_MAX_UPLOAD_MB` | `50` | Maximum PDF upload size through the API/frontend |
@@ -713,7 +726,7 @@ Test layering: business logic and the Python↔native API contract are tested in
 
 Offline evaluation uses local JSONL files under `eval/`. `make eval-suite` is the default lightweight gate: it audits retrieval and quality eval coverage, runs quality metrics, prints summaries by case type and layer, and skips model-backed retrieval by default. `make eval-suite-report` writes `eval/eval_suite_report.json`; `make eval-suite-baseline` compares aggregate, case-type, and layer-level quality metrics against `eval/eval_suite_baseline.json`; `make eval-suite-update-baseline` refreshes that baseline after review. Generated reports and baselines are ignored by Git.
 
-The real-retrieval profile expects at least 100 reviewed queries in `eval/retrieval_eval.jsonl`: 40 single-source, 20 multi-source, 20 hard, and 20 no-answer. `make eval-retrieval-baseline` records the reviewed reference run, while `make eval-retrieval-gate` compares relevance metrics with that baseline and enforces the absolute limits in the local `eval/retrieval_gate.json`; use `eval/retrieval_gate.example.json` as its schema. Reports include aggregate and per-layer MRR/Recall/Hit metrics, mean and P95 latency, and a separately reported warmup that is excluded from steady-state latency. `answerable_acceptance_rate` and `no_answer_abstention_rate` measure the deterministic first-stage evidence gate directly. Exact-fact questions that pass that gate, plus borderline candidates above `QA_EVIDENCE_VERIFY_BORDERLINE_MIN_SCORE`, receive a second structured evidence-sufficiency check before generation. No-answer rows also report `no_answer_false_positive@k`; that metric only says whether the retriever returned candidates, not whether either gate accepted them or the generated answer was false. The default distance/BM25 thresholds were calibrated on the local reviewed set and should be recalibrated when the corpus or embedding model changes.
+The real-retrieval profile expects at least 100 reviewed queries in `eval/retrieval_eval.jsonl`: 40 single-source, 20 multi-source, 20 hard, and 20 no-answer. The baseline coverage profile additionally requires 20 valid evidence-plan queries, 20 gold-requirement queries, 20 chunk-gold queries, 10 span-gold queries, and 10 hard-negative queries. Counts are per independent query, not per requirement inside a query. Evidence metrics always report their true denominators, but remain out of the baseline—and absolute gates fail closed—until the configured sample minimum is met. `make eval-retrieval-baseline` records the reviewed reference run, while `make eval-retrieval-gate` compares relevance metrics with that baseline and enforces the absolute limits in the local `eval/retrieval_gate.json`; use `eval/retrieval_gate.example.json` as its schema. Reports include aggregate and per-layer MRR/Recall/Hit metrics, mean and P95 latency, and a separately reported warmup that is excluded from steady-state latency. `answerable_acceptance_rate` and `no_answer_abstention_rate` measure the deterministic first-stage evidence gate directly. Exact-fact questions that pass that gate, plus borderline candidates above `QA_EVIDENCE_VERIFY_BORDERLINE_MIN_SCORE`, receive a second structured evidence-sufficiency check before generation. No-answer rows also report `no_answer_false_positive@k`; that metric only says whether the retriever returned candidates, not whether either gate accepted them or the generated answer was false. The default distance/BM25 thresholds were calibrated on the local reviewed set and should be recalibrated when the corpus or embedding model changes.
 
 ### Requirement-aware retrieval eval data
 

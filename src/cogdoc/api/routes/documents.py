@@ -57,6 +57,7 @@ def _delete_kb(
     feedback_store=None,
     feedback_analysis_store=None,
     retrieval_feedback_store=None,
+    retrieval_eval_draft_store=None,
 ):
     # registry 删除与落 tombstone 必须与 create 在同一把锁内原子完成。
     try:
@@ -72,6 +73,7 @@ def _delete_kb(
                         feedback_store,
                         feedback_analysis_store,
                         retrieval_feedback_store,
+                        retrieval_eval_draft_store,
                     ),
                 )
             except Exception as exc:
@@ -132,7 +134,7 @@ def _kb_documents(kb_id: str) -> list[Document]:
 
 # 读取知识库来源文件列表。
 def _kb_sources(kb_id: str) -> list[str]:
-    from cogdoc.graph.subgraphs.qa import RetrieverFactory
+    from cogdoc.service.retriever_factory import RetrieverFactory
     from cogdoc.service.kb_readers import kb_read_lease
 
     with kb_read_lease(kb_id):
@@ -198,6 +200,7 @@ async def delete_knowledge_base(kb_id: str, request: Request):
             request.app.state.feedback_store,
             request.app.state.feedback_analysis_store,
             request.app.state.retrieval_feedback_store,
+            request.app.state.retrieval_eval_draft_store,
         )
     except KBCleanupError:
         # 清理不完整：registry 与 manifest 均保留，返回可重试错误而非误报删除成功。

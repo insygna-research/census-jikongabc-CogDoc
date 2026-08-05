@@ -6,6 +6,12 @@ from cogdoc.agents.conversation_memory import extract_chat_turn, extract_final_a
 from cogdoc.agents.router import FORCED_TASK_TYPES
 from cogdoc.observability.logger import configure_logging, log_event, new_trace_id
 from cogdoc.observability.trace import build_trace_step, export_trace, monotonic_ms
+from cogdoc.service.index_provenance import current_index_provenance
+from cogdoc.tools.public_citation_ledger import (
+    contains_internal_evidence_identifier,
+    contains_internal_evidence_reference,
+    validate_public_citation_ledger,
+)
 
 # 编译后的工作流图首次调用时惰性载入，避免模块级循环依赖。
 app = None
@@ -50,6 +56,7 @@ class ChatResult:
     chat_messages: list[dict[str, Any]]
     raw_output: dict[str, Any]
     trace_path: str | None = None
+    citation_ledger: list[dict[str, Any]] = field(default_factory=list)
 
 
 # 完成 提取流程词项 处理。
@@ -68,8 +75,8 @@ def _build_result(
     trace_steps: list[dict[str, Any]],
     trace_path: str | None,
 ) -> ChatResult:
-    answer = extract_final_answer(task_type, task_output)
-    critique = str(task_output.get("critique", "") or "")
+    answer = _delivery_answer(task_type, task_output)
+    critique = _public_critique(task_type, str(task_output.get("critique", "") or ""))
     return ChatResult(
         answer=answer,
         task_type=task_type,
@@ -83,10 +90,42 @@ def _build_result(
         chat_messages=extract_chat_turn(task_type, task_output, query),
         raw_output=task_output,
         trace_path=trace_path,
+        citation_ledger=list(task_output.get("citation_ledger", []) or []),
     )
 
 
 _CLAIM_AUDITED_TASKS = {"qa", "summary", "compare"}
+_PUBLIC_AUDIT_CRITIQUE = "回答未通过引用或声明证据校验。"
+_PUBLIC_CITATION_REJECTION = "引用格式未通过，正在重新生成。"
+_PUBLIC_VERIFICATION_DETAIL_HIDDEN = "证据校验已完成，内部证据标识已隐藏。"
+
+
+def _delivery_answer(task_type: str, task_output: dict[str, Any]) -> str:
+    """Return the exact string whose public-ledger offsets were calculated.
+
+    Finalized answers must not be stripped or otherwise normalized after occurrence
+    offsets are frozen.  Compare's legacy messages fallback remains available only
+    when no explicit answer exists.
+    """
+
+    if "answer" in task_output:
+        return str(task_output.get("answer") or "")
+    return extract_final_answer(task_type, task_output)
+
+
+def _public_critique(task_type: str, critique: str) -> str:
+    if task_type in _CLAIM_AUDITED_TASKS and critique:
+        return _PUBLIC_AUDIT_CRITIQUE
+    return critique
+
+
+def _public_verification_reason(value: Any) -> str:
+    text = str(value or "")
+    # Verifier reason 是模型文本，可能回显 prompt 中的 EID；进度通道只需
+    # 传达结论，不应暴露内部 response-scoped 标识。
+    if contains_internal_evidence_identifier(text):
+        return _PUBLIC_VERIFICATION_DETAIL_HIDDEN
+    return text
 
 
 def _enforce_claim_gate_release(
@@ -138,6 +177,48 @@ def _enforce_claim_gate_release(
             reason_code=reason_code or "audit_incomplete",
         )
     )
+    task_output["citation_ledger"] = []
+    return True
+
+
+def _enforce_citation_finalize_release(
+    task_type: str,
+    task_output: dict[str, Any],
+) -> bool:
+    """Fail closed when an audited answer still contains an internal Evidence ID."""
+
+    answer = _delivery_answer(task_type, task_output)
+    if task_type not in _CLAIM_AUDITED_TASKS or not answer:
+        return False
+
+    from cogdoc.agents.claim_evidence_verifier import block_unfaithful_answer
+
+    reason_code = ""
+    if contains_internal_evidence_reference(answer):
+        reason_code = "citation_finalize_incomplete"
+    else:
+        ledger = task_output.get("citation_ledger")
+        validation = validate_public_citation_ledger(
+            answer,
+            ledger,
+            evidence=(
+                task_output.get("evidence_ledger") or task_output.get("evidence")
+            ),
+            ledger_present="citation_ledger" in task_output,
+            require_evidence=bool(ledger),
+        )
+        if not validation.is_valid:
+            reason_code = "citation_ledger_invalid"
+    if not reason_code:
+        return False
+
+    task_output.update(
+        block_unfaithful_answer(
+            task_output,
+            reason_code=reason_code,
+        )
+    )
+    task_output["citation_ledger"] = []
     return True
 
 
@@ -172,6 +253,7 @@ def _trace_config(
 ) -> dict[str, Any]:
     return {
         "doc_id": doc_id,
+        **current_index_provenance(doc_id),
         "session_id": session_id or "",
         "query_preview": _query_preview(query),
         "query_length": len(query),
@@ -309,6 +391,7 @@ def run_chat(
         "unknown": {},
     }
     final_outputs: dict[str, dict[str, Any]] = {}
+    buffered_model_tokens = False
 
     log_event(
         "runtime",
@@ -345,9 +428,16 @@ def run_chat(
                 in_subgraph = len(ns) > 0
                 if mode == "messages":
                     token = _extract_token(data)
-                    # Claim gate 开启时不外泄候选 token；通过审计后只发最终答案。
-                    if token and not settings.claim_verification_enabled:
-                        yield ChatEvent("token", {"content": token})
+                    # 被审计任务的模型输出包含内部 Evidence ID，必须等待最终渲染；
+                    # 旧 claim gate 对其他任务的缓冲语义保持不变。
+                    if token:
+                        if (
+                            current_task in _CLAIM_AUDITED_TASKS
+                            or settings.claim_verification_enabled
+                        ):
+                            buffered_model_tokens = True
+                        else:
+                            yield ChatEvent("token", {"content": token})
                     continue
 
                 if mode == "updates":
@@ -461,7 +551,9 @@ def run_chat(
                     )
                     verification_payload = {
                         "supported": supported,
-                        "reason": verify_output.get("evidence_verification_reason", ""),
+                        "reason": _public_verification_reason(
+                            verify_output.get("evidence_verification_reason", "")
+                        ),
                         "evidence_chunk_ids": list(
                             verify_output.get("evidence_verified_chunk_ids", [])
                         ),
@@ -470,9 +562,17 @@ def run_chat(
                         verify_output.get("evidence_requirement_assessments", [])
                     )
                     if requirement_assessments:
-                        verification_payload["requirement_assessments"] = (
-                            requirement_assessments
-                        )
+                        verification_payload["requirement_assessments"] = [
+                            {
+                                **assessment,
+                                "reason": _public_verification_reason(
+                                    assessment.get("reason", "")
+                                ),
+                            }
+                            if isinstance(assessment, dict)
+                            else assessment
+                            for assessment in requirement_assessments
+                        ]
                     if retry_pending:
                         verification_payload["will_retry"] = True
                     yield ChatEvent(
@@ -506,13 +606,20 @@ def run_chat(
                     if critique:
                         round_answer = fallback_outputs["qa"].get("answer", "")
                         rejection_payload = {
-                            "critique": critique,
+                            "critique": (
+                                _PUBLIC_CITATION_REJECTION
+                                if current_task in _CLAIM_AUDITED_TASKS
+                                else critique
+                            ),
                             "iteration_count": iter_num,
                             "max_iteration_count": max_iter,
                             "will_retry": iter_num <= max_iter,
                         }
-                        # Debug 预览也是发布通道；门禁开启时不把未审计候选塞进任何进度事件。
-                        if not settings.claim_verification_enabled:
+                        # Debug 预览也是发布通道；被审计任务的候选可能带内部 EID。
+                        if (
+                            current_task not in _CLAIM_AUDITED_TASKS
+                            and not settings.claim_verification_enabled
+                        ):
                             rejection_payload["round_answer"] = round_answer
                         yield ChatEvent(
                             "citation_rejected",
@@ -537,7 +644,7 @@ def run_chat(
                     if critique:
                         yield ChatEvent(
                             "compare_citation_rejected",
-                            {"critique": critique},
+                            {"critique": _PUBLIC_CITATION_REJECTION},
                         )
                     else:
                         yield ChatEvent("compare_citation_passed", {})
@@ -569,6 +676,7 @@ def run_chat(
                             "claim_repair_node",
                             "claim_repair_citation_node",
                             "claim_block_node",
+                            "citation_finalize_node",
                         ):
                             node_output = data.get(node_name)
                             if isinstance(node_output, dict):
@@ -651,7 +759,54 @@ def run_chat(
                 task_type=current_task,
                 stream_error=bool(stream_error),
             )
-        has_releasable_output = bool(extract_final_answer(current_task, task_output))
+        citation_finalize_forced_block = _enforce_citation_finalize_release(
+            current_task,
+            task_output,
+        )
+        if citation_finalize_forced_block:
+            trace_steps.append(
+                build_trace_step(
+                    "runtime.citation_finalize_fail_closed",
+                    task_output,
+                    0.0,
+                )
+            )
+            log_event(
+                "citation_ledger",
+                "citation_finalize_fail_closed",
+                initial_state,
+                task_type=current_task,
+                stream_error=bool(stream_error),
+            )
+        delivery_answer = _delivery_answer(current_task, task_output)
+        has_releasable_output = bool(delivery_answer.strip())
+        if buffered_model_tokens and not has_releasable_output and stream_error is None:
+            missing_final_error = RuntimeError(
+                "chat graph produced model tokens but no releasable final answer"
+            )
+            stream_error = _trace_error("runtime", missing_final_error)
+            trace_steps.append(
+                _runtime_error_step(
+                    "runtime.missing_final_answer",
+                    missing_final_error,
+                )
+            )
+            log_event(
+                "runtime",
+                "missing_final_answer",
+                initial_state,
+                level=logging.ERROR,
+                task_type=current_task,
+            )
+            yield ChatEvent(
+                "error",
+                {
+                    "error_class": type(missing_final_error).__name__,
+                    "message": str(missing_final_error),
+                    "stage": "runtime",
+                    "trace_id": trace_id,
+                },
+            )
         trace_status = "ok"
         if stream_error:
             trace_status = "degraded" if has_releasable_output else "failed"
@@ -691,7 +846,7 @@ def run_chat(
         )
         # 检索/重排等局部状态不是可交付结果；流已失败且没有答案时只保留
         # 先前 error 事件，禁止再伪造一个空 final。
-        if stream_error and not result.answer:
+        if stream_error and not result.answer.strip():
             log_event(
                 "runtime",
                 "request_end",
@@ -701,19 +856,21 @@ def run_chat(
                 trace_path=trace_path,
             )
             return
-        if settings.claim_verification_enabled and result.answer:
+        emit_buffered_answer = settings.claim_verification_enabled or (
+            current_task in _CLAIM_AUDITED_TASKS and buffered_model_tokens
+        )
+        if emit_buffered_answer and result.answer.strip():
             audit = result.raw_output.get("claim_audit")
             audit_status = (
                 str(audit.get("status") or "") if isinstance(audit, dict) else ""
             )
-            yield ChatEvent(
-                "token",
-                {
-                    "content": result.answer,
-                    "verified": result.is_valid
-                    and audit_status in {"passed", "repaired"},
-                },
-            )
+            token_payload: dict[str, Any] = {"content": result.answer}
+            if settings.claim_verification_enabled:
+                token_payload["verified"] = result.is_valid and audit_status in {
+                    "passed",
+                    "repaired",
+                }
+            yield ChatEvent("token", token_payload)
         log_event(
             "runtime",
             "request_end",

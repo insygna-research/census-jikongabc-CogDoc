@@ -20,7 +20,7 @@ from cogdoc.api.persistence import SqliteSessionStore
 from cogdoc.api.time_utils import now_iso
 from cogdoc.command_modes import parse_forced_mode
 from cogdoc.config.settings import get_settings
-from cogdoc.graph.subgraphs.qa import RetrieverFactory
+from cogdoc.service.retriever_factory import RetrieverFactory
 from cogdoc.graph.workflow import UNKNOWN_RESPONSE
 from cogdoc.observability.logger import configure_logging
 from cogdoc.service.chat_service import run_chat
@@ -226,6 +226,7 @@ class Console:
         self.feedback_store = self.state_runtime.feedback_store
         self.feedback_analysis_store = self.state_runtime.feedback_analysis_store
         self.retrieval_feedback_store = self.state_runtime.retrieval_feedback_store
+        self.retrieval_eval_draft_store = self.state_runtime.retrieval_eval_draft_store
         # 用绝对路径，提示与列表里一眼看清 PDF 该放哪。
         self.inbox_dir = os.path.abspath(settings.cogdoc_doc_dir)
         self.active_kb: str | None = None
@@ -324,14 +325,13 @@ class Console:
                     self.feedback_store,
                     self.feedback_analysis_store,
                     self.retrieval_feedback_store,
+                    getattr(self, "retrieval_eval_draft_store", None),
                 ):
                     clear_kb = getattr(store, "clear_kb", None)
                     if callable(clear_kb):
                         clear_kb(kb_id)
             except Exception as exc:
-                raise KBCleanupError(
-                    f"KB 派生/反馈状态删除失败: {kb_id}"
-                ) from exc
+                raise KBCleanupError(f"KB 派生/反馈状态删除失败: {kb_id}") from exc
             # 连带清掉该库的会话历史，否则同名新库复用 doc_id 会捡到旧对话。
             try:
                 self.sessions.clear_kb(kb_id)

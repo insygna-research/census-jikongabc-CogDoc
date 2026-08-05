@@ -433,7 +433,9 @@ def build_report(
         retrieval_report["coverage"] = retrieval_coverage
         if retrieval_gate_config is not None:
             retrieval_report["threshold_gate"] = evaluate_retrieval_thresholds(
-                retrieval_report["aggregate"], retrieval_gate_config
+                retrieval_report["aggregate"],
+                retrieval_gate_config,
+                metric_denominators=retrieval_report.get("metric_denominators"),
             )
     else:
         retrieval_report = {

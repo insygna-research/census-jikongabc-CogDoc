@@ -1,7 +1,10 @@
-from cogdoc.agents import summary_generator
+import json
+from types import SimpleNamespace
+
+from cogdoc.agents import claim_evidence_verifier, summary_generator
 from cogdoc.agents.claim_evidence_verifier import (
     CLAIM_AUDIT_EXEMPTION_GUIDANCE,
-    documents_for_state,
+    CLAIM_AUDIT_EXEMPTION_UPSTREAM_ERROR,
 )
 from cogdoc.graph import workflow
 from cogdoc.graph.subgraphs import summary
@@ -41,6 +44,21 @@ class FakeStructuredRouter:
     # 调用测试替身并返回预设结果。
     def invoke(self, messages):
         return self.schema(task_type="summary", reason="用户要求总结文档")
+
+
+def _support_all_evidence_units(schema, messages):
+    payload = json.loads(messages[1]["content"].split("\n", 1)[1].rsplit("\n\n", 1)[0])
+    return schema(
+        assessments=[
+            {
+                "unit_id": row["unit_id"],
+                "status": "supported",
+                "evidence_ids": [row["candidate_evidence_ids"][0]],
+                "reason": "测试证据充分",
+            }
+            for row in payload
+        ]
+    )
 
 
 # 构造测试用文档。
@@ -194,13 +212,49 @@ def test_section_summary_node_generates_each_planned_section(monkeypatch):
         "方法",
     ]
     assert (
-        result["summary_section_results"][0]["content"]
-        == "该章节内容来自文档。[a.pdf:P1]"
+        result["summary_section_results"][0]["content"] == "该章节内容来自文档[E001]。"
     )
     assert (
         result["summary_section_results"][0]["evidence"][0]["chunk_id"]
         == "chunk:a.pdf:0"
     )
+    assert result["summary_section_results"][0]["evidence"][0]["evidence_id"] == (
+        "E001"
+    )
+
+
+def test_section_summary_node_does_not_generate_terminal_gate_unit(monkeypatch):
+    monkeypatch.setattr(
+        summary_generator.Generator,
+        "_get_client",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("terminal gate must not call the generator")
+        ),
+    )
+
+    result = section_summary_node(
+        {
+            "summary_source": "a.pdf",
+            "summary_docs": [],
+            "summary_section_plans": [
+                {"section_id": "one", "title": "研究问题", "instruction": "概括问题"}
+            ],
+            "evidence_unit_batch_can_generate": False,
+            "evidence_unit_results": [
+                {
+                    "status": "supported",
+                    "gate_action": "terminal",
+                    "binding": {"section_id": "one"},
+                    "selected_docs": [_doc("a.pdf", 1, 0)],
+                }
+            ],
+        }
+    )
+
+    section = result["summary_section_results"][0]
+    assert section["status"] == "supported"
+    assert section["failure_stage"] == "verification"
+    assert section["content"] == "本单元证据处理未完成，请重试。"
 
 
 # 验证 section summary node retries local no evidence 场景。
@@ -241,7 +295,7 @@ def test_section_summary_node_retries_local_no_evidence(monkeypatch):
     assert fake_llm.calls == 2
     assert (
         result["summary_section_results"][0]["content"]
-        == "文档说明了竞赛背景和目标。[a.pdf:P1]"
+        == "文档说明了竞赛背景和目标[E001]。"
     )
 
 
@@ -272,8 +326,7 @@ def test_section_summary_node_limits_local_context(monkeypatch):
 
     assert [item["page"] for item in section["evidence"]] == [1, 2, 3, 4, 5, 6, 7, 8]
     assert section["content"] == (
-        "这是本地摘要。[a.pdf:P1][a.pdf:P2][a.pdf:P3][a.pdf:P4]"
-        "[a.pdf:P5][a.pdf:P6][a.pdf:P7][a.pdf:P8]"
+        "这是本地摘要[E001][E002][E003][E004][E005][E006][E007][E008]。"
     )
 
 
@@ -343,7 +396,7 @@ def test_global_summary_node_builds_validated_answer():
                 {
                     "section_id": "one",
                     "title": "背景与目标",
-                    "content": "文档提出了目标问题。[a.pdf:P1]",
+                    "content": "文档提出了目标问题[E001]。",
                 }
             ],
         }
@@ -380,13 +433,13 @@ def test_global_summary_node_dedupes_section_evidence():
                 {
                     "section_id": "one",
                     "title": "研究问题",
-                    "content": "文档提出了目标问题。[a.pdf:P2]",
+                    "content": "文档提出了目标问题[E002]。",
                     "evidence": section_evidence,
                 },
                 {
                     "section_id": "two",
                     "title": "方法",
-                    "content": "文档描述了方法。[a.pdf:P2]",
+                    "content": "文档描述了方法[E002]。",
                     "evidence": section_evidence,
                 },
             ],
@@ -396,14 +449,14 @@ def test_global_summary_node_dedupes_section_evidence():
     assert [item["chunk_id"] for item in result["evidence"]] == ["chunk:a.pdf:1"]
 
 
-def test_global_summary_claim_documents_exclude_unseen_same_page_child():
+def test_global_summary_same_page_siblings_keep_exact_distinct_ids():
     seen = _doc("a.pdf", 1, 0)
     unseen = _doc("a.pdf", 1, 1)
     section_results = [
         {
             "section_id": "one",
             "title": "研究问题",
-            "content": "文档提出了目标问题。[a.pdf:P1]",
+            "content": "文档提出了目标问题[E001]。",
             "evidence": [
                 {
                     "chunk_id": "chunk:a.pdf:0",
@@ -421,9 +474,16 @@ def test_global_summary_claim_documents_exclude_unseen_same_page_child():
     }
 
     final = global_summary_node(state)
-    docs = documents_for_state({**state, **final})
 
-    assert [doc["meta"]["chunk_id"] for doc in docs] == ["chunk:a.pdf:0"]
+    assert [doc["retrieval"]["evidence_id"] for doc in final["summary_docs"]] == [
+        "E001",
+        "E002",
+    ]
+    assert "文档提出了目标问题[E001]。" in final["answer"]
+    assert [entry["chunk_id"] for entry in final["evidence_ledger"]] == [
+        "chunk:a.pdf:0",
+        "chunk:a.pdf:1",
+    ]
 
 
 # 验证 global summary node blocks invalid citation 场景。
@@ -444,7 +504,7 @@ def test_global_summary_node_blocks_invalid_citation():
 
     assert "# a.pdf 结构化摘要" in result["answer"]
     assert "引用校验警告" in result["answer"]
-    assert "页码错误" in result["critique"]
+    assert "Evidence ID" in result["critique"]
 
 
 # 验证 global summary node flags substantive uncited section 场景。
@@ -490,6 +550,71 @@ def test_global_summary_node_accepts_all_no_evidence_sections():
     assert result["critique"] == ""
 
 
+def test_global_summary_node_returns_all_no_evidence_answer_without_docs():
+    result = global_summary_node(
+        {
+            "summary_source": "a.pdf",
+            "summary_docs": [],
+            "summary_section_results": [
+                {
+                    "section_id": "one",
+                    "title": "研究问题",
+                    "content": "文档中未明确说明。",
+                    "status": "no_evidence",
+                    "evidence": [],
+                }
+            ],
+        }
+    )
+
+    assert "# a.pdf 结构化摘要" in result["answer"]
+    assert "文档中未明确说明。" in result["answer"]
+    assert result["evidence"] == []
+    assert result["critique"] == ""
+
+
+def test_global_summary_node_returns_operational_failure_answer_without_docs(
+    monkeypatch,
+):
+    result = global_summary_node(
+        {
+            "summary_source": "a.pdf",
+            "summary_docs": [],
+            "summary_section_results": [
+                {
+                    "section_id": "one",
+                    "title": "研究问题",
+                    "content": "本单元证据处理未完成，请重试。",
+                    "status": "verification_error",
+                    "failure_stage": "verification",
+                    "evidence": [],
+                }
+            ],
+        }
+    )
+
+    assert "本单元证据处理未完成，请重试。" in result["answer"]
+    assert result["critique"] == ""
+    assert result["claim_audit_exemption"]["reason_code"] == (
+        CLAIM_AUDIT_EXEMPTION_UPSTREAM_ERROR
+    )
+    assert result["error"] == "summary_evidence_units_incomplete"
+
+    monkeypatch.setattr(
+        claim_evidence_verifier,
+        "get_settings",
+        lambda: SimpleNamespace(
+            claim_verification_enabled=True
+        ),
+    )
+    audit = workflow.claim_audit_node({"task_type": "summary", **result})
+
+    assert audit["claim_audit"]["status"] == "not_run"
+    assert audit["claim_audit"]["reason_code"] == (
+        CLAIM_AUDIT_EXEMPTION_UPSTREAM_ERROR
+    )
+
+
 # 验证 workflow routes to summary subgraph smoke 场景。
 def test_workflow_routes_to_summary_subgraph_smoke(monkeypatch):
     engine = FakeEngine([_doc("a.pdf", 1, 0), _doc("b.pdf", 1, 0)])
@@ -507,6 +632,7 @@ def test_workflow_routes_to_summary_subgraph_smoke(monkeypatch):
                 "query": "请总结 a.pdf",
                 "doc_id": "kb",
                 "is_local": False,
+                "evidence_unit_structured_client": _support_all_evidence_units,
             }
         },
     )

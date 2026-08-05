@@ -13,6 +13,7 @@ from cogdoc.api.feedback_analysis_store import FeedbackAnalysisStore
 from cogdoc.api.feedback_store import FeedbackStore
 from cogdoc.api.ingest import KnowledgeBaseRegistry
 from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
+from cogdoc.api.retrieval_eval_draft_store import RetrievalEvalDraftStore
 
 
 # 声明异步测试使用的后端。
@@ -47,6 +48,9 @@ def _make_app(tmp_path, monkeypatch):
         feedback_store=feedback_store,
         feedback_analysis_store=feedback_analysis_store,
         retrieval_feedback_store=retrieval_feedback_store,
+        retrieval_eval_draft_store=RetrievalEvalDraftStore(
+            path=str(tmp_path / "retrieval_eval_drafts.jsonl")
+        ),
     )
 
 

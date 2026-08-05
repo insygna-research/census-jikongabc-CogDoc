@@ -40,6 +40,101 @@ def test_record_from_feedback_and_disable(tmp_path):
     assert store.boosts_for_query("kb", "报名要求") == {}
 
 
+def _ledger_entry(chunk_id, answer, *, evidence_id="E001", index=0):
+    citation = "[a.pdf:P1]"
+    start = answer.index(citation)
+    return {
+        "evidence_id": evidence_id,
+        "chunk_id": chunk_id,
+        "source_type": "document",
+        "source": "a.pdf",
+        "page": 1,
+        "span_start": 0,
+        "span_end": 20,
+        "occurrences": [
+            {
+                "index": index,
+                "answer_start": start,
+                "answer_end": start + len(citation),
+            }
+        ],
+    }
+
+
+# 有精确引用账本时，只调权最终答案实际引用的 chunk。
+def test_retrieval_feedback_prefers_citation_ledger_targets(tmp_path):
+    store = RetrievalFeedbackStore(path=str(tmp_path / "retrieval_feedback.jsonl"))
+    answer = "结论[a.pdf:P1]。"
+
+    records = store.record_from_feedback(
+        "fb-ledger",
+        {
+            "kb_id": "kb",
+            "query": "问题",
+            "feedback": "thumbs_down",
+            "feedback_type": "bad_retrieval",
+            "answer": answer,
+            "citations": [{"chunk_id": "c1"}, {"chunk_id": "c2"}],
+            "evidence": [
+                {
+                    "chunk_id": "c1",
+                    "source_type": "document",
+                    "source": "a.pdf",
+                    "page": 1,
+                },
+                {
+                    "chunk_id": "c2",
+                    "source_type": "document",
+                    "source": "a.pdf",
+                    "page": 1,
+                },
+            ],
+            "citation_ledger": [_ledger_entry("c2", answer)],
+        },
+    )
+
+    assert [item["chunk_id"] for item in records[0]["target_chunks"]] == ["c2"]
+    assert store.boosts_for_query("kb", "问题") == {"c2": -0.35}
+
+
+# 混入闭集外 chunk 的 ledger 整体失败关闭，不能回退惩罚全部候选证据。
+def test_retrieval_feedback_rejects_mixed_forged_ledger(tmp_path):
+    store = RetrievalFeedbackStore(path=str(tmp_path / "retrieval_feedback.jsonl"))
+    citation = "[a.pdf:P1]"
+    answer = f"结论{citation}。"
+    second_start = answer.index(citation)
+    forged = _ledger_entry("forged", answer, evidence_id="E002", index=1)
+    forged["occurrences"][0]["answer_start"] = second_start
+    forged["occurrences"][0]["answer_end"] = second_start + len(citation)
+
+    records = store.record_from_feedback(
+        "fb-forged",
+        {
+            "kb_id": "kb",
+            "query": "问题",
+            "feedback": "thumbs_down",
+            "feedback_type": "bad_retrieval",
+            "answer": answer,
+            "citations": [{"chunk_id": "c1"}],
+            "evidence": [
+                {
+                    "chunk_id": "c1",
+                    "source_type": "document",
+                    "source": "a.pdf",
+                    "page": 1,
+                }
+            ],
+            "citation_ledger": [
+                _ledger_entry("c1", answer),
+                forged,
+            ],
+        },
+    )
+
+    assert records == []
+    assert store.boosts_for_query("kb", "问题") == {}
+
+
 # 验证旧版按分块展开的调权会按同一次反馈折叠。
 def test_legacy_expanded_feedback_groups_by_feedback_id(tmp_path):
     path = tmp_path / "retrieval_feedback.jsonl"

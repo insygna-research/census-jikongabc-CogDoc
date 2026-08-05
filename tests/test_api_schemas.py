@@ -3,7 +3,10 @@ from pydantic import ValidationError
 from cogdoc.api.schemas import (
     API_SCHEMA_VERSION,
     ChatRequest,
+    CitationLedgerEntry,
+    CitationOccurrence,
     ErrorCode,
+    FeedbackRequest,
     TraceResponse,
     build_error_response,
     chat_result_to_response,
@@ -105,6 +108,293 @@ def test_chat_result_to_response_maps_stable_fields_without_raw_text():
     assert "trace_path" not in payload
     assert "不应进入 API 响应的全文" not in str(payload)
     assert payload["claim_audit"] is None
+
+
+def test_chat_result_to_response_whitelists_public_citation_ledger_fields():
+    sensitive_text = "不应公开的证据正文"
+    sensitive_meta = "不应公开的私有元数据"
+    answer = "报名要求见说明。[a.pdf:P1]"
+    citation_start = answer.index("[a.pdf:P1]")
+    result = ChatResult(
+        answer=answer,
+        task_type="qa",
+        citations=[],
+        evidence=[
+            {
+                "evidence_id": "E1000",
+                "chunk_id": "chunk:a:1",
+                "source_type": "document",
+                "source": "a.pdf",
+                "page": 1,
+                "page_start": 1,
+                "page_end": 1,
+                "retrieval": {
+                    "evidence_id": "E1000",
+                    "evidence_text_start": 12,
+                    "evidence_text_end": 36,
+                },
+            }
+        ],
+        critique="",
+        is_valid=True,
+        trace_id="trace-ledger",
+        request_id="trace-ledger",
+        steps=[],
+        chat_messages=[],
+        raw_output={
+            "evidence_ledger": [
+                {
+                    "evidence_id": "E1000",
+                    "chunk_id": "chunk:a:1",
+                    "source_type": "document",
+                    "source": "a.pdf",
+                    "page": 1,
+                    "page_start": 1,
+                    "page_end": 1,
+                    "span_start": 12,
+                    "span_end": 36,
+                    "text": sensitive_text,
+                    "meta": {"private": sensitive_meta},
+                }
+            ]
+        },
+        citation_ledger=[
+            {
+                "evidence_id": "E1000",
+                "chunk_id": "chunk:a:1",
+                "source_type": "document",
+                "source": "a.pdf",
+                "page": 1,
+                "page_start": 1,
+                "page_end": 1,
+                "span_start": 12,
+                "span_end": 36,
+                "display_citation": "[a.pdf:P1]",
+                "text": sensitive_text,
+                "meta": {"private": sensitive_meta},
+                "occurrences": [
+                    {
+                        "index": 0,
+                        "answer_start": citation_start,
+                        "answer_end": citation_start + len("[a.pdf:P1]"),
+                        "text": sensitive_text,
+                        "private": sensitive_meta,
+                    }
+                ],
+            }
+        ],
+    )
+
+    payload = chat_result_to_response(result, doc_id="kb").model_dump()
+
+    assert payload["citation_ledger"] == [
+        {
+            "evidence_id": "E1000",
+            "chunk_id": "chunk:a:1",
+            "source_type": "document",
+            "knowledge_id": "",
+            "source": "a.pdf",
+            "page": 1,
+            "page_start": 1,
+            "page_end": 1,
+            "span_start": 12,
+            "span_end": 36,
+            "occurrences": [
+                {
+                    "index": 0,
+                    "answer_start": citation_start,
+                    "answer_end": citation_start + len("[a.pdf:P1]"),
+                }
+            ],
+        }
+    ]
+    serialized = str(payload)
+    assert "display_citation" not in serialized
+    assert sensitive_text not in serialized
+    assert sensitive_meta not in serialized
+
+
+def test_chat_result_to_response_uses_global_registry_for_repaired_citation():
+    answer = "补充检索后的结论。[b.pdf:P2]"
+    citation = "[b.pdf:P2]"
+    citation_start = answer.index(citation)
+    result = ChatResult(
+        answer=answer,
+        task_type="qa",
+        citations=[],
+        # 对外 evidence 仍是修复前候选，不包含最终被引用的 b.pdf。
+        evidence=[
+            {
+                "evidence_id": "E001",
+                "chunk_id": "chunk:a:1",
+                "source": "a.pdf",
+                "page": 1,
+                "retrieval": {
+                    "evidence_id": "E001",
+                    "evidence_text_start": 0,
+                    "evidence_text_end": 8,
+                },
+            }
+        ],
+        critique="",
+        is_valid=True,
+        trace_id="trace-repaired-ledger",
+        request_id="trace-repaired-ledger",
+        steps=[],
+        chat_messages=[],
+        # 全局 registry 冻结了初始候选和修复阶段补充使用的证据。
+        raw_output={
+            "evidence_ledger": [
+                {
+                    "evidence_id": "E001",
+                    "chunk_id": "chunk:a:1",
+                    "source_type": "document",
+                    "source": "a.pdf",
+                    "page": 1,
+                    "span_start": 0,
+                    "span_end": 8,
+                },
+                {
+                    "evidence_id": "E002",
+                    "chunk_id": "chunk:b:2",
+                    "source_type": "document",
+                    "source": "b.pdf",
+                    "page": 2,
+                    "span_start": 4,
+                    "span_end": 18,
+                },
+            ]
+        },
+        citation_ledger=[
+            {
+                "evidence_id": "E002",
+                "chunk_id": "chunk:b:2",
+                "source_type": "document",
+                "source": "b.pdf",
+                "page": 2,
+                "span_start": 4,
+                "span_end": 18,
+                "occurrences": [
+                    {
+                        "index": 0,
+                        "answer_start": citation_start,
+                        "answer_end": citation_start + len(citation),
+                    }
+                ],
+            }
+        ],
+    )
+
+    payload = chat_result_to_response(result, doc_id="kb").model_dump()
+
+    assert [item["chunk_id"] for item in payload["evidence"]] == ["chunk:a:1"]
+    assert len(payload["citation_ledger"]) == 1
+    assert payload["citation_ledger"][0]["evidence_id"] == "E002"
+    assert payload["citation_ledger"][0]["chunk_id"] == "chunk:b:2"
+
+
+def test_chat_result_to_response_clears_entire_mixed_invalid_ledger():
+    first = "[a.pdf:P1]"
+    second = "[b.pdf:P2]"
+    answer = f"结论{first}和{second}"
+    first_start = answer.index(first)
+    second_start = answer.index(second)
+    result = ChatResult(
+        answer=answer,
+        task_type="qa",
+        citations=[],
+        evidence=[
+            {"chunk_id": "c1", "source": "a.pdf", "page": 1},
+            {"chunk_id": "c2", "source": "b.pdf", "page": 2},
+        ],
+        critique="",
+        is_valid=True,
+        trace_id="trace-invalid-ledger",
+        request_id="trace-invalid-ledger",
+        steps=[],
+        chat_messages=[],
+        raw_output={},
+        citation_ledger=[
+            {
+                "evidence_id": "E001",
+                "chunk_id": "c1",
+                "source_type": "document",
+                "source": "a.pdf",
+                "page": 1,
+                "span_start": 0,
+                "span_end": 4,
+                "occurrences": [
+                    {
+                        "index": 0,
+                        "answer_start": first_start,
+                        "answer_end": first_start + len(first),
+                    }
+                ],
+            },
+            {
+                "evidence_id": "E01000",
+                "chunk_id": "c2",
+                "source_type": "document",
+                "source": "b.pdf",
+                "page": 2,
+                "span_start": 0,
+                "span_end": 4,
+                "occurrences": [
+                    {
+                        "index": 1,
+                        "answer_start": second_start,
+                        "answer_end": second_start + len(second),
+                    }
+                ],
+            },
+        ],
+    )
+
+    payload = chat_result_to_response(result, doc_id="kb").model_dump()
+
+    assert payload["citation_ledger"] == []
+    assert payload["critique"] == "回答未通过引用或声明证据校验。"
+    assert payload["is_valid"] is False
+    assert "E1000" not in payload["critique"]
+
+
+def test_public_citation_models_accept_canonical_four_digit_evidence_id():
+    entry = CitationLedgerEntry(
+        evidence_id="E1000",
+        chunk_id="c1",
+        source="a.pdf",
+        page=1,
+        span_start=0,
+        span_end=4,
+        occurrences=[CitationOccurrence(index=0, answer_start=0, answer_end=10)],
+    )
+
+    assert entry.evidence_id == "E1000"
+
+
+def test_public_citation_models_reject_noncanonical_ids_and_ranges():
+    with pytest.raises(ValidationError):
+        CitationLedgerEntry(
+            evidence_id="E01000",
+            chunk_id="c1",
+            source="a.pdf",
+            page=1,
+            span_start=0,
+            span_end=4,
+            occurrences=[CitationOccurrence(index=0, answer_start=0, answer_end=10)],
+        )
+
+    with pytest.raises(ValidationError):
+        CitationOccurrence(index=0, answer_start=10, answer_end=10)
+
+
+def test_feedback_request_forbids_client_supplied_citation_ledger():
+    with pytest.raises(ValidationError):
+        FeedbackRequest(
+            trace_id="trace-1",
+            feedback="thumbs_down",
+            citation_ledger=[],
+        )
 
 
 # 验证公开响应只暴露声明审计摘要，不泄漏逐条声明、理由或证据。
@@ -228,9 +518,7 @@ def test_chat_result_to_response_preserves_none_rates_for_zero_claims():
         },
     )
 
-    summary = chat_result_to_response(result, doc_id="kb").model_dump()[
-        "claim_audit"
-    ]
+    summary = chat_result_to_response(result, doc_id="kb").model_dump()["claim_audit"]
 
     assert summary["counts"]["claim_count"] == 0
     assert summary["metrics"] == {

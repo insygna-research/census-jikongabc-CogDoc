@@ -8,6 +8,7 @@ from cogdoc.tools.embedder import Embedder
 from cogdoc.tools.retriever.base_retriever import BaseRetriever
 from cogdoc.tools.retriever.metadata import copy_optional_structure_metadata
 from cogdoc.tools.retriever.retrieval_text import retrieval_text
+from cogdoc.tools.retriever.scope import RetrievalScope
 
 
 # 集合中记录的嵌入模型与当前系统模型不符：当前代不可用，需触发新代重建而非硬失败。
@@ -165,11 +166,29 @@ class VectorRetriever(BaseRetriever):
         return {str(chunk_id): embeddings[i] for i, chunk_id in enumerate(data["ids"])}
 
     # 检索。
-    def search(self, query: str, top_k: int = 3) -> List[RetrievedDoc]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 3,
+        *,
+        scope: RetrievalScope | None = None,
+    ) -> List[RetrievedDoc]:
+        # source allowlist 下推到 Chroma query，确保目标 source 在本通道
+        # top-k 之前参与竞争，不能先取全库 top-k 再过滤。
+        query_options: dict[str, Any] = {
+            "query_embeddings": cast(Any, [Embedder.embed_query(query)]),
+            "n_results": top_k,
+        }
+        if scope is not None and scope.is_source_restricted:
+            sources = list(scope.allowed_sources)
+            query_options["where"] = cast(
+                Any,
+                {"source": sources[0]}
+                if len(sources) == 1
+                else {"source": {"$in": sources}},
+            )
         # 返回结构保持与 BM25Retriever 一致。
-        results = self.collection.query(
-            query_embeddings=cast(Any, [Embedder.embed_query(query)]), n_results=top_k
-        )
+        results = self.collection.query(**query_options)
         if not results or not results["documents"] or not results["documents"][0]:
             return []
 

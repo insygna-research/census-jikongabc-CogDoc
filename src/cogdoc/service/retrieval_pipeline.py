@@ -12,6 +12,7 @@ from cogdoc.tools.retriever.fusion import (
     RankedCandidateList,
     fuse_ranked_candidates,
 )
+from cogdoc.tools.retriever.scope import RetrievalScope
 
 
 HYBRID_CHANNEL = "hybrid"
@@ -19,11 +20,24 @@ DERIVED_KNOWLEDGE_CHANNEL = "derived_knowledge"
 
 
 class _DocumentRetriever(Protocol):
-    def search(self, query: str, top_k: int = 3) -> list[RetrievedDoc]: ...
+    def search(
+        self,
+        query: str,
+        top_k: int = 3,
+        *,
+        scope: RetrievalScope | None = None,
+    ) -> list[RetrievedDoc]: ...
 
 
 class _DerivedKnowledgeRetriever(Protocol):
-    def search(self, kb_id: str, query: str, top_k: int = 3) -> list[RetrievedDoc]: ...
+    def search(
+        self,
+        kb_id: str,
+        query: str,
+        top_k: int = 3,
+        *,
+        scope: RetrievalScope | None = None,
+    ) -> list[RetrievedDoc]: ...
 
 
 class _RetrievalFeedbackStore(Protocol):
@@ -231,8 +245,14 @@ def retrieve_candidate_pool(
     rrf_k: float,
     retrieval_round: int = 0,
     fusion_top_n: int | None = None,
+    scope: RetrievalScope | None = None,
 ) -> RetrievalPipelineResult:
-    """Retrieve both channels for each query, fuse them, then apply feedback."""
+    """Retrieve allowed channels for each query, fuse them, then apply feedback.
+
+    ``scope=None`` preserves the legacy unscoped method calls exactly.  A
+    provided scope is forwarded to every enabled channel so source allowlists
+    take effect inside each channel before its top-k boundary.
+    """
 
     if top_k < 0:
         raise ValueError("top_k must be non-negative")
@@ -244,7 +264,11 @@ def retrieve_candidate_pool(
         if not query.text.strip():
             continue
         executed_queries.append(query)
-        hybrid_docs = engine.search(query=query.text, top_k=top_k)
+        hybrid_docs = (
+            engine.search(query=query.text, top_k=top_k)
+            if scope is None
+            else engine.search(query=query.text, top_k=top_k, scope=scope)
+        )
         channel_counts[HYBRID_CHANNEL] += len(hybrid_docs)
         if hybrid_docs:
             rankings.append(
@@ -258,8 +282,16 @@ def retrieve_candidate_pool(
                 )
             )
 
-        knowledge_docs = derived_knowledge_retriever.search(
-            kb_id, query.text, top_k=top_k
+        knowledge_docs = (
+            derived_knowledge_retriever.search(kb_id, query.text, top_k=top_k)
+            if scope is None
+            else (
+                derived_knowledge_retriever.search(
+                    kb_id, query.text, top_k=top_k, scope=scope
+                )
+                if scope.include_derived_knowledge
+                else []
+            )
         )
         channel_counts[DERIVED_KNOWLEDGE_CHANNEL] += len(knowledge_docs)
         if knowledge_docs:

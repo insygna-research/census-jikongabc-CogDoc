@@ -1,6 +1,19 @@
 {
+  "minimum_samples": {
+    "evidence_requirements": 20,
+    "gold_requirements": 20,
+    "chunk_gold": 20,
+    "span_gold": 10,
+    "hard_negatives": 10
+  },
   "minimum": {
+    "all_requirements_covered@5": 0.75,
     "answerable_acceptance_rate": 0.8,
+    "chunk_precision@5": 0.5,
+    "evidence_ndcg@5": 0.75,
+    "evidence_span_gold_recall_post": 0.8,
+    "generation_requirement_coverage": 0.8,
+    "hard_negative_rejection@5": 0.9,
     "mrr": 0.65,
     "no_answer_abstention_rate": 0.5,
     "recall@5": 0.8

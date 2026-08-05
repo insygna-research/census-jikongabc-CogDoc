@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from threading import RLock
-from typing import Any
+from typing import Any, TypeAlias
 from uuid import uuid4
 
 from cogdoc.api.persistence import _connect, _execute_write_with_retry
@@ -21,6 +21,9 @@ _OPTIONAL_STRUCTURE_FIELDS = {
     "section_level",
     "child_index_in_parent",
 }
+
+_FeedbackRows: TypeAlias = list[dict[str, Any]]
+_SqlParams: TypeAlias = list[Any]
 
 
 # 清理评测草稿引用项。
@@ -63,6 +66,16 @@ def _build_eval_draft(entry: dict[str, Any]) -> dict[str, Any]:
         draft["evidence"] = [
             _eval_ref(item) for item in entry["evidence"][:_EVIDENCE_PREVIEW_LIMIT]
         ]
+    # 纠错草稿把 answer 替换成了人工答案，原回答的 occurrence 偏移已不再
+    # 适用；其余坏样本保留安全公开 ledger，供离线完整性诊断。
+    if entry.get("citation_ledger") and not correction:
+        draft["citation_ledger"] = [
+            _eval_ref(item) for item in entry["citation_ledger"]
+        ]
+        if entry.get("evidence_ledger"):
+            draft["evidence_ledger"] = [
+                _eval_ref(item) for item in entry["evidence_ledger"]
+            ]
     return draft
 
 
@@ -79,7 +92,7 @@ class FeedbackStore:
         self._bad_cases_path = bad_cases_path or settings.bad_cases_path
         self._lock = RLock()
         self._cache_mtime: float | None = None
-        self._cache_rows: list[dict[str, Any]] | None = None
+        self._cache_rows: _FeedbackRows | None = None
         for path in (self._feedback_path, self._bad_cases_path):
             directory = os.path.dirname(path)
             if directory:
@@ -137,7 +150,7 @@ class FeedbackStore:
         feedback_type: str | None = None,
         is_bad_case: bool | None = None,
         limit: int = 100,
-    ) -> list[dict[str, Any]]:
+    ) -> _FeedbackRows:
         with self._lock:
             rows = self._read_all()
         rows = [row for row in rows if row.get("kb_id") == kb_id]
@@ -181,7 +194,7 @@ class FeedbackStore:
         }
 
     # 导出完整反馈记录，供统一状态库迁移使用。
-    def export_records(self) -> list[dict[str, Any]]:
+    def export_records(self) -> _FeedbackRows:
         with self._lock:
             return [
                 json.loads(json.dumps(row, ensure_ascii=False))
@@ -197,7 +210,7 @@ class FeedbackStore:
             self._cache_rows = None
 
     # 读取全部反馈。
-    def _read_all(self) -> list[dict[str, Any]]:
+    def _read_all(self) -> _FeedbackRows:
         mtime = (
             os.path.getmtime(self._feedback_path)
             if os.path.exists(self._feedback_path)
@@ -209,7 +222,7 @@ class FeedbackStore:
             self._cache_mtime = mtime
             self._cache_rows = []
             return []
-        rows = []
+        rows: _FeedbackRows = []
         with open(self._feedback_path, encoding="utf-8") as f:
             for line in f:
                 if line.strip():
@@ -333,9 +346,9 @@ class SqliteFeedbackStore(FeedbackStore):
         feedback_type: str | None = None,
         is_bad_case: bool | None = None,
         limit: int = 100,
-    ) -> list[dict[str, Any]]:
+    ) -> _FeedbackRows:
         where = ["kb_id=?"]
-        params: list[Any] = [kb_id]
+        params: _SqlParams = [kb_id]
         if trace_id is not None:
             where.append("trace_id=?")
             params.append(trace_id)
@@ -387,7 +400,7 @@ class SqliteFeedbackStore(FeedbackStore):
         }
 
     # 导出稳定顺序的完整反馈记录。
-    def export_records(self) -> list[dict[str, Any]]:
+    def export_records(self) -> _FeedbackRows:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT data FROM feedback_entries "
@@ -396,7 +409,7 @@ class SqliteFeedbackStore(FeedbackStore):
         return [json.loads(row[0]) for row in rows]
 
     # 按 feedback_id 幂等导入，保留原始标识与时间戳。
-    def import_records(self, records: list[dict[str, Any]]) -> dict[str, int]:
+    def import_records(self, records: _FeedbackRows) -> dict[str, int]:
         imported = 0
         skipped = 0
         with self._lock:
@@ -414,9 +427,7 @@ class SqliteFeedbackStore(FeedbackStore):
                     if existing is not None and json.loads(existing[0]) == entry:
                         skipped += 1
                         continue
-                    self._insert_locked(
-                        entry, entry.get("feedback") in _BAD_CASE_TYPES
-                    )
+                    self._insert_locked(entry, entry.get("feedback") in _BAD_CASE_TYPES)
                     imported += 1
                 self._conn.execute("COMMIT")
             except Exception:

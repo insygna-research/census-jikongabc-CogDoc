@@ -222,6 +222,252 @@ def test_quality_eval_catches_invalid_citation():
     assert row["metrics"]["citation_accuracy"] == 1.0
 
 
+def _public_ledger(chunk_id, answer, *, evidence_id="E001", offset_delta=0):
+    citation = "[a.pdf:P1]"
+    start = answer.index(citation)
+    return [
+        {
+            "evidence_id": evidence_id,
+            "chunk_id": chunk_id,
+            "source_type": "document",
+            "source": "a.pdf",
+            "page": 1,
+            "page_start": 1,
+            "page_end": 1,
+            "span_start": 0,
+            "span_end": 20,
+            "occurrences": [
+                {
+                    "index": 0,
+                    "answer_start": start,
+                    "answer_end": start + len(citation) + offset_delta,
+                }
+            ],
+        }
+    ]
+
+
+def _internal_evidence_ledger_entry(chunk_id="chunk:a.pdf:1", *, evidence_id="E001"):
+    return {
+        "evidence_id": evidence_id,
+        "chunk_id": chunk_id,
+        "source_type": "document",
+        "source": "a.pdf",
+        "page": 1,
+        "page_start": 1,
+        "page_end": 1,
+        "span_start": 0,
+        "span_end": 20,
+        "display_citation": "[a.pdf:P1]",
+    }
+
+
+# 精确账本诊断是增量指标，不改变既有物理引用准确率。
+def test_quality_eval_reports_valid_citation_ledger_metrics():
+    answer = "文档说明报名要求。[a.pdf:P1]"
+    report = run_eval(
+        [
+            {
+                "case_type": "citation",
+                "layer": "hard",
+                "answer": answer,
+                "expected_valid": True,
+                "docs": [_doc()],
+                "evidence": [{"chunk_id": "chunk:a.pdf:1"}],
+                "citation_ledger": _public_ledger("chunk:a.pdf:1", answer),
+            }
+        ]
+    )
+
+    metrics = report["rows"][0]["metrics"]
+    assert metrics["citation_accuracy"] == 1.0
+    assert metrics["citation_ledger_occurrence_mapping_rate"] == 1.0
+    assert metrics["citation_ledger_integrity_rate"] == 1.0
+    assert not any(key.startswith("_citation_ledger_") for key in metrics)
+    assert report["aggregate"]["citation_ledger_integrity_rate"] == 1.0
+    assert "citation_ledger_integrity_rate" not in report["baseline_gated_metrics"]
+
+
+# repair 引用可以不在公开 evidence 摘要中；eval 应以全局 internal
+# evidence_ledger 绑定其精确视图，但仍对畸形非空公开账本失败关闭。
+def test_quality_eval_uses_internal_registry_and_rejects_malformed_public_ledger():
+    answer = "文档说明报名要求。[a.pdf:P1]"
+    common = {
+        "case_type": "faithfulness",
+        "layer": "hard",
+        "answer": answer,
+        "is_faithful": True,
+        # 公开摘要不含实际引用的 chunk:a.pdf:1。
+        "evidence": [
+            {
+                "chunk_id": "chunk:summary-only",
+                "source": "summary.pdf",
+                "page": 9,
+            }
+        ],
+        "evidence_ledger": [_internal_evidence_ledger_entry()],
+    }
+    malformed = _public_ledger("chunk:a.pdf:1", answer, evidence_id="E000")
+    report = run_eval(
+        [
+            {
+                **common,
+                "citation_ledger": _public_ledger("chunk:a.pdf:1", answer),
+            },
+            {**common, "citation_ledger": malformed},
+        ]
+    )
+
+    valid_metrics = report["rows"][0]["metrics"]
+    malformed_metrics = report["rows"][1]["metrics"]
+    assert valid_metrics["citation_ledger_occurrence_mapping_rate"] == 1.0
+    assert valid_metrics["citation_ledger_integrity_rate"] == 1.0
+    assert malformed_metrics["citation_ledger_occurrence_mapping_rate"] == 1.0
+    assert malformed_metrics["citation_ledger_integrity_rate"] == 0.0
+    assert report["aggregate"]["citation_ledger_integrity_rate"] == 0.5
+
+
+# 闭集外 chunk 与畸形 ID/偏移会降低 ledger 指标，但物理引用指标保持兼容。
+def test_quality_eval_rejects_forged_and_malformed_ledgers():
+    answer = "文档说明报名要求。[a.pdf:P1]"
+    base = {
+        "case_type": "citation",
+        "layer": "hard",
+        "answer": answer,
+        "expected_valid": True,
+        "docs": [_doc()],
+        "evidence": [{"chunk_id": "chunk:a.pdf:1"}],
+    }
+    report = run_eval(
+        [
+            {
+                **base,
+                "citation_ledger": _public_ledger("forged-chunk", answer),
+            },
+            {
+                **base,
+                "citation_ledger": _public_ledger(
+                    "chunk:a.pdf:1",
+                    answer,
+                    evidence_id="e001",
+                    offset_delta=-1,
+                ),
+            },
+        ]
+    )
+
+    first, second = report["rows"]
+    assert first["metrics"]["citation_accuracy"] == 1.0
+    assert first["metrics"]["citation_ledger_occurrence_mapping_rate"] == 1.0
+    assert first["metrics"]["citation_ledger_integrity_rate"] == 0.0
+    assert second["metrics"]["citation_accuracy"] == 1.0
+    assert second["metrics"]["citation_ledger_occurrence_mapping_rate"] == 0.0
+    assert second["metrics"]["citation_ledger_integrity_rate"] == 0.0
+    assert report["aggregate"]["citation_accuracy"] == 1.0
+    assert report["aggregate"]["citation_ledger_occurrence_mapping_rate"] == 0.5
+    assert report["aggregate"]["citation_ledger_integrity_rate"] == 0.0
+
+
+def test_quality_eval_binds_ledger_to_canonical_chunk_metadata():
+    answer = "文档说明报名要求。[a.pdf:P1]"
+    forged = _public_ledger("chunk:a.pdf:1", answer)
+    # chunk_id 真实但页范围伪造，必须与 docs 的规范元数据冲突。
+    forged[0]["page_start"] = 9
+    forged[0]["page_end"] = 9
+
+    report = run_eval(
+        [
+            {
+                "case_type": "citation",
+                "layer": "hard",
+                "answer": answer,
+                "expected_valid": True,
+                "docs": [_doc()],
+                "evidence": [{"chunk_id": "chunk:a.pdf:1"}],
+                "citation_ledger": forged,
+            }
+        ]
+    )
+
+    metrics = report["rows"][0]["metrics"]
+    assert metrics["citation_ledger_occurrence_mapping_rate"] == 1.0
+    assert metrics["citation_ledger_integrity_rate"] == 0.0
+
+
+def test_quality_eval_ledger_case_rates_include_unobservable_cases():
+    answer = "文档说明报名要求。[a.pdf:P1]"
+    items = [
+        {
+            "case_type": "citation",
+            "layer": "hard",
+            "answer": answer,
+            "expected_valid": True,
+            "docs": [_doc()],
+            "evidence": [{"chunk_id": "chunk:a.pdf:1"}],
+            "citation_ledger": _public_ledger("chunk:a.pdf:1", answer),
+        }
+    ]
+    items.extend(
+        {
+            "case_type": "faithfulness",
+            "layer": "hard",
+            "is_faithful": True,
+        }
+        for _ in range(99)
+    )
+
+    aggregate = run_eval(items)["aggregate"]
+
+    assert aggregate["citation_ledger_observable_rate"] == 0.01
+    assert aggregate["citation_ledger_coverage_rate"] == 0.01
+    assert aggregate["citation_ledger_integrity_rate"] == 0.01
+
+
+def test_quality_eval_micro_averages_ledger_occurrence_mapping():
+    one_answer = "结论[a.pdf:P1]"
+    many_answer = "。".join(["[a.pdf:P1]"] * 9)
+    malformed = _public_ledger("chunk:a.pdf:1", many_answer)
+    malformed[0]["occurrences"] = [
+        {
+            "index": index,
+            "answer_start": start,
+            # 每个声明偏移都少一个 code point，9 个均不映射。
+            "answer_end": start + len("[a.pdf:P1]") - 1,
+        }
+        for index, start in enumerate(
+            offset
+            for offset in range(len(many_answer))
+            if many_answer.startswith("[a.pdf:P1]", offset)
+        )
+    ]
+    report = run_eval(
+        [
+            {
+                "case_type": "citation",
+                "answer": one_answer,
+                "expected_valid": True,
+                "docs": [_doc()],
+                "citation_ledger": _public_ledger("chunk:a.pdf:1", one_answer),
+            },
+            {
+                "case_type": "citation",
+                "answer": many_answer,
+                "expected_valid": True,
+                "docs": [_doc()],
+                "citation_ledger": malformed,
+            },
+        ]
+    )
+
+    assert (
+        report["rows"][0]["metrics"]["citation_ledger_occurrence_mapping_rate"] == 1.0
+    )
+    assert (
+        report["rows"][1]["metrics"]["citation_ledger_occurrence_mapping_rate"] == 0.0
+    )
+    assert report["aggregate"]["citation_ledger_occurrence_mapping_rate"] == 0.1
+
+
 # 验证质量基线对比在回退时返回非零。
 def test_quality_baseline_compare_returns_nonzero_on_regression(tmp_path):
     baseline = tmp_path / "baseline.json"

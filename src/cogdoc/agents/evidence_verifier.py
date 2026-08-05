@@ -12,6 +12,7 @@ from cogdoc.agents.conversation_memory import (
 from cogdoc.agents.qa_generator import Generator
 from cogdoc.agents.structured_output import invoke_structured
 from cogdoc.config.settings import Settings, get_settings
+from cogdoc.tools.citation_ledger import ensure_evidence_ids
 from cogdoc.tools.evidence_rendering import render_evidence_block
 
 
@@ -310,7 +311,8 @@ def should_verify_evidence(
 
 def _evidence_payload(docs: Sequence[Mapping[str, Any]], max_chars_per_doc: int) -> str:
     rows = []
-    for doc in docs:
+    prompt_docs, _ = ensure_evidence_ids(list(docs))
+    for doc in prompt_docs:
         meta_value = doc.get("meta")
         meta = meta_value if isinstance(meta_value, Mapping) else {}
         rows.append(
@@ -468,6 +470,39 @@ class EvidenceVerifierAgent:
     @staticmethod
     def verify(state: Mapping[str, Any]) -> dict[str, Any]:
         settings = get_settings()
+        if (
+            settings.evidence_unit_verify_enabled
+            and state.get("evidence_units")
+            and _requirements(state)
+        ):
+            from cogdoc.service.evidence_unit_gate import (
+                EvidenceUnitGateAction,
+                EvidenceUnitGatePolicy,
+                evaluate_evidence_unit_gate,
+            )
+            from cogdoc.service.qa_evidence_unit_adapter import (
+                QAEvidenceUnitAdapterOutcome,
+                adapt_qa_evidence_verification,
+            )
+
+            adapted = adapt_qa_evidence_verification(state)
+            if adapted.outcome is not QAEvidenceUnitAdapterOutcome.NOT_APPLICABLE:
+                result = dict(adapted.state_update)
+                result["evidence_unit_adapter_outcome"] = adapted.outcome.value
+                if adapted.verification is not None:
+                    result.update(adapted.verification.to_state())
+                if adapted.batch is not None and adapted.verification is not None:
+                    gate = evaluate_evidence_unit_gate(
+                        adapted.batch,
+                        adapted.verification,
+                        policy=EvidenceUnitGatePolicy(
+                            contradictory_action=EvidenceUnitGateAction.RETRY,
+                            require_all_required_units=True,
+                        ),
+                    )
+                    result.update(gate.to_state())
+                return result
+
         first_stage_supported = bool(
             state.get(
                 "retrieval_first_stage_supported",

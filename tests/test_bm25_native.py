@@ -67,6 +67,26 @@ def test_native_bm25_handles_empty_corpus():
     assert list(index.score_topk(["模型"], 5)) == []
 
 
+def test_native_bm25_filtered_topk_ranks_only_allowed_documents():
+    corpus = _build_corpus(seed=17, size=40)
+    index = _rust_core.Bm25Index(corpus)
+    query = ["模型", "检索", "摘要"]
+    allowed = [31, 7, 23, 7]
+
+    filtered = list(index.score_topk_filtered(query, 2, allowed))
+    full = list(index.score_topk(query, len(corpus)))
+    expected = [item for item in full if item[0] in set(allowed)][:2]
+
+    assert filtered == expected
+
+
+def test_native_bm25_filtered_topk_rejects_out_of_range_index():
+    index = _rust_core.Bm25Index(_build_corpus(seed=5, size=10))
+
+    with pytest.raises(ValueError, match="allowed document index"):
+        index.score_topk_filtered(["模型"], 3, [10])
+
+
 # 验证 native bm25 serialization roundtrip preserves scores 场景。
 def test_native_bm25_serialization_roundtrip_preserves_scores():
     corpus = _build_corpus(seed=11, size=80)

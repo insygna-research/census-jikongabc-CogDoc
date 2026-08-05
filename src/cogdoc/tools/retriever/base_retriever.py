@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import List
 from cogdoc.graph.state import RetrievedDoc
+from cogdoc.tools.retriever.scope import RetrievalScope
 
 
 # 抽象基类，定义检索器必须实现的接口。
@@ -22,7 +23,13 @@ class BaseRetriever(ABC):
 
     # 检索。
     @abstractmethod
-    def search(self, query: str, top_k: int = 3) -> List[RetrievedDoc]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 3,
+        *,
+        scope: RetrievalScope | None = None,
+    ) -> List[RetrievedDoc]:
         pass
 
 
@@ -42,7 +49,14 @@ class NullRetriever(BaseRetriever):
         pass
 
     # 检索。
-    def search(self, query: str, top_k: int = 3) -> List[RetrievedDoc]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 3,
+        *,
+        scope: RetrievalScope | None = None,
+    ) -> List[RetrievedDoc]:
+        _ = scope
         return []
 
     # 统计数量。

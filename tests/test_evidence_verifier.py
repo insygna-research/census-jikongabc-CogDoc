@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from cogdoc.agents import evidence_verifier
+from cogdoc.agents import evidence_unit_verifier, evidence_verifier
 from cogdoc.agents.evidence_verifier import (
     EvidenceVerification,
     EvidenceVerifierAgent,
@@ -13,7 +13,7 @@ from cogdoc.agents.evidence_verifier import (
 )
 from cogdoc.config.settings import Settings
 from cogdoc.graph.subgraphs import qa
-from cogdoc.tools.evidence_rendering import render_evidence_block
+from cogdoc.tools.citation_ledger import assign_evidence_ids
 
 
 def _settings(**overrides):
@@ -60,7 +60,7 @@ def test_evidence_payload_uses_generator_renderer_before_truncation():
             "context": "前文：模型结构。",
         }
     )
-    rendered = render_evidence_block(doc)
+    rendered = evidence_verifier.Generator._build_context_string([doc])
     max_chars = len(rendered) - 7
 
     row = json.loads(evidence_verifier._evidence_payload([doc], max_chars))[0]
@@ -566,3 +566,50 @@ def test_requirement_verifier_error_fails_closed(monkeypatch):
     assert output["retrieval_abstained"] is True
     assert output["missing_evidence_requirement_ids"] == ["r1"]
     assert output["evidence_verifier_error"] == "RuntimeError"
+
+
+def test_runtime_qa_plan_uses_generic_closed_set_verifier_and_gate(monkeypatch):
+    monkeypatch.setattr(evidence_verifier, "get_settings", lambda: _settings())
+    monkeypatch.setattr(
+        evidence_unit_verifier.Generator,
+        "_get_client_for_node",
+        lambda *_args, **_kwargs: object(),
+    )
+
+    def invoke_structured(_llm, schema, messages):
+        payload = json.loads(
+            messages[1]["content"].split("\n", 1)[1].rsplit("\n\n", 1)[0]
+        )
+        return schema(
+            assessments=[
+                {
+                    "unit_id": row["unit_id"],
+                    "status": "supported",
+                    "evidence_ids": [row["candidate_evidence_ids"][0]],
+                    "reason": "闭集证据直接支持",
+                }
+                for row in payload
+            ]
+        )
+
+    monkeypatch.setattr(
+        evidence_unit_verifier, "invoke_structured", invoke_structured
+    )
+    docs, ledger = assign_evidence_ids([_doc("a1", "a.pdf", "A 是答案。")])
+
+    output = EvidenceVerifierAgent.verify(
+        {
+            "query": "A 是什么？",
+            "evidence_requirements": [_requirement("r1", "A 是什么？")],
+            "evidence_units": [{"unit_id": "runtime-plan-present"}],
+            "retrieval_round": 0,
+            "verification_docs": docs,
+            "evidence_ledger": ledger,
+        }
+    )
+
+    assert output["evidence_unit_adapter_outcome"] == "verified"
+    assert output["evidence_supported"] is True
+    assert output["evidence_verified_chunk_ids"] == ["a1"]
+    assert output["evidence_unit_gate_decisions"][0]["action"] == "generate"
+    assert output["evidence_unit_batch_can_generate"] is True

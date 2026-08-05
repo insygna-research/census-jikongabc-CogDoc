@@ -10,6 +10,7 @@ from cogdoc.config.settings import get_settings
 from cogdoc.graph.state import RetrievedDoc
 from cogdoc.observability.logger import log_event
 from cogdoc.tools.retriever.retrieval_text import retrieval_text
+from cogdoc.tools.retriever.scope import RetrievalScope
 from cogdoc.tools.tokenizer import tokenize_mixed_text
 
 
@@ -270,14 +271,31 @@ class DerivedKnowledgeIndex:
         state["last_error"] = error_class
         self._write_state(kb_id, state)
 
-    def search(self, kb_id: str, query: str, top_k: int) -> list[RetrievedDoc]:
+    def search(
+        self,
+        kb_id: str,
+        query: str,
+        top_k: int,
+        *,
+        scope: RetrievalScope | None = None,
+    ) -> list[RetrievedDoc]:
+        if scope is not None and not scope.include_derived_knowledge:
+            return []
         collection = self._collection(kb_id)
         if collection.count() <= 0:
             return []
-        results = collection.query(
-            query_embeddings=[self.embedder.embed_query(query)],
-            n_results=top_k,
-        )
+        query_options: dict[str, Any] = {
+            "query_embeddings": [self.embedder.embed_query(query)],
+            "n_results": top_k,
+        }
+        if scope is not None and scope.is_source_restricted:
+            sources = list(scope.allowed_sources)
+            query_options["where"] = (
+                {"related_source": sources[0]}
+                if len(sources) == 1
+                else {"related_source": {"$in": sources}}
+            )
+        results = collection.query(**query_options)
         if not results or not results.get("documents") or not results["documents"][0]:
             return []
         docs = results["documents"][0]
@@ -380,12 +398,25 @@ class DerivedKnowledgeRetriever:
             self._index_enabled = True
 
     # 搜索已审核派生知识。
-    def search(self, kb_id: str, query: str, top_k: int = 3) -> list[RetrievedDoc]:
+    def search(
+        self,
+        kb_id: str,
+        query: str,
+        top_k: int = 3,
+        *,
+        scope: RetrievalScope | None = None,
+    ) -> list[RetrievedDoc]:
+        if scope is not None and not scope.include_derived_knowledge:
+            return []
         index = self._index_or_none()
         if index is not None:
             try:
                 index.ensure_fresh(kb_id)
-                docs = index.search(kb_id, query, top_k)
+                docs = (
+                    index.search(kb_id, query, top_k)
+                    if scope is None
+                    else index.search(kb_id, query, top_k, scope=scope)
+                )
             except Exception as exc:
                 log_event(
                     "retrieval",
@@ -398,7 +429,7 @@ class DerivedKnowledgeRetriever:
             else:
                 if docs:
                     return docs
-        return self._lexical_search(kb_id, query, top_k)
+        return self._lexical_search(kb_id, query, top_k, scope=scope)
 
     def _index_or_none(self) -> DerivedKnowledgeIndex | None:
         if not self._index_enabled:
@@ -411,8 +442,19 @@ class DerivedKnowledgeRetriever:
             )
         return self._index
 
-    def _lexical_search(self, kb_id: str, query: str, top_k: int) -> list[RetrievedDoc]:
+    def _lexical_search(
+        self,
+        kb_id: str,
+        query: str,
+        top_k: int,
+        *,
+        scope: RetrievalScope | None = None,
+    ) -> list[RetrievedDoc]:
         rows = self.store.list(kb_id=kb_id, status="approved")
+        if scope is not None and scope.is_source_restricted:
+            rows = [
+                row for row in rows if scope.allows_source(row.get("related_source"))
+            ]
         if not rows:
             return []
         query_terms = Counter(tokenize_mixed_text(query))

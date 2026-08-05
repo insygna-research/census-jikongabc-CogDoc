@@ -11,6 +11,7 @@ from cogdoc.tools.rust_core_loader import ensure_rust_core
 from cogdoc.tools.retriever.base_retriever import BaseRetriever
 from cogdoc.tools.retriever.metadata import copy_optional_structure_metadata
 from cogdoc.tools.retriever.retrieval_text import retrieval_text
+from cogdoc.tools.retriever.scope import RetrievalScope
 
 
 # BM25 计算与索引序列化均下放 rust_core，持久化只存 chunk 注册表 + 原生索引字节。
@@ -197,7 +198,13 @@ class BM25Retriever(BaseRetriever):
         return load_source_chunks(self.doc_registry, source)
 
     # 检索。
-    def search(self, query: str, top_k: int = 3) -> List[RetrievedDoc]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 3,
+        *,
+        scope: RetrievalScope | None = None,
+    ) -> List[RetrievedDoc]:
         # 一致快照：bm25 与 registry 必须取自同一次原子替换，否则下标会错配到新 registry。
         with self._lock:
             bm25 = self.bm25
@@ -207,7 +214,34 @@ class BM25Retriever(BaseRetriever):
 
         # BM25 分数只用于本路排序，融合分数由 RRF 写入。
         tokenized_query = self._tokenize(query)
-        ranked = bm25.score_topk(tokenized_query, top_k)
+        allowed_indices: list[int] | None = None
+        if scope is not None and scope.is_source_restricted:
+            allowed_indices = [
+                index
+                for index, doc in enumerate(registry)
+                if scope.allows_source(doc.get("meta", {}).get("source"))
+            ]
+            if not allowed_indices:
+                return []
+
+        if allowed_indices is None:
+            ranked = bm25.score_topk(tokenized_query, top_k)
+        else:
+            filtered_topk = getattr(bm25, "score_topk_filtered", None)
+            if callable(filtered_topk):
+                ranked = filtered_topk(tokenized_query, top_k, allowed_indices)
+            else:
+                # Compatibility with a stale native extension: rank the complete
+                # registry, then filter.  This remains semantically exact because
+                # all N rows (not only the global top-k) are inspected; the
+                # bounded degradation is O(N log N) time/O(N) output from the
+                # native call, capped by the current registry snapshot size.
+                allowed = set(allowed_indices)
+                ranked = [
+                    item
+                    for item in bm25.score_topk(tokenized_query, len(registry))
+                    if item[0] in allowed
+                ][:top_k]
 
         retrieved_docs: List[RetrievedDoc] = []
         for idx, score in ranked:

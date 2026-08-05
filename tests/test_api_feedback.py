@@ -6,6 +6,7 @@ from cogdoc.api.derived_knowledge_store import DerivedKnowledgeStore
 from cogdoc.api.feedback_analysis_store import FeedbackAnalysisStore
 from cogdoc.api.feedback_store import FeedbackStore
 from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
+from cogdoc.api.retrieval_eval_draft_store import RetrievalEvalDraftStore
 
 
 # 声明异步测试使用的后端。
@@ -36,6 +37,9 @@ def _make_app(tmp_path, monkeypatch, webhook_dispatcher=None):
             feedback_analysis_store=feedback_analysis_store,
             knowledge_store=knowledge_store,
             retrieval_feedback_store=retrieval_feedback_store,
+            retrieval_eval_draft_store=RetrievalEvalDraftStore(
+                path=str(tmp_path / "retrieval_eval_drafts.jsonl")
+            ),
             webhook_dispatcher=webhook_dispatcher,
         ),
         tmp_path,
@@ -181,6 +185,414 @@ async def test_retrieval_feedback_counts_one_feedback_with_multiple_chunks(
     listed_rows = listed.json()["retrieval_feedback"]
     assert len(listed_rows) == 1
     assert listed_rows[0]["chunk_count"] == 2
+
+
+# 反馈目标从服务端 trace 的精确账本恢复，客户端不能伪造或扩张 chunk 闭集。
+@pytest.mark.anyio
+async def test_feedback_uses_trusted_trace_citation_ledger(tmp_path, monkeypatch):
+    import cogdoc.api.routes.feedback as feedback_route
+
+    app, root = _make_app(tmp_path, monkeypatch)
+    trace_file = tmp_path / "trusted-trace.json"
+    citation = "[a.pdf:P1]"
+    answer = f"结论{citation}。"
+    start = answer.index(citation)
+    trace_file.write_text(
+        json.dumps(
+            {
+                "trace_id": "t-ledger-route",
+                "config": {"doc_id": "kb"},
+                "input": {"query": "原始问题"},
+                "output": {
+                    "answer": answer,
+                    "sources": [
+                        {
+                            "chunk_id": "c1",
+                            "source_type": "document",
+                            "source": "a.pdf",
+                            "page": 1,
+                        },
+                        {
+                            "chunk_id": "c2",
+                            "source_type": "document",
+                            "source": "a.pdf",
+                            "page": 1,
+                        },
+                    ],
+                    "evidence": [
+                        {
+                            "chunk_id": "c1",
+                            "source_type": "document",
+                            "source": "a.pdf",
+                            "page": 1,
+                        },
+                        {
+                            "chunk_id": "c2",
+                            "source_type": "document",
+                            "source": "a.pdf",
+                            "page": 1,
+                        },
+                    ],
+                    "citation_ledger": [
+                        {
+                            "evidence_id": "E001",
+                            "chunk_id": "c1",
+                            "source_type": "document",
+                            "source": "a.pdf",
+                            "page": 1,
+                            "span_start": 0,
+                            "span_end": 20,
+                            "occurrences": [
+                                {
+                                    "index": 0,
+                                    "answer_start": start,
+                                    "answer_end": start + len(citation),
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(feedback_route, "trace_path", lambda _trace_id: trace_file)
+
+    resp = await _post(
+        app,
+        {
+            "trace_id": "t-ledger-route",
+            "feedback": "correction",
+            "feedback_type": "bad_retrieval",
+            "kb_id": "kb",
+            "query": "客户端伪造问题",
+            "answer": "客户端伪造答案",
+            "correction_text": "正确结论",
+            "related_chunk_ids": ["forged-related"],
+            "related_document_id": "forged-document",
+            "related_source": "evil.pdf",
+            "related_source_sha256": "forged-sha",
+            "related_page_start": 99,
+            "related_page_end": 100,
+            "related_chunk_text_hash": "forged-hash",
+            "related_anchor_text": "forged-anchor",
+            "citations": [{"chunk_id": "forged", "source": "evil.pdf"}],
+            "evidence": [{"chunk_id": "forged", "source": "evil.pdf"}],
+        },
+    )
+
+    assert resp.status_code == 201
+    feedback = _read_jsonl(root / "feedback.jsonl")[0]
+    assert feedback["answer"] == answer
+    assert [item["chunk_id"] for item in feedback["evidence"]] == ["c1", "c2"]
+    assert feedback.get("related_document_id") is None
+    assert feedback.get("related_chunk_ids") is None
+    assert feedback.get("related_page_start") is None
+    retrieval = _read_jsonl(root / "retrieval_feedback.jsonl")[0]
+    assert [item["chunk_id"] for item in retrieval["target_chunks"]] == ["c1"]
+    assert retrieval["query_text"] == "原始问题"
+    analysis = _read_jsonl(root / "feedback_analysis.jsonl")[0]
+    assert analysis["target"]["chunk_ids"] == ["c1"]
+    knowledge = _read_jsonl(root / "knowledge.jsonl")[0]
+    assert knowledge["related_chunk_ids"] == ["c1"]
+    assert knowledge["related_source"] == "a.pdf"
+    assert knowledge["related_document_id"] is None
+    assert knowledge["related_source_sha256"] is None
+    assert knowledge["related_page_start"] is None
+    assert knowledge["related_page_end"] is None
+    assert knowledge["related_chunk_text_hash"] is None
+    assert knowledge["related_anchor_text"] is None
+
+
+# repair 后的精确引用可能不在公开 evidence 摘要中，但必须能绑定
+# 到同一 trace 保留的全局 evidence_ledger。
+@pytest.mark.anyio
+async def test_feedback_trace_attributes_from_internal_global_registry(
+    tmp_path, monkeypatch
+):
+    import cogdoc.api.routes.feedback as feedback_route
+
+    app, root = _make_app(tmp_path, monkeypatch)
+    trace_file = tmp_path / "trusted-global-registry.json"
+    citation = "[b.pdf:P2]"
+    answer = f"修复后结论{citation}。"
+    start = answer.index(citation)
+    trace_file.write_text(
+        json.dumps(
+            {
+                "trace_id": "t-global-registry-route",
+                "config": {"doc_id": "kb"},
+                "input": {"query": "原始问题"},
+                "output": {
+                    "answer": answer,
+                    "sources": [
+                        {"chunk_id": "c1", "source": "a.pdf", "page": 1},
+                        {"chunk_id": "c2", "source": "b.pdf", "page": 2},
+                    ],
+                    # 公开摘要只保留原始候选，不含 repair 实际引用的 c2。
+                    "evidence": [{"chunk_id": "c1", "source": "a.pdf", "page": 1}],
+                    "evidence_ledger": [
+                        {
+                            "evidence_id": "E001",
+                            "chunk_id": "c1",
+                            "source_type": "document",
+                            "source": "a.pdf",
+                            "page": 1,
+                            "page_start": 1,
+                            "page_end": 1,
+                            "span_start": 0,
+                            "span_end": 20,
+                            "display_citation": "[a.pdf:P1]",
+                        },
+                        {
+                            "evidence_id": "E002",
+                            "chunk_id": "c2",
+                            "source_type": "document",
+                            "source": "b.pdf",
+                            "page": 2,
+                            "page_start": 2,
+                            "page_end": 2,
+                            "span_start": 40,
+                            "span_end": 60,
+                            "display_citation": citation,
+                        },
+                    ],
+                    "citation_ledger": [
+                        {
+                            "evidence_id": "E002",
+                            "chunk_id": "c2",
+                            "source_type": "document",
+                            "source": "b.pdf",
+                            "page": 2,
+                            "page_start": 2,
+                            "page_end": 2,
+                            "span_start": 40,
+                            "span_end": 60,
+                            "occurrences": [
+                                {
+                                    "index": 0,
+                                    "answer_start": start,
+                                    "answer_end": start + len(citation),
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(feedback_route, "trace_path", lambda _trace_id: trace_file)
+
+    resp = await _post(
+        app,
+        {
+            "trace_id": "t-global-registry-route",
+            "feedback": "thumbs_down",
+            "feedback_type": "bad_retrieval",
+            "kb_id": "kb",
+            "query": "客户端问题",
+            "citations": [{"chunk_id": "forged", "source": "evil.pdf"}],
+            "evidence": [{"chunk_id": "forged", "source": "evil.pdf"}],
+        },
+    )
+
+    assert resp.status_code == 201
+    feedback = _read_jsonl(root / "feedback.jsonl")[0]
+    assert feedback["query"] == "原始问题"
+    assert [item["chunk_id"] for item in feedback["evidence"]] == ["c1"]
+    retrieval = _read_jsonl(root / "retrieval_feedback.jsonl")[0]
+    assert [item["chunk_id"] for item in retrieval["target_chunks"]] == ["c2"]
+    analysis = _read_jsonl(root / "feedback_analysis.jsonl")[0]
+    assert analysis["target"]["chunk_ids"] == ["c2"]
+    assert analysis["target"]["sources"] == ["b.pdf"]
+
+
+# 请求带 kb_id 时，trace 必须显式绑定同一 doc_id；缺失绑定的
+# 同 trace_id 文件不能覆盖客户端载荷或参与归因。
+@pytest.mark.anyio
+async def test_feedback_trace_without_doc_id_is_not_trusted(tmp_path, monkeypatch):
+    import cogdoc.api.routes.feedback as feedback_route
+
+    app, root = _make_app(tmp_path, monkeypatch)
+    trace_file = tmp_path / "unbound-trace.json"
+    trace_file.write_text(
+        json.dumps(
+            {
+                "trace_id": "t-unbound-route",
+                "config": {},
+                "input": {"query": "trace 问题"},
+                "output": {
+                    "answer": "trace 答案",
+                    "sources": [
+                        {"chunk_id": "trace-chunk", "source": "trace.pdf", "page": 1}
+                    ],
+                    "evidence": [
+                        {"chunk_id": "trace-chunk", "source": "trace.pdf", "page": 1}
+                    ],
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(feedback_route, "trace_path", lambda _trace_id: trace_file)
+
+    resp = await _post(
+        app,
+        {
+            "trace_id": "t-unbound-route",
+            "feedback": "thumbs_down",
+            "feedback_type": "bad_retrieval",
+            "kb_id": "kb",
+            "query": "客户端问题",
+            "answer": "客户端答案",
+            "citations": [
+                {"chunk_id": "client-chunk", "source": "client.pdf", "page": 2}
+            ],
+            "evidence": [
+                {"chunk_id": "client-chunk", "source": "client.pdf", "page": 2}
+            ],
+        },
+    )
+
+    assert resp.status_code == 201
+    feedback = _read_jsonl(root / "feedback.jsonl")[0]
+    assert feedback["query"] == "客户端问题"
+    assert feedback["answer"] == "客户端答案"
+    assert [item["chunk_id"] for item in feedback["evidence"]] == ["client-chunk"]
+    retrieval = _read_jsonl(root / "retrieval_feedback.jsonl")[0]
+    assert [item["chunk_id"] for item in retrieval["target_chunks"]] == ["client-chunk"]
+
+
+# 旧 trace 的空账本可回退，但只能使用同一 trace 中的引用快照。
+@pytest.mark.anyio
+async def test_feedback_empty_trace_ledger_falls_back_only_to_trace_targets(
+    tmp_path, monkeypatch
+):
+    import cogdoc.api.routes.feedback as feedback_route
+
+    app, root = _make_app(tmp_path, monkeypatch)
+    trace_file = tmp_path / "trusted-empty-ledger.json"
+    trace_file.write_text(
+        json.dumps(
+            {
+                "trace_id": "t-empty-ledger-route",
+                "config": {"doc_id": "kb"},
+                "input": {"query": "原始问题"},
+                "output": {
+                    "answer": "旧版回答",
+                    "sources": [{"chunk_id": "trusted", "source": "a.pdf", "page": 1}],
+                    "evidence": [{"chunk_id": "trusted", "source": "a.pdf", "page": 1}],
+                    "citation_ledger": [],
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(feedback_route, "trace_path", lambda _trace_id: trace_file)
+
+    resp = await _post(
+        app,
+        {
+            "trace_id": "t-empty-ledger-route",
+            "feedback": "thumbs_down",
+            "feedback_type": "bad_retrieval",
+            "kb_id": "kb",
+            "query": "客户端问题",
+            "related_chunk_ids": ["forged-related"],
+            "citations": [{"chunk_id": "forged", "source": "evil.pdf"}],
+            "evidence": [{"chunk_id": "forged", "source": "evil.pdf"}],
+        },
+    )
+
+    assert resp.status_code == 201
+    feedback = _read_jsonl(root / "feedback.jsonl")[0]
+    assert feedback["query"] == "原始问题"
+    assert [item["chunk_id"] for item in feedback["evidence"]] == ["trusted"]
+    retrieval = _read_jsonl(root / "retrieval_feedback.jsonl")[0]
+    assert [item["chunk_id"] for item in retrieval["target_chunks"]] == ["trusted"]
+    analysis = _read_jsonl(root / "feedback_analysis.jsonl")[0]
+    assert analysis["target"]["chunk_ids"] == ["trusted"]
+
+
+# 非空精确账本缺少 trace evidence 时整体关闭，不得拼接客户端证据。
+@pytest.mark.anyio
+async def test_feedback_trace_ledger_missing_evidence_disables_attribution(
+    tmp_path, monkeypatch
+):
+    import cogdoc.api.routes.feedback as feedback_route
+
+    app, root = _make_app(tmp_path, monkeypatch)
+    trace_file = tmp_path / "trusted-missing-evidence.json"
+    citation = "[a.pdf:P1]"
+    answer = f"结论{citation}。"
+    start = answer.index(citation)
+    trace_file.write_text(
+        json.dumps(
+            {
+                "trace_id": "t-missing-evidence-route",
+                "config": {"doc_id": "kb"},
+                "input": {"query": "原始问题"},
+                "output": {
+                    "answer": answer,
+                    "sources": [{"chunk_id": "c1", "source": "a.pdf", "page": 1}],
+                    # 故意缺少 evidence；客户端传入的 evidence 不能补上。
+                    "citation_ledger": [
+                        {
+                            "evidence_id": "E001",
+                            "chunk_id": "c1",
+                            "source_type": "document",
+                            "source": "a.pdf",
+                            "page": 1,
+                            "span_start": 0,
+                            "span_end": 20,
+                            "occurrences": [
+                                {
+                                    "index": 0,
+                                    "answer_start": start,
+                                    "answer_end": start + len(citation),
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(feedback_route, "trace_path", lambda _trace_id: trace_file)
+
+    resp = await _post(
+        app,
+        {
+            "trace_id": "t-missing-evidence-route",
+            "feedback": "correction",
+            "feedback_type": "bad_retrieval",
+            "kb_id": "kb",
+            "query": "客户端伪造问题",
+            "correction_text": "正确结论",
+            "related_chunk_ids": ["forged-related"],
+            "citations": [{"chunk_id": "forged", "source": "evil.pdf"}],
+            "evidence": [
+                {"chunk_id": "c1", "source": "a.pdf", "page": 1},
+                {"chunk_id": "forged", "source": "evil.pdf"},
+            ],
+        },
+    )
+
+    assert resp.status_code == 201
+    feedback = _read_jsonl(root / "feedback.jsonl")[0]
+    assert feedback["evidence"] == []
+    assert _read_jsonl(root / "retrieval_feedback.jsonl") == []
+    analysis = _read_jsonl(root / "feedback_analysis.jsonl")[0]
+    assert analysis["target"]["chunk_ids"] == []
+    knowledge = _read_jsonl(root / "knowledge.jsonl")[0]
+    assert knowledge["related_chunk_ids"] == []
 
 
 # 验证同一回答只接受第一条反馈。

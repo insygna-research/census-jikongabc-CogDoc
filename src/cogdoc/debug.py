@@ -19,7 +19,7 @@ from cogdoc.agents.conversation_memory import (
 from cogdoc.api.ingest import KnowledgeBaseRegistry
 from cogdoc.command_modes import parse_forced_mode
 from cogdoc.config.settings import get_settings
-from cogdoc.graph.subgraphs.qa import RetrieverFactory
+from cogdoc.service.retriever_factory import RetrieverFactory
 from cogdoc.graph.workflow import UNKNOWN_RESPONSE
 from cogdoc.observability.logger import configure_logging
 from cogdoc.observability.trace import trace_dir, trace_path

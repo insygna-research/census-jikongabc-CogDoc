@@ -1,8 +1,16 @@
+import json
 import logging
+import math
+import re
+from collections.abc import Mapping
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
-from cogdoc.agents.feedback_understanding import FeedbackAnalysis, analyze_feedback
+from cogdoc.agents.feedback_understanding import (
+    FeedbackAnalysis,
+    analyze_feedback,
+    feedback_target_items,
+)
 from cogdoc.api.schemas import (
     FeedbackIssueType,
     FeedbackListResponse,
@@ -12,32 +20,197 @@ from cogdoc.api.schemas import (
 )
 from cogdoc.api.webhooks import notify_pending_created
 from cogdoc.observability.logger import log_event
+from cogdoc.observability.trace import trace_path
+from cogdoc.tools.eval.retrieval_eval_drafts import build_retrieval_eval_draft
 
 router = APIRouter(prefix="/v1", tags=["feedback"])
+_TRACE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+_CLIENT_ATTRIBUTION_FIELDS = (
+    "related_document_id",
+    "related_source",
+    "related_source_sha256",
+    "related_chunk_ids",
+    "related_page_start",
+    "related_page_end",
+    "related_chunk_text_hash",
+    "related_anchor_text",
+)
+
+
+def _trusted_trace(payload: Mapping[str, object]) -> Mapping[str, object] | None:
+    trace_id = str(payload.get("trace_id") or "")
+    if not _TRACE_ID_RE.fullmatch(trace_id):
+        return None
+    path = trace_path(trace_id)
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        trace = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(trace, Mapping) or str(trace.get("trace_id") or "") != trace_id:
+        return None
+    config = trace.get("config")
+    config = config if isinstance(config, Mapping) else {}
+    requested_kb = str(payload.get("kb_id") or "")
+    traced_kb = str(config.get("doc_id") or "")
+    # A trace may only become an attribution authority for the exact requested KB.
+    # Missing legacy scope is not enough to authenticate a cross-record reference.
+    if requested_kb and traced_kb != requested_kb:
+        return None
+    output = trace.get("output")
+    if not isinstance(output, Mapping):
+        return None
+    return trace
+
+
+def _hydrate_feedback_from_trace(
+    payload: dict,
+    trace: Mapping[str, object] | None = None,
+) -> bool:
+    trusted_trace = trace or _trusted_trace(payload)
+    if trusted_trace is None:
+        return False
+    output = trusted_trace.get("output")
+    if not isinstance(output, Mapping):
+        return False
+    raw_input = trusted_trace.get("input")
+    trace_input = raw_input if isinstance(raw_input, Mapping) else {}
+    query = trace_input.get("query")
+    if isinstance(query, str) and query.strip():
+        payload["query"] = query
+    else:
+        payload.pop("query", None)
+    answer = output.get("answer")
+    if isinstance(answer, str):
+        payload["answer"] = answer
+    else:
+        payload.pop("answer", None)
+    evidence = output.get("evidence")
+    payload["evidence"] = evidence if isinstance(evidence, list) else []
+    internal_ledger = output.get("evidence_ledger")
+    payload["evidence_ledger"] = (
+        internal_ledger if isinstance(internal_ledger, list) else []
+    )
+    if "citation_ledger" in output:
+        # 保留畸形类型，让下游整表校验失败关闭；不能静默删除后回退宽闭集。
+        payload["citation_ledger"] = output.get("citation_ledger")
+    else:
+        # 旧 trace 没有该字段，继续使用同一 trace 内的 legacy 来源。
+        payload.pop("citation_ledger", None)
+    sources = output.get("sources")
+    payload["citations"] = sources if isinstance(sources, list) else []
+    # trace 命中后的归因是一个原子快照；客户端手填的关联字段
+    # 不得与服务端 answer/evidence/ledger 拼接。
+    for field in _CLIENT_ATTRIBUTION_FIELDS:
+        payload.pop(field, None)
+    return True
+
+
+def _eligible_retrieval_eval_trace(trace: Mapping[str, object]) -> bool:
+    """Only complete successful server traces may seed an annotation proposal."""
+
+    raw_completeness = trace.get("evidence_completeness")
+    if isinstance(raw_completeness, bool) or not isinstance(
+        raw_completeness, str | int | float
+    ):
+        return False
+    try:
+        completeness = float(raw_completeness)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return (
+        trace.get("execution_status") == "SUCCESS"
+        and math.isfinite(completeness)
+        and completeness >= 1.0
+        and trace.get("task_type") in {"qa", "summary", "compare"}
+        and isinstance(trace.get("input"), Mapping)
+        and isinstance(trace.get("output"), Mapping)
+    )
+
+
+def _create_retrieval_eval_draft_quiet(
+    request: Request,
+    feedback_id: str,
+    payload: Mapping[str, object],
+    trace: Mapping[str, object] | None,
+) -> tuple[str | None, str | None]:
+    store = getattr(request.app.state, "retrieval_eval_draft_store", None)
+    if store is None or trace is None or not _eligible_retrieval_eval_trace(trace):
+        return None, None
+    try:
+        draft = build_retrieval_eval_draft(
+            {**payload, "feedback_id": feedback_id},
+            trace,
+        )
+        row = store.ensure(draft)
+        return str(row["draft_id"]), str(row["status"])
+    except Exception as exc:
+        # Feedback recording is the primary user action. A curation-pipeline
+        # failure is observable but must not turn a recorded thumbs-down into 5xx.
+        log_event(
+            "feedback",
+            "retrieval_eval_draft_create_failed",
+            {},
+            level=logging.WARNING,
+            feedback_id=feedback_id,
+            error_class=type(exc).__name__,
+        )
+        return None, None
+
+
+def _attributed_chunks(
+    body: FeedbackRequest,
+    payload: Mapping[str, object],
+    *,
+    trusted_trace: bool = False,
+) -> tuple[list[str], str | None]:
+    # 非空 ledger 的归因必须来自服务端 trace 中的精确 occurrence；显式的
+    # related_chunk_ids 也不能越过该闭集。空 ledger 保留旧版手动关联行为。
+    if trusted_trace or "citation_ledger" in payload:
+        targets = feedback_target_items(payload)
+        return (
+            [item["chunk_id"] for item in targets],
+            next((item["source"] for item in targets if item["source"]), None),
+        )
+    return (
+        body.related_chunk_ids
+        or [item.chunk_id for item in body.citations if item.chunk_id],
+        body.related_source
+        or next((item.source for item in body.citations if item.source), None),
+    )
 
 
 # 构建纠错派生知识草稿。
-def _knowledge_payload(body: FeedbackRequest) -> dict | None:
+def _knowledge_payload(
+    body: FeedbackRequest,
+    payload: Mapping[str, object] | None = None,
+    *,
+    trusted_trace: bool = False,
+) -> dict | None:
     correction = body.correction_text or body.correction
     if not correction or not body.kb_id:
         return None
-    related_chunk_ids = body.related_chunk_ids or [
-        item.chunk_id for item in body.citations if item.chunk_id
-    ]
-    related_source = body.related_source or next(
-        (item.source for item in body.citations if item.source), None
+    related_chunk_ids, related_source = _attributed_chunks(
+        body,
+        payload or body.model_dump(exclude_none=True),
+        trusted_trace=trusted_trace,
     )
     return {
         "kb_id": body.kb_id,
         "text": correction,
-        "related_document_id": body.related_document_id,
+        "related_document_id": (None if trusted_trace else body.related_document_id),
         "related_source": related_source,
-        "related_source_sha256": body.related_source_sha256,
+        "related_source_sha256": (
+            None if trusted_trace else body.related_source_sha256
+        ),
         "related_chunk_ids": related_chunk_ids,
-        "related_page_start": body.related_page_start,
-        "related_page_end": body.related_page_end,
-        "related_chunk_text_hash": body.related_chunk_text_hash,
-        "related_anchor_text": body.related_anchor_text,
+        "related_page_start": None if trusted_trace else body.related_page_start,
+        "related_page_end": None if trusted_trace else body.related_page_end,
+        "related_chunk_text_hash": (
+            None if trusted_trace else body.related_chunk_text_hash
+        ),
+        "related_anchor_text": (None if trusted_trace else body.related_anchor_text),
         "source_note": body.source_note or body.feedback_text or body.comment,
         "certainty": body.certainty,
         "status": "pending",
@@ -53,7 +226,12 @@ def _knowledge_payload(body: FeedbackRequest) -> dict | None:
 
 # 构建反馈理解建议的知识草稿。
 def _analysis_knowledge_payload(
-    body: FeedbackRequest, analysis: FeedbackAnalysis, confidence: float
+    body: FeedbackRequest,
+    analysis: FeedbackAnalysis,
+    confidence: float,
+    payload: Mapping[str, object] | None = None,
+    *,
+    trusted_trace: bool = False,
 ) -> dict | None:
     extracted_claim = analysis.get("extracted_claim")
     correction = extracted_claim.strip() if isinstance(extracted_claim, str) else ""
@@ -64,23 +242,26 @@ def _analysis_knowledge_payload(
         or confidence < 0.8
     ):
         return None
-    related_chunk_ids = body.related_chunk_ids or [
-        item.chunk_id for item in body.citations if item.chunk_id
-    ]
-    related_source = body.related_source or next(
-        (item.source for item in body.citations if item.source), None
+    related_chunk_ids, related_source = _attributed_chunks(
+        body,
+        payload or body.model_dump(exclude_none=True),
+        trusted_trace=trusted_trace,
     )
     return {
         "kb_id": body.kb_id,
         "text": correction,
-        "related_document_id": body.related_document_id,
+        "related_document_id": (None if trusted_trace else body.related_document_id),
         "related_source": related_source,
-        "related_source_sha256": body.related_source_sha256,
+        "related_source_sha256": (
+            None if trusted_trace else body.related_source_sha256
+        ),
         "related_chunk_ids": related_chunk_ids,
-        "related_page_start": body.related_page_start,
-        "related_page_end": body.related_page_end,
-        "related_chunk_text_hash": body.related_chunk_text_hash,
-        "related_anchor_text": body.related_anchor_text,
+        "related_page_start": None if trusted_trace else body.related_page_start,
+        "related_page_end": None if trusted_trace else body.related_page_end,
+        "related_chunk_text_hash": (
+            None if trusted_trace else body.related_chunk_text_hash
+        ),
+        "related_anchor_text": (None if trusted_trace else body.related_anchor_text),
         "source_note": body.source_note or body.feedback_text or body.comment,
         "certainty": "high" if confidence >= 0.9 else body.certainty,
         "status": "pending",
@@ -163,12 +344,32 @@ async def submit_feedback(body: FeedbackRequest, request: Request):
         payload["comment"] = body.feedback_text
     if body.correction_text and not payload.get("correction"):
         payload["correction"] = body.correction_text
+    trace = _trusted_trace(payload)
+    trusted_trace = _hydrate_feedback_from_trace(payload, trace)
     result = request.app.state.feedback_store.record(payload)
+    retrieval_eval_draft_id = None
+    retrieval_eval_draft_status = None
+    feedback_value = getattr(body.feedback, "value", body.feedback)
+    feedback_type_value = getattr(body.feedback_type, "value", body.feedback_type)
+    if (
+        feedback_value == FeedbackType.THUMBS_DOWN.value
+        and feedback_type_value == FeedbackIssueType.BAD_RETRIEVAL.value
+    ):
+        retrieval_eval_draft_id, retrieval_eval_draft_status = (
+            _create_retrieval_eval_draft_quiet(
+                request,
+                result["feedback_id"],
+                payload,
+                trace,
+            )
+        )
     if result.get("deduplicated"):
         return FeedbackResponse(
             feedback_id=result["feedback_id"],
             status="duplicate_ignored",
             is_bad_case=result["is_bad_case"],
+            retrieval_eval_draft_id=retrieval_eval_draft_id,
+            retrieval_eval_draft_status=retrieval_eval_draft_status,
         )
     if not body.skip_retrieval_feedback:
         request.app.state.retrieval_feedback_store.record_from_feedback(
@@ -183,10 +384,14 @@ async def submit_feedback(body: FeedbackRequest, request: Request):
     knowledge_id = None
     knowledge_status = None
     knowledge_deduplicated = False
-    knowledge_payload = _knowledge_payload(body)
+    knowledge_payload = _knowledge_payload(body, payload, trusted_trace=trusted_trace)
     if knowledge_payload is None and analysis is not None:
         knowledge_payload = _analysis_knowledge_payload(
-            body, analysis, float(analysis.get("confidence") or 0.0)
+            body,
+            analysis,
+            float(analysis.get("confidence") or 0.0),
+            payload,
+            trusted_trace=trusted_trace,
         )
     if knowledge_payload is not None:
         knowledge_id, knowledge_status, knowledge_deduplicated = (
@@ -207,6 +412,8 @@ async def submit_feedback(body: FeedbackRequest, request: Request):
         knowledge_id=knowledge_id,
         knowledge_status=knowledge_status,
         knowledge_deduplicated=knowledge_deduplicated,
+        retrieval_eval_draft_id=retrieval_eval_draft_id,
+        retrieval_eval_draft_status=retrieval_eval_draft_status,
     )
 
 

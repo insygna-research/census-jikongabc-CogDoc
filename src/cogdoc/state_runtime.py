@@ -17,6 +17,10 @@ from cogdoc.api.retrieval_feedback_store import (
     RetrievalFeedbackStore,
     SqliteRetrievalFeedbackStore,
 )
+from cogdoc.api.retrieval_eval_draft_store import (
+    RetrievalEvalDraftStore,
+    SqliteRetrievalEvalDraftStore,
+)
 from cogdoc.config.settings import Settings, get_settings
 
 
@@ -30,6 +34,9 @@ class StateRuntime:
     retrieval_feedback_store: RetrievalFeedbackStore
     derived_knowledge_index_persist_directory: str | None = None
     derived_knowledge_index_state_directory: str | None = None
+    # Appended after the legacy positional fields to preserve direct-construction
+    # compatibility. Runtimes from ``from_settings`` always own a real store.
+    retrieval_eval_draft_store: RetrievalEvalDraftStore | None = None
     _derived_knowledge_index: Any = field(default=None, init=False, repr=False)
     _derived_knowledge_retriever: Any = field(default=None, init=False, repr=False)
     _index_lock: Lock = field(default_factory=Lock, init=False, repr=False)
@@ -62,6 +69,7 @@ class StateRuntime:
         feedback_analysis_store: FeedbackAnalysisStore | None = None,
         knowledge_store: DerivedKnowledgeStore | None = None,
         retrieval_feedback_store: RetrievalFeedbackStore | None = None,
+        retrieval_eval_draft_store: RetrievalEvalDraftStore | None = None,
     ) -> "StateRuntime":
         settings = settings or get_settings()
         return cls(
@@ -84,6 +92,11 @@ class StateRuntime:
                 retrieval_feedback_store
                 if retrieval_feedback_store is not None
                 else cls.default_retrieval_feedback_store(settings)
+            ),
+            retrieval_eval_draft_store=(
+                retrieval_eval_draft_store
+                if retrieval_eval_draft_store is not None
+                else cls.default_retrieval_eval_draft_store(settings)
             ),
             derived_knowledge_index_persist_directory=settings.chroma_persist_dir,
             derived_knowledge_index_state_directory=str(
@@ -136,6 +149,15 @@ class StateRuntime:
         if settings.cogdoc_state_backend == "sqlite":
             return SqliteRetrievalFeedbackStore(settings.state_db_path)
         return RetrievalFeedbackStore(settings.retrieval_feedback_path)
+
+    @staticmethod
+    def default_retrieval_eval_draft_store(
+        settings: Settings | None = None,
+    ) -> RetrievalEvalDraftStore:
+        settings = settings or get_settings()
+        if settings.cogdoc_state_backend == "sqlite":
+            return SqliteRetrievalEvalDraftStore(settings.state_db_path)
+        return RetrievalEvalDraftStore(settings.retrieval_eval_drafts_path)
 
     @property
     def derived_knowledge_index(self):
@@ -224,6 +246,7 @@ class StateRuntime:
                 self.feedback_analysis_store,
                 self.knowledge_store,
                 self.retrieval_feedback_store,
+                self.retrieval_eval_draft_store,
             ):
                 if id(store) in seen:
                     continue
@@ -257,6 +280,7 @@ def _settings_key(settings: Settings) -> tuple[str, ...]:
         settings.feedback_analysis_path,
         settings.derived_knowledge_path,
         settings.retrieval_feedback_path,
+        settings.retrieval_eval_drafts_path,
         settings.chroma_persist_dir,
         str(settings.data_dir / "knowledge" / "derived_index_state"),
     )

@@ -7,6 +7,10 @@ from typing import Any
 from typing import Dict, List
 from cogdoc.agents.citation_validator import CitationValidatorAgent
 from cogdoc.agents.router import classify_intent_by_rule
+from cogdoc.tools.public_citation_ledger import (
+    public_citation_occurrences,
+    validate_public_citation_ledger,
+)
 
 
 BASELINE_GATED_METRICS = ("router_rule_accuracy", "citation_accuracy")
@@ -65,6 +69,168 @@ def evaluate_citation_case(item: dict) -> dict:
     }
 
 
+def _quality_payloads(item: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    payloads = [item]
+    output = item.get("output")
+    if isinstance(output, Mapping):
+        payloads.append(output)
+    trace = item.get("trace")
+    if isinstance(trace, Mapping) and isinstance(trace.get("output"), Mapping):
+        payloads.append(trace["output"])
+    return payloads
+
+
+def _ledger_payload(
+    item: Mapping[str, Any],
+) -> tuple[str, Any, Mapping[str, Any]] | None:
+    payloads = _quality_payloads(item)
+    for payload in payloads:
+        if "citation_ledger" not in payload:
+            continue
+        ledger = payload.get("citation_ledger")
+        answer = payload.get("answer")
+        if not isinstance(answer, str):
+            answer = next(
+                (
+                    value
+                    for candidate in payloads
+                    if isinstance((value := candidate.get("answer")), str)
+                ),
+                "",
+            )
+        return answer, ledger, payload
+    return None
+
+
+def _merge_evidence_row(
+    rows: dict[str, dict[str, Any]], incoming: Mapping[str, Any]
+) -> None:
+    chunk_id = str(incoming.get("chunk_id") or "").strip()
+    if not chunk_id:
+        return
+    current = rows.setdefault(chunk_id, {"chunk_id": chunk_id})
+    for key in (
+        "evidence_id",
+        "source_type",
+        "knowledge_id",
+        "source",
+        "page",
+        "page_start",
+        "page_end",
+        "span_start",
+        "span_end",
+    ):
+        value = incoming.get(key)
+        if value in (None, ""):
+            continue
+        existing = current.get(key)
+        if existing not in (None, "") and existing != value:
+            current["_metadata_conflict"] = True
+        else:
+            current[key] = value
+    retrieval = incoming.get("retrieval")
+    if isinstance(retrieval, Mapping):
+        current_retrieval = current.setdefault("retrieval", {})
+        for key in ("evidence_id", "evidence_text_start", "evidence_text_end"):
+            value = retrieval.get(key)
+            if value in (None, ""):
+                continue
+            existing = current_retrieval.get(key)
+            if existing not in (None, "") and existing != value:
+                current["_metadata_conflict"] = True
+            else:
+                current_retrieval[key] = value
+
+
+def _closed_evidence_rows(
+    payload: Mapping[str, Any], outer_item: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    rows: dict[str, dict[str, Any]] = {}
+    # Ground-truth docs establish the canonical identity metadata first.
+    for source in (outer_item, payload):
+        for doc in source.get("docs") or []:
+            if not isinstance(doc, Mapping):
+                continue
+            meta = doc.get("meta")
+            if not isinstance(meta, Mapping):
+                continue
+            normalized = dict(meta)
+            normalized["retrieval"] = (
+                dict(doc["retrieval"])
+                if isinstance(doc.get("retrieval"), Mapping)
+                else {}
+            )
+            _merge_evidence_row(rows, normalized)
+    for field in ("sources", "citations", "evidence"):
+        for value in payload.get(field) or []:
+            if isinstance(value, Mapping):
+                _merge_evidence_row(rows, value)
+    output = list(rows.values())
+    # Runtime traces retain the full response-scoped registry.  Keep its
+    # per-view rows separate so one chunk with multiple visible spans is not
+    # collapsed by the legacy chunk-level evidence merge above.
+    for source in (outer_item, payload):
+        for value in source.get("evidence_ledger") or []:
+            if isinstance(value, Mapping):
+                output.append(dict(value))
+    return output
+
+
+def _citation_ledger_metrics(
+    item: Mapping[str, Any],
+) -> dict[str, float]:
+    resolved = _ledger_payload(item)
+    eligible = item.get("case_type") != "router"
+    if resolved is None:
+        answer = next(
+            (
+                str(payload["answer"])
+                for payload in _quality_payloads(item)
+                if isinstance(payload.get("answer"), str)
+            ),
+            "",
+        )
+        physical_total = len(public_citation_occurrences(answer))
+        return {
+            "citation_ledger_observable": 0.0,
+            "citation_ledger_covered": 0.0,
+            "_citation_ledger_eligible": float(eligible),
+            "_citation_ledger_observable": 0.0,
+            "_citation_ledger_covered": 0.0,
+            "_citation_ledger_integrity_pass": 0.0,
+            "_citation_ledger_occurrence_mapped": 0.0,
+            "_citation_ledger_occurrence_total": float(physical_total),
+        }
+    answer, ledger, payload = resolved
+    evidence = _closed_evidence_rows(payload, item)
+    validation = validate_public_citation_ledger(
+        answer,
+        ledger,
+        evidence=evidence,
+        require_evidence=bool(ledger),
+    )
+    covered = isinstance(ledger, list) and (
+        bool(ledger) or validation.physical_total == 0
+    )
+    metrics = {
+        "citation_ledger_observable": 1.0,
+        "citation_ledger_covered": accuracy(covered),
+        "citation_ledger_occurrence_mapping_rate": (
+            validation.occurrence_mapped / validation.occurrence_total
+            if validation.occurrence_total
+            else 1.0
+        ),
+        "citation_ledger_integrity_rate": accuracy(validation.is_valid),
+        "_citation_ledger_eligible": float(eligible),
+        "_citation_ledger_observable": float(eligible),
+        "_citation_ledger_covered": float(eligible and covered),
+        "_citation_ledger_integrity_pass": float(eligible and validation.is_valid),
+        "_citation_ledger_occurrence_mapped": float(validation.occurrence_mapped),
+        "_citation_ledger_occurrence_total": float(validation.occurrence_total),
+    }
+    return metrics
+
+
 # 从质量用例中读取运行时声明审计；兼容直接、output 和 trace.output 三种载荷。
 def _claim_audit(item: Mapping[str, Any]) -> Mapping[str, Any] | None:
     candidates = (
@@ -89,7 +255,7 @@ def _claim_audit_counts(audit: Mapping[str, Any]) -> dict[str, Any] | None:
     if not isinstance(claims, list):
         return None
 
-    counts = {
+    counts: dict[str, Any] = {
         "claim_count": 0,
         "supported": 0,
         "unsupported": 0,
@@ -143,12 +309,8 @@ def _claim_row_metrics(counts: Mapping[str, Any]) -> dict[str, float | None]:
         "claim_audit_observable": 1.0,
         "claim_support_rate": _ratio(int(counts["supported"]), claim_count),
         "citation_coverage": _ratio(int(counts["cited"]), claim_count),
-        "unsupported_claim_rate": _ratio(
-            int(counts["unsupported"]), claim_count
-        ),
-        "insufficient_claim_rate": _ratio(
-            int(counts["insufficient"]), claim_count
-        ),
+        "unsupported_claim_rate": _ratio(int(counts["unsupported"]), claim_count),
+        "insufficient_claim_rate": _ratio(int(counts["insufficient"]), claim_count),
     }
     if counts["repair_attempted"]:
         metrics["repair_success"] = float(bool(counts["repair_succeeded"]))
@@ -179,6 +341,7 @@ def evaluate_faithfulness_case(item: dict) -> dict:
         "manual_only": claim_counts is None,
     }
     if claim_counts is not None:
+        assert audit is not None
         row["claim_audit_status"] = str(audit.get("status") or "")
         row["claim_audit_counts"] = claim_counts
     return row
@@ -188,12 +351,15 @@ def evaluate_faithfulness_case(item: dict) -> dict:
 def evaluate_case(item: dict) -> dict:
     case_type = item.get("case_type")
     if case_type == "router":
-        return evaluate_router_case(item)
-    if case_type == "citation":
-        return evaluate_citation_case(item)
-    if case_type == "faithfulness":
-        return evaluate_faithfulness_case(item)
-    raise ValueError(f"不支持的评测 case_type: {case_type}")
+        row = evaluate_router_case(item)
+    elif case_type == "citation":
+        row = evaluate_citation_case(item)
+    elif case_type == "faithfulness":
+        row = evaluate_faithfulness_case(item)
+    else:
+        raise ValueError(f"不支持的评测 case_type: {case_type}")
+    row["metrics"].update(_citation_ledger_metrics(item))
+    return row
 
 
 # 计算指标。
@@ -248,6 +414,39 @@ def claim_audit_diagnostics(rows: List[dict]) -> dict[str, float | None]:
     }
 
 
+def citation_ledger_diagnostics(rows: List[dict]) -> dict[str, float | None]:
+    """Aggregate ledger coverage by case and occurrence mapping by occurrence."""
+
+    eligible = sum(
+        int(row["metrics"].get("_citation_ledger_eligible", 0)) for row in rows
+    )
+    observable = sum(
+        int(row["metrics"].get("_citation_ledger_observable", 0)) for row in rows
+    )
+    covered = sum(
+        int(row["metrics"].get("_citation_ledger_covered", 0)) for row in rows
+    )
+    integrity_passes = sum(
+        int(row["metrics"].get("_citation_ledger_integrity_pass", 0)) for row in rows
+    )
+    mapped = sum(
+        int(row["metrics"].get("_citation_ledger_occurrence_mapped", 0)) for row in rows
+    )
+    total = sum(
+        int(row["metrics"].get("_citation_ledger_occurrence_total", 0)) for row in rows
+    )
+    return {
+        "citation_ledger_observable_rate": (
+            observable / eligible if eligible else None
+        ),
+        "citation_ledger_coverage_rate": covered / eligible if eligible else None,
+        "citation_ledger_occurrence_mapping_rate": mapped / total if total else None,
+        "citation_ledger_integrity_rate": (
+            integrity_passes / eligible if eligible else None
+        ),
+    }
+
+
 # 汇总一个类型或分层中的全部质量指标。
 def _group_metrics(items: List[dict]) -> dict[str, Any]:
     metrics = {
@@ -258,6 +457,7 @@ def _group_metrics(items: List[dict]) -> dict[str, Any]:
             items, "faithfulness_manual_support_rate"
         ),
     }
+    metrics.update(citation_ledger_diagnostics(items))
     metrics.update(claim_audit_diagnostics(items))
     return metrics
 
@@ -278,6 +478,7 @@ def summarize(rows: List[dict]) -> dict:
             by_type.get("faithfulness", []), "faithfulness_manual_support_rate"
         ),
     }
+    aggregate.update(citation_ledger_diagnostics(rows))
     aggregate.update(claim_audit_diagnostics(by_type.get("faithfulness", [])))
 
     return {
@@ -288,8 +489,7 @@ def summarize(rows: List[dict]) -> dict:
             for case_type, items in sorted(by_type.items())
         },
         "by_layer": {
-            layer: _group_metrics(items)
-            for layer, items in sorted(by_layer.items())
+            layer: _group_metrics(items) for layer, items in sorted(by_layer.items())
         },
     }
 
@@ -298,6 +498,13 @@ def summarize(rows: List[dict]) -> dict:
 def run_eval(items: List[dict]) -> dict:
     rows = [evaluate_case(item) for item in items]
     summary = summarize(rows)
+    # 分子/分母只用于微平均，不属于稳定的单条评测契约。
+    for row in rows:
+        metrics = row.get("metrics")
+        if not isinstance(metrics, dict):
+            continue
+        for key in [key for key in metrics if key.startswith("_citation_ledger_")]:
+            metrics.pop(key, None)
     return {
         "config": {"num_cases": len(items)},
         "aggregate": summary["aggregate"],

@@ -10,6 +10,8 @@ from cogdoc.api.feedback_analysis_store import FeedbackAnalysisStore
 from cogdoc.api.feedback_store import FeedbackStore
 from cogdoc.api.ingest import IndexJobManager, KnowledgeBaseRegistry
 from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
+from cogdoc.api.retrieval_eval_draft_store import RetrievalEvalDraftStore
+from cogdoc.tools.eval.retrieval_eval_drafts import create_pending_draft
 
 
 # 指定异步测试后端。
@@ -66,6 +68,9 @@ def _make_app(tmp_path, ingest_fn=_ok_ingest, monkeypatch=None):
         ),
         retrieval_feedback_store=RetrievalFeedbackStore(
             path=str(tmp_path / "retrieval_feedback.jsonl")
+        ),
+        retrieval_eval_draft_store=RetrievalEvalDraftStore(
+            path=str(tmp_path / "retrieval_eval_drafts.jsonl")
         ),
     )
     return app, source_dir_for
@@ -224,6 +229,21 @@ async def test_delete_recreated_kb_clears_review_state(tmp_path, monkeypatch):
                     "citations": [{"chunk_id": "c1"}],
                 },
             )
+            app.state.retrieval_eval_draft_store.ensure(
+                create_pending_draft(
+                    kb_id="kb",
+                    query="问题",
+                    units=[
+                        {
+                            "unit_id": "r1",
+                            "task_kind": "qa_requirement",
+                            "label": "问题",
+                            "retrieval_query": "问题",
+                        }
+                    ],
+                    now="2026-08-05T00:00:00+00:00",
+                )
+            )
 
             before = await client.get("/v1/review-queue", params={"kb_id": "kb"})
             deleted = await client.delete("/v1/knowledge-bases/kb")
@@ -232,6 +252,7 @@ async def test_delete_recreated_kb_clears_review_state(tmp_path, monkeypatch):
             pending_count = await client.get(
                 "/v1/knowledge/pending-count", params={"kb_id": "kb"}
             )
+            eval_drafts_after = app.state.retrieval_eval_draft_store.export_records()
 
     assert before.json()["feedback_counts"]["total"] == 1
     assert before.json()["retrieval_feedback"]["enabled"] == 1
@@ -243,6 +264,7 @@ async def test_delete_recreated_kb_clears_review_state(tmp_path, monkeypatch):
     assert body["feedback_counts"]["bad_cases"] == 0
     assert body["feedback_analysis"]["needs_review"] == 0
     assert body["retrieval_feedback"]["enabled"] == 0
+    assert eval_drafts_after == []
     assert pending_count.json()["total"] == 0
 
 

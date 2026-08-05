@@ -9,6 +9,7 @@ from cogdoc.api.feedback_analysis_store import FeedbackAnalysisStore
 from cogdoc.api.feedback_store import FeedbackStore
 from cogdoc.api.ingest import KnowledgeBaseRegistry
 from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
+from cogdoc.api.retrieval_eval_draft_store import RetrievalEvalDraftStore
 from cogdoc.tools.retriever.derived_knowledge import DerivedKnowledgeRetriever
 
 
@@ -34,11 +35,12 @@ def _make_app(tmp_path, monkeypatch):
         feedback_analysis_store=FeedbackAnalysisStore(
             path=str(tmp_path / "feedback_analysis.jsonl")
         ),
-        knowledge_store=DerivedKnowledgeStore(
-            path=str(tmp_path / "knowledge.jsonl")
-        ),
+        knowledge_store=DerivedKnowledgeStore(path=str(tmp_path / "knowledge.jsonl")),
         retrieval_feedback_store=RetrievalFeedbackStore(
             path=str(tmp_path / "retrieval_feedback.jsonl")
+        ),
+        retrieval_eval_draft_store=RetrievalEvalDraftStore(
+            path=str(tmp_path / "retrieval_eval_drafts.jsonl")
         ),
     )
     # 本验收刻意走真实词法检索，避免后台向量索引刷新引入异步竞态。
@@ -61,9 +63,7 @@ async def test_feedback_knowledge_review_and_retrieval_lifecycle_e2e(
     tmp_path, monkeypatch
 ):
     app = _make_app(tmp_path, monkeypatch)
-    retriever = DerivedKnowledgeRetriever(
-        app.state.knowledge_store, enable_index=False
-    )
+    retriever = DerivedKnowledgeRetriever(app.state.knowledge_store, enable_index=False)
     correction = {
         "trace_id": "feedback-knowledge-e2e",
         "feedback": "correction",

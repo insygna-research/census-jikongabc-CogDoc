@@ -2,12 +2,14 @@ import math
 from collections.abc import Mapping
 from enum import Enum
 from typing import Any, Literal
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from cogdoc.config.settings import get_settings
+from cogdoc.tools.citation_ledger import is_valid_evidence_id
+from cogdoc.tools.public_citation_ledger import validate_public_citation_ledger
 from cogdoc.tools.retriever.metadata import safe_retrieval_metadata
 
 
-API_SCHEMA_VERSION = "v1"
+API_SCHEMA_VERSION: Literal["v1"] = "v1"
 
 
 # 所有接口模型的基类，统一严格契约与枚举字符串化。
@@ -96,6 +98,71 @@ class Citation(ApiModel):
     page_end: int | None = None
 
 
+# 单次引用在最终答案中的位置；偏移是 Unicode code point 的 0-based half-open 区间。
+class CitationOccurrence(ApiModel):
+    """One citation position in Python/Unicode code-point coordinates."""
+
+    index: int = Field(ge=0, strict=True, description="全答案引用出现序号")
+    answer_start: int = Field(
+        ge=0,
+        strict=True,
+        description="0-based Unicode code-point 起点（包含）",
+    )
+    answer_end: int = Field(
+        ge=0,
+        strict=True,
+        description="0-based Unicode code-point 终点（不包含）",
+    )
+
+    @model_validator(mode="after")
+    def _validate_range(self):
+        if self.answer_end <= self.answer_start:
+            raise ValueError("answer_end must be greater than answer_start")
+        return self
+
+
+# 精确引用账本只公开定位信息，不含证据正文、内部展示模板或私有元数据。
+class CitationLedgerEntry(ApiModel):
+    evidence_id: str = Field(min_length=4, max_length=160)
+    chunk_id: str = Field(min_length=1)
+    source_type: str = "document"
+    knowledge_id: str = ""
+    source: str = ""
+    page: int | None = Field(default=None, ge=0, strict=True)
+    page_start: int | None = Field(default=None, ge=0, strict=True)
+    page_end: int | None = Field(default=None, ge=0, strict=True)
+    span_start: int = Field(ge=0, strict=True)
+    span_end: int = Field(ge=0, strict=True)
+    occurrences: list[CitationOccurrence] = Field(min_length=1)
+
+    @field_validator("evidence_id")
+    @classmethod
+    def _validate_evidence_id(cls, value: str) -> str:
+        if not is_valid_evidence_id(value):
+            raise ValueError("evidence_id must use canonical E001/E1000 spelling")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_entry(self):
+        if self.span_end <= self.span_start:
+            raise ValueError("span_end must be greater than span_start")
+        if (
+            self.page_start is not None
+            and self.page_end is not None
+            and self.page_end < self.page_start
+        ):
+            raise ValueError("page_end must be greater than or equal to page_start")
+        if self.source_type == "derived_knowledge":
+            if not self.knowledge_id.strip():
+                raise ValueError("derived knowledge citation requires knowledge_id")
+        elif self.source_type == "document":
+            if not self.source.strip() or self.page is None:
+                raise ValueError("document citation requires source and page")
+        else:
+            raise ValueError("unsupported citation source_type")
+        return self
+
+
 # 证据片段带截断预览，供前端证据面板展示。
 class Evidence(ApiModel):
     chunk_id: str = ""
@@ -137,6 +204,7 @@ class ChatResponse(ApiModel):
     task_type: ChatTask
     answer: str
     citations: list[Citation] = Field(default_factory=list)
+    citation_ledger: list[CitationLedgerEntry] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
     critique: str = ""
     is_valid: bool
@@ -349,6 +417,18 @@ class FeedbackResponse(ApiModel):
     knowledge_id: str | None = None
     knowledge_status: str | None = None
     knowledge_deduplicated: bool = False
+    retrieval_eval_draft_id: str | None = None
+    retrieval_eval_draft_status: str | None = None
+
+
+# 证据评测草稿的人工审核请求。reviewer 身份只能来自服务端审核密钥，
+# 不接受客户端自报 actor。
+class RetrievalEvalDraftReviewRequest(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    decision: Literal["approved", "rejected"]
+    expected_revision: int = Field(ge=1, strict=True)
+    annotations: dict[str, Any] | None = None
+    reason: str = ""
 
 
 # 反馈列表响应。
@@ -694,10 +774,14 @@ def _nonnegative_int(value: Any) -> int:
 
 
 # 规范化任务类型。
-def _normalize_task_type(value: Any) -> str:
+def _normalize_task_type(value: Any) -> ChatTask:
     # 上游意外或缺失时一律归一到未知任务，契约不因字段漂移崩。
     task = str(value or ChatTask.UNKNOWN.value)
-    return task if task in {item.value for item in ChatTask} else ChatTask.UNKNOWN.value
+    return (
+        ChatTask(task)
+        if task in {item.value for item in ChatTask}
+        else ChatTask.UNKNOWN
+    )
 
 
 # 从映射构建引用。
@@ -712,6 +796,35 @@ def _citation_from_mapping(item: Any) -> Citation:
         page=page,
         page_start=_int_or_none(data.get("page_start", page)),
         page_end=_int_or_none(data.get("page_end", page)),
+    )
+
+
+def _citation_occurrence_from_mapping(item: Any) -> CitationOccurrence:
+    data = _as_mapping(item)
+    return CitationOccurrence(
+        index=_nonnegative_int(data.get("index")),
+        answer_start=_nonnegative_int(data.get("answer_start")),
+        answer_end=_nonnegative_int(data.get("answer_end")),
+    )
+
+
+def _citation_ledger_entry_from_mapping(item: Any) -> CitationLedgerEntry:
+    data = _as_mapping(item)
+    return CitationLedgerEntry(
+        evidence_id=str(data.get("evidence_id", "") or ""),
+        chunk_id=str(data.get("chunk_id", "") or ""),
+        source_type=str(data.get("source_type", "document") or "document"),
+        knowledge_id=str(data.get("knowledge_id", "") or ""),
+        source=str(data.get("source", "") or ""),
+        page=_int_or_none(data.get("page")),
+        page_start=_int_or_none(data.get("page_start")),
+        page_end=_int_or_none(data.get("page_end")),
+        span_start=_nonnegative_int(data.get("span_start")),
+        span_end=_nonnegative_int(data.get("span_end")),
+        occurrences=[
+            _citation_occurrence_from_mapping(occurrence)
+            for occurrence in list(data.get("occurrences", []) or [])
+        ],
     )
 
 
@@ -783,7 +896,9 @@ def _claim_audit_summary_from_mapping(item: Any) -> ClaimAuditSummary | None:
             "attempt_count": _nonnegative_int(raw_repair.get("attempt_count", 0)),
             "succeeded": bool(raw_repair.get("succeeded", False)),
         },
-        duration_ms=_float_or_none(data.get("duration_ms", verifier.get("duration_ms"))),
+        duration_ms=_float_or_none(
+            data.get("duration_ms", verifier.get("duration_ms"))
+        ),
     )
 
 
@@ -796,23 +911,41 @@ def chat_result_to_response(
 ) -> ChatResponse:
     # 防御式取值，且不暴露原始输出、步骤和证据全文。
     raw_output = _as_mapping(getattr(result, "raw_output", None))
+    task_type = _normalize_task_type(getattr(result, "task_type", None))
+    answer = str(getattr(result, "answer", "") or "")
+    raw_evidence = getattr(result, "evidence", []) or []
+    raw_ledger = getattr(result, "citation_ledger", [])
+    ledger_evidence = raw_output.get("evidence_ledger") or raw_evidence
+    ledger_validation = validate_public_citation_ledger(
+        answer,
+        raw_ledger,
+        evidence=ledger_evidence,
+        require_evidence=bool(raw_ledger),
+    )
+    public_ledger = ledger_validation.entries if ledger_validation.is_valid else ()
+    critique = str(getattr(result, "critique", "") or "")
+    if task_type in {"qa", "summary", "compare"} and (
+        critique or not ledger_validation.is_valid
+    ):
+        critique = "回答未通过引用或声明证据校验。"
     return ChatResponse(
         request_id=str(getattr(result, "request_id", "") or ""),
         trace_id=str(getattr(result, "trace_id", "") or ""),
         doc_id=doc_id,
         session_id=session_id,
-        task_type=_normalize_task_type(getattr(result, "task_type", None)),
-        answer=str(getattr(result, "answer", "") or ""),
+        task_type=task_type,
+        answer=answer,
         citations=[
             _citation_from_mapping(item)
             for item in list(getattr(result, "citations", []) or [])
         ],
-        evidence=[
-            _evidence_from_mapping(item)
-            for item in list(getattr(result, "evidence", []) or [])
+        citation_ledger=[
+            _citation_ledger_entry_from_mapping(item) for item in public_ledger
         ],
-        critique=str(getattr(result, "critique", "") or ""),
-        is_valid=bool(getattr(result, "is_valid", False)),
+        evidence=[_evidence_from_mapping(item) for item in list(raw_evidence)],
+        critique=critique,
+        is_valid=bool(getattr(result, "is_valid", False))
+        and ledger_validation.is_valid,
         claim_audit=_claim_audit_summary_from_mapping(raw_output.get("claim_audit")),
     )
 

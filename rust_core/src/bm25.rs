@@ -86,6 +86,51 @@ fn build_index(corpus: Vec<Vec<String>>, k1: f64, b: f64, epsilon: f64) -> Bm25I
     }
 }
 
+impl Bm25Index {
+    fn scores_for_query(&self, query: &[String]) -> Vec<f64> {
+        // query 去重为计数：等价于 Python 对 query 列表逐 token 累加（重复词多次计分）。
+        let mut query_counts: HashMap<&str, f64> = HashMap::new();
+        for token in query {
+            *query_counts.entry(token.as_str()).or_insert(0.0) += 1.0;
+        }
+
+        let mut scores = vec![0.0_f64; self.corpus_size];
+        for (token, count) in &query_counts {
+            let idf_q = match self.idf.get(*token) {
+                Some(value) => *value,
+                None => continue,
+            };
+            if let Some(plist) = self.postings.get(*token) {
+                for (doc_id, freq) in plist {
+                    let denom = *freq
+                        + self.k1 * (1.0 - self.b + self.b * self.doc_len[*doc_id] / self.avgdl);
+                    scores[*doc_id] += count * idf_q * (*freq * (self.k1 + 1.0) / denom);
+                }
+            }
+        }
+        scores
+    }
+
+    fn rank_doc_ids(
+        &self,
+        scores: &[f64],
+        mut doc_ids: Vec<usize>,
+        top_n: usize,
+    ) -> Vec<(usize, f64)> {
+        doc_ids.sort_by(|&a, &b| {
+            scores[b]
+                .partial_cmp(&scores[a])
+                .unwrap_or(Ordering::Equal)
+                .then(a.cmp(&b))
+        });
+        doc_ids
+            .into_iter()
+            .take(top_n)
+            .map(|doc_id| (doc_id, scores[doc_id]))
+            .collect()
+    }
+}
+
 #[pymethods]
 impl Bm25Index {
     // 从分词语料创建 BM25 索引。
@@ -131,39 +176,33 @@ impl Bm25Index {
         if self.corpus_size == 0 {
             return Vec::new();
         }
+        let scores = self.scores_for_query(&query);
+        self.rank_doc_ids(&scores, (0..self.corpus_size).collect(), top_n)
+    }
 
-        // query 去重为计数：等价于 Python 对 query 列表逐 token 累加（重复词多次计分）。
-        let mut query_counts: HashMap<&str, f64> = HashMap::new();
-        for token in &query {
-            *query_counts.entry(token.as_str()).or_insert(0.0) += 1.0;
+    // 在排序/top-k 之前限定允许的 registry 行。IDF/avgdl 仍使用完整索引，
+    // 因而与全库 BM25 分数口径一致，只改变候选竞争集合。
+    fn score_topk_filtered(
+        &self,
+        query: Vec<String>,
+        top_n: usize,
+        allowed_doc_ids: Vec<usize>,
+    ) -> PyResult<Vec<(usize, f64)>> {
+        if self.corpus_size == 0 || allowed_doc_ids.is_empty() {
+            return Ok(Vec::new());
         }
-
-        let mut scores = vec![0.0_f64; self.corpus_size];
-        for (token, count) in &query_counts {
-            let idf_q = match self.idf.get(*token) {
-                Some(value) => *value,
-                None => continue,
-            };
-            if let Some(plist) = self.postings.get(*token) {
-                for (doc_id, freq) in plist {
-                    let denom = *freq
-                        + self.k1 * (1.0 - self.b + self.b * self.doc_len[*doc_id] / self.avgdl);
-                    scores[*doc_id] += count * idf_q * (*freq * (self.k1 + 1.0) / denom);
-                }
+        let mut seen = vec![false; self.corpus_size];
+        let mut allowed = Vec::with_capacity(allowed_doc_ids.len());
+        for doc_id in allowed_doc_ids {
+            if doc_id >= self.corpus_size {
+                return Err(PyValueError::new_err("allowed document index out of range"));
+            }
+            if !seen[doc_id] {
+                seen[doc_id] = true;
+                allowed.push(doc_id);
             }
         }
-
-        let mut order: Vec<usize> = (0..self.corpus_size).collect();
-        order.sort_by(|&a, &b| {
-            scores[b]
-                .partial_cmp(&scores[a])
-                .unwrap_or(Ordering::Equal)
-                .then(a.cmp(&b))
-        });
-        order
-            .into_iter()
-            .take(top_n)
-            .map(|doc_id| (doc_id, scores[doc_id]))
-            .collect()
+        let scores = self.scores_for_query(&query);
+        Ok(self.rank_doc_ids(&scores, allowed, top_n))
     }
 }

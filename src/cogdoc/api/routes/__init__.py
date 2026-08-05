@@ -4,6 +4,9 @@ from cogdoc.api.routes.documents import router as documents_router
 from cogdoc.api.routes.feedback import router as feedback_router
 from cogdoc.api.routes.health import router as health_router
 from cogdoc.api.routes.knowledge import router as knowledge_router
+from cogdoc.api.routes.retrieval_eval_drafts import (
+    router as retrieval_eval_drafts_router,
+)
 from cogdoc.api.routes.traces import router as traces_router
 
 __all__ = [
@@ -13,5 +16,6 @@ __all__ = [
     "feedback_router",
     "health_router",
     "knowledge_router",
+    "retrieval_eval_drafts_router",
     "traces_router",
 ]

@@ -242,6 +242,78 @@ def test_build_trace_step_keeps_evidence_verification_decision():
     assert step["adaptive_retrieval_retry_pending"] is True
 
 
+def test_build_trace_step_keeps_safe_evidence_unit_gate_diagnostics():
+    private_text = "完整证据正文不得复制到紧凑诊断"
+    step = build_trace_step(
+        "section_evidence_node",
+        {
+            "evidence_unit_results": [
+                {
+                    "unit_id": "eu_0123456789abcdef01234567",
+                    "status": "supported",
+                    "retrieval_round": 1,
+                    "candidate_count": 2,
+                    "selected_count": 1,
+                    "selected_chars": 120,
+                    "grounding_evidence_ids": ["E003"],
+                    "retry_attempted": True,
+                    "gate_action": "generate",
+                    "gate_reason_code": "verified_supported",
+                    "selected_docs": [
+                        {
+                            "text": private_text,
+                            "meta": {"chunk_id": "chunk-3", "source": "a.pdf"},
+                        }
+                    ],
+                }
+            ],
+            "evidence_unit_metrics": {
+                "supported_count": 1,
+                "targeted_retry_count": 1,
+            },
+            "evidence_unit_retry_history": [
+                ["eu_0123456789abcdef01234567"]
+            ],
+            "evidence_unit_verification_metrics": {"supported_count": 1},
+            "evidence_unit_verification_protocol_errors": ["unknown_unit:bad"],
+            "evidence_unit_gate_decisions": [
+                {
+                    "unit_id": "eu_0123456789abcdef01234567",
+                    "action": "generate",
+                    "verification_status": "supported",
+                    "retrieval_round": 1,
+                    "retries_remaining": 0,
+                    "reason_code": "verified_supported",
+                }
+            ],
+            "evidence_unit_gate_metrics": {
+                "generate_count": 1,
+                "batch_can_generate": True,
+            },
+            "evidence_unit_batch_can_generate": True,
+        },
+        1.0,
+    )
+
+    result = step["evidence_unit_results"][0]
+    assert result["grounding_evidence_ids"] == ["E003"]
+    assert result["retry_attempted"] is True
+    assert result["gate_action"] == "generate"
+    assert result["gate_reason_code"] == "verified_supported"
+    assert result["selected_chunk_ids"] == ["chunk-3"]
+    assert step["evidence_unit_verification_metrics"] == {"supported_count": 1}
+    assert step["evidence_unit_verification_protocol_errors"] == [
+        "unknown_unit:bad"
+    ]
+    assert step["evidence_unit_gate_decisions"][0]["action"] == "generate"
+    assert step["evidence_unit_gate_metrics"]["batch_can_generate"] is True
+    assert step["evidence_unit_batch_can_generate"] is True
+    assert step["evidence_unit_retry_history"] == [
+        ["eu_0123456789abcdef01234567"]
+    ]
+    assert private_text not in json.dumps(result, ensure_ascii=False)
+
+
 # 验证 trace 保留补检索轮次、深度与已验证证据携带数。
 def test_build_trace_step_keeps_adaptive_retrieval_round_metadata():
     step = build_trace_step(

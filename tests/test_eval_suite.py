@@ -71,19 +71,55 @@ def _stub_retrieval_run(monkeypatch):
     calls = []
 
     def run_eval(items, k_values, rerank):
-        calls.append(
-            {"count": len(items), "k_values": k_values, "rerank": rerank}
-        )
+        calls.append({"count": len(items), "k_values": k_values, "rerank": rerank})
         return {
             "aggregate": {"mrr": 1.0},
             "baseline_gated_metrics": ["mrr"],
             "metric_directions": {"mrr": "higher"},
+            "metric_denominators": {"mrr": len(items)},
             "by_layer": {},
             "rows": [],
         }
 
     monkeypatch.setattr(eval_suite.eval_retrieval, "run_eval", run_eval)
     return calls
+
+
+# 组合门禁必须使用指标自己的有效样本分母，不能把总 query 数当证据标注数。
+def test_eval_suite_passes_metric_denominators_to_retrieval_gate(tmp_path, monkeypatch):
+    quality_path = tmp_path / "quality.jsonl"
+    retrieval_path = tmp_path / "retrieval.jsonl"
+    _write_quality_eval(quality_path)
+    _write_retrieval_eval(retrieval_path)
+
+    def run_eval(items, k_values, rerank):
+        del items, k_values, rerank
+        return {
+            "aggregate": {"requirement_recall@5": 1.0},
+            "metric_denominators": {"requirement_recall@5": 1},
+            "baseline_gated_metrics": [],
+            "metric_directions": {},
+            "by_layer": {},
+            "rows": [],
+        }
+
+    monkeypatch.setattr(eval_suite.eval_retrieval, "run_eval", run_eval)
+    report = eval_suite.build_report(
+        quality_eval_set=quality_path,
+        retrieval_eval_set=retrieval_path,
+        run_retrieval=True,
+        k_values=[5],
+        rerank=False,
+        retrieval_gate_config={
+            "minimum": {"requirement_recall@5": 0.9},
+            "minimum_samples": {"gold_requirements": 2},
+        },
+    )
+
+    row = report["retrieval_report"]["threshold_gate"]["rows"][0]
+    assert row["sample_count"] == 1
+    assert row["failure_reason"] == "insufficient_samples"
+    assert report["gate"]["passed"] is False
 
 
 # 验证组合评测不跑检索也能生成门禁结果。

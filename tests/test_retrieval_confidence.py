@@ -23,7 +23,12 @@ def _doc(*, distance=None, bm25_score=None, source_type="document"):
         retrieval["bm25_score"] = bm25_score
     return {
         "text": "evidence",
-        "meta": {"source_type": source_type},
+        "meta": {
+            "chunk_id": "chunk:test:0",
+            "source_type": source_type,
+            "source": "test.pdf",
+            "page": 1,
+        },
         "retrieval": retrieval,
     }
 

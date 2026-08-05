@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from cogdoc.api.schemas import ChunkPreview
+from cogdoc.graph.state import RetrievedDoc
 from cogdoc.service.ingest_service import _chunk_text_hash
 from cogdoc.service.kb_readers import kb_read_lease
 
@@ -17,8 +18,8 @@ def preview_text(text: Any, limit: int) -> str:
 
 
 # 读取来源文件分块。
-def source_chunks(kb_id: str, source: str) -> list[dict]:
-    from cogdoc.graph.subgraphs.qa import RetrieverFactory
+def source_chunks(kb_id: str, source: str) -> list[RetrievedDoc]:
+    from cogdoc.service.retriever_factory import RetrieverFactory
 
     with kb_read_lease(kb_id):
         return RetrieverFactory.get_engine(kb_id).load_source_chunks(source)
@@ -28,7 +29,8 @@ def source_chunks(kb_id: str, source: str) -> list[dict]:
 def chunk_preview(
     doc: Mapping[str, Any], anchor_text: str | None = None
 ) -> ChunkPreview:
-    meta = doc.get("meta") if isinstance(doc.get("meta"), Mapping) else {}
+    raw_meta = doc.get("meta")
+    meta: Mapping[str, Any] = raw_meta if isinstance(raw_meta, Mapping) else {}
     page = meta.get("page")
     text = str(doc.get("text") or "")
     anchor = str(anchor_text or "").strip()

@@ -3,7 +3,6 @@ import logging
 import math
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
-from threading import RLock
 from typing import Any, cast
 from langchain_core.messages import AIMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
@@ -16,22 +15,15 @@ from cogdoc.agents.evidence_verifier import (
 )
 from cogdoc.graph.state import GraphState, Evidence, RetrievedDoc
 from cogdoc.observability.logger import log_event
-from cogdoc.service.kb_lifecycle import LIFECYCLE_ACTIVE, shared_lifecycle_store
 from cogdoc.service.kb_readers import kb_read_lease
-from cogdoc.service.kb_state import KBState
-from cogdoc.tools.retriever.base_retriever import NullRetriever
-from cogdoc.tools.retriever.vector_retriever import (
-    VectorRetriever,
-    EmbeddingModelMismatchError,
-)
-from cogdoc.tools.retriever.bm25_retriever import BM25Retriever
-from cogdoc.tools.retriever.hybrid import HybridRetriever, IndexCorruptError
+from cogdoc.service.retriever_factory import RetrieverFactory
 from cogdoc.tools.retriever.metadata import safe_retrieval_metadata
 from cogdoc.tools.retriever.parent_context import select_parent_context
 from cogdoc.tools.evidence_rendering import (
     EVIDENCE_BLOCK_SEPARATOR,
     evidence_block_char_count,
 )
+from cogdoc.tools.citation_ledger import assign_evidence_ids
 from cogdoc.tools.retriever.evidence_pack import (
     DROP_DUPLICATE_CHUNK_ID,
     EvidencePack,
@@ -45,6 +37,12 @@ from cogdoc.service.retrieval_pipeline import (
     apply_retrieval_feedback,
     build_retrieval_queries,
     retrieve_candidate_pool,
+)
+from cogdoc.service.evidence_unit_pipeline import evidence_unit_plan_state
+from cogdoc.service.evidence_units import build_qa_evidence_units
+from cogdoc.service.claim_audit_projection import (
+    ClaimAuditProjectionSegment,
+    build_claim_audit_projection,
 )
 from cogdoc.agents.answer_markers import NO_RELEVANT_CONTENT_ANSWER
 from cogdoc.agents.qa_generator import Generator
@@ -62,107 +60,10 @@ CITATION_CORRECTION_PROMPT_TEMPLATE = (
     "\n\n【引用校验失败通知】\n"
     "你上一轮的回答已被引用校验器拦截，错误详情如下：\n\n"
     "{critique}\n\n"
-    "请严格按照上述修正要求重新生成答案，确保每处引用的文件名和页码与 "
-    "<Document> 标签属性完全吻合。"
+    "请严格按照上述修正要求重新生成答案，确保每处引用使用对应标签中"
+    "完全一致的 [E001] Evidence ID。"
 )
-
-
-# 进程内按知识库和索引代缓存引擎，切代后失效缓存。
-class RetrieverFactory:
-    _engines: "OrderedDict[tuple, HybridRetriever]" = OrderedDict()
-    _lock = RLock()
-    _max_engines = 32
-
-    # 返回检索引擎。
-    @classmethod
-    def get_engine(cls, kb_id: str) -> HybridRetriever:
-        # 删库进行中/已删：禁读正在拆除的代，返回空引擎且不缓存。
-        if shared_lifecycle_store().status(kb_id) != LIFECYCLE_ACTIVE:
-            return HybridRetriever(NullRetriever(), NullRetriever())
-
-        # 锁外解析活跃索引代，以知识库和索引代为缓存键查缓存。
-        gen_id = cls._resolve_gen_id(kb_id)
-        cache_key = (kb_id, gen_id)
-
-        with cls._lock:
-            engine = cls._engines.get(cache_key)
-            if engine is not None:
-                # 缓存命中前再查一次生命周期，避免删库中继续读旧引擎。
-                if shared_lifecycle_store().status(kb_id) != LIFECYCLE_ACTIVE:
-                    return HybridRetriever(NullRetriever(), NullRetriever())
-                cls._engines.move_to_end(cache_key)
-                return engine
-
-        # 锁外构造，不同知识库冷启动互不阻塞。
-        built = cls._build_engine(kb_id, gen_id)
-
-        with cls._lock:
-            # 构造期间被删库则丢弃，返回空引擎且不缓存。
-            if shared_lifecycle_store().status(kb_id) != LIFECYCLE_ACTIVE:
-                return HybridRetriever(NullRetriever(), NullRetriever())
-            # 插入前重新解析，防止构造期间切代导致索引代已失效。
-            current_gen_id = cls._resolve_gen_id(kb_id)
-            if current_gen_id != gen_id:
-                # 代已切换，丢弃刚构造的引擎不写回缓存；下次请求自然构造新代引擎。
-                return built
-            engine = cls._engines.get(cache_key)
-            if engine is None:
-                cls._engines[cache_key] = built
-                engine = built
-                while len(cls._engines) > cls._max_engines:
-                    cls._engines.popitem(last=False)
-            cls._engines.move_to_end(cache_key)
-            return engine
-
-    # 解析索引代标识。
-    @classmethod
-    def _resolve_gen_id(cls, kb_id: str) -> str | None:
-        # 读取活跃索引代标识；无活跃代或合法空索引均返回空。
-        active = KBState(kb_id).active()
-        if active is None or active.get("expected_count") == 0:
-            return None
-        return active["id"]
-
-    # 构建检索引擎。
-    @classmethod
-    def _build_engine(cls, kb_id: str, gen_id: str | None) -> HybridRetriever:
-        if gen_id is None:
-            # 无活跃代或合法空索引：返回空引擎，不报错。
-            return HybridRetriever(NullRetriever(), NullRetriever())
-
-        collection_id = get_settings().kb_collection_id(kb_id, gen_id)
-        try:
-            engine = HybridRetriever(
-                vector_retriever=VectorRetriever(collection_id=collection_id),
-                bm25_retriever=BM25Retriever(collection_id=collection_id),
-            )
-        except EmbeddingModelMismatchError:
-            # 嵌入模型已更换，当前代向量集合不可用时返回空引擎。
-            return HybridRetriever(NullRetriever(), NullRetriever())
-
-        # 按索引代精确读取记录，避免切代时用新代计数校验旧代引擎。
-        gen_state = KBState(kb_id).get(gen_id)
-        if gen_state is None:
-            # 该代在构造期间已被回收，返回空引擎且不缓存。
-            return HybridRetriever(NullRetriever(), NullRetriever())
-        expected = gen_state.get("expected_count")
-        actual = engine.count()
-        consistent = engine.is_consistent()
-        if actual != expected or not consistent:
-            raise IndexCorruptError(
-                f"generation {gen_id}: expected_count={expected}, actual={actual}, "
-                f"consistent={consistent}; rebuild required"
-            )
-        return engine
-
-    # 使失效结果。
-    @classmethod
-    def invalidate(cls, kb_id: str) -> None:
-        # 删除该知识库的全部代缓存，强制下次重解析活跃代。
-        with cls._lock:
-            stale_keys = [k for k in cls._engines if k[0] == kb_id]
-            for k in stale_keys:
-                del cls._engines[k]
+QA_GENERATION_FAILURE_ANSWER = "模型未生成可用答案，请稍后重试。"
 
 
 # 处理问题改写节点。
@@ -485,6 +386,9 @@ def _build_qa_evidence_pack(
                 doc, matched_requirement_ids=matched_requirement_ids
             )
             retrieval = selected.get("retrieval", {})
+            retrieval["evidence_span_matched_unit_ids"] = list(
+                retrieval.get("evidence_span_matched_requirement_ids") or []
+            )
             reason = str(retrieval.get("evidence_span_reason") or "")
             original_chars = max(
                 0, int(retrieval.get("evidence_span_original_chars") or 0)
@@ -717,6 +621,36 @@ def retrieve_node(
             retrieval_round=retry_count,
         )
     retrieved_docs, carryover_count = _carry_verified_docs(state, retrieval_result.docs)
+    raw_requirements = [
+        requirement
+        for requirement in list(state.get("evidence_requirements") or [])
+        if isinstance(requirement, Mapping)
+    ]
+    evidence_units = (
+        build_qa_evidence_units(
+            original_query,
+            raw_requirements,
+            max_retrieval_retries=settings.qa_adaptive_retrieval_max_retries,
+        )
+        if raw_requirements
+        else ()
+    )
+    unit_id_by_requirement = {
+        unit.binding.requirement_id: unit.unit_id for unit in evidence_units
+    }
+    attributed_docs: list[RetrievedDoc] = []
+    for doc in retrieved_docs:
+        snapshot = copy.deepcopy(doc)
+        retrieval = snapshot.setdefault("retrieval", {})
+        matched_requirements = retrieval.get("matched_requirement_ids")
+        if isinstance(matched_requirements, list):
+            retrieval["matched_unit_ids"] = [
+                unit_id_by_requirement[requirement_id]
+                for requirement_id in matched_requirements
+                if requirement_id in unit_id_by_requirement
+            ]
+        attributed_docs.append(snapshot)
+    retrieved_docs = attributed_docs
 
     if retrieval_result.feedback_error:
         log_event(
@@ -741,6 +675,7 @@ def retrieve_node(
         retrieval_round=retry_count,
     )
     return {
+        "evidence_units": [evidence_unit_plan_state(unit) for unit in evidence_units],
         "retrieved_docs": retrieved_docs,
         "retrieval_round": retry_count,
         "retrieval_top_k_used": retrieval_top_k,
@@ -813,12 +748,12 @@ def rerank_node(state: GraphState) -> dict:
         requirement_ids=requirement_ids,
         settings=settings,
     )
-    packed_docs = list(evidence_pack.kept_docs)
+    packed_docs, evidence_ledger = assign_evidence_ids(evidence_pack.kept_docs)
     pack_metrics = _evidence_pack_metrics(
         evidence_pack,
         pinned_chunk_ids=pinned_ids,
     )
-    verification_docs = (
+    raw_verification_docs = (
         []
         if evidence_pack.over_budget_hard_constraints
         else _verification_docs_from_pack(
@@ -828,6 +763,13 @@ def rerank_node(state: GraphState) -> dict:
             pinned_chunk_ids=pinned_ids,
         )
     )
+    packed_by_chunk_id = {
+        str(doc.get("meta", {}).get("chunk_id") or ""): doc for doc in packed_docs
+    }
+    verification_docs = [
+        packed_by_chunk_id.get(str(doc.get("meta", {}).get("chunk_id") or ""), doc)
+        for doc in raw_verification_docs
+    ]
     support = assess_retrieval_support(reranked_docs, settings)
     retrieval_abstained = (
         not support.supported or evidence_pack.over_budget_hard_constraints
@@ -881,6 +823,8 @@ def rerank_node(state: GraphState) -> dict:
     )
     result = {
         "reranked_docs": packed_docs,
+        "evidence_ledger": evidence_ledger,
+        "citation_ledger": [],
         "verification_docs": verification_docs,
         "retrieval_first_stage_supported": support.supported,
         "retrieval_confidence": support.score,
@@ -948,6 +892,8 @@ def abstain_node(state: GraphState) -> dict:
         "sources": [],
         "evidence": [],
         "reranked_docs": [],
+        "evidence_ledger": [],
+        "citation_ledger": [],
         "critique": "",
         "retrieval_abstained": True,
         "adaptive_retrieval_retry_pending": False,
@@ -1039,6 +985,7 @@ def _generation_evidence(doc: RetrievedDoc) -> Evidence:
     meta = doc.get("meta", {})
     page = meta.get("page", 0)
     evidence: Evidence = {
+        "evidence_id": str(doc.get("retrieval", {}).get("evidence_id") or ""),
         "chunk_id": str(meta.get("chunk_id") or ""),
         "source_type": str(meta.get("source_type") or "document"),
         "knowledge_id": str(meta.get("knowledge_id") or ""),
@@ -1063,6 +1010,43 @@ def _generation_evidence(doc: RetrievedDoc) -> Evidence:
     if meta.get("child_index_in_parent") is not None:
         evidence["child_index_in_parent"] = cast(int, meta["child_index_in_parent"])
     return evidence
+
+
+def _qa_generated_obligation_ids(state: Mapping[str, Any]) -> tuple[str, ...]:
+    generated_ids = state.get("evidence_unit_generate_ids")
+    if isinstance(generated_ids, Sequence) and not isinstance(
+        generated_ids, (str, bytes, bytearray)
+    ):
+        return tuple(
+            dict.fromkeys(
+                unit_id
+                for value in generated_ids
+                if (unit_id := str(value or "").strip())
+            )
+        )
+
+    assessments = state.get("evidence_unit_assessments")
+    plans = state.get("evidence_units")
+    if not isinstance(assessments, Sequence) or isinstance(
+        assessments, (str, bytes, bytearray)
+    ):
+        return ()
+    if not isinstance(plans, Sequence) or isinstance(
+        plans, (str, bytes, bytearray)
+    ):
+        return ()
+    supported_ids = {
+        str(item.get("unit_id") or "").strip()
+        for item in assessments
+        if isinstance(item, Mapping) and item.get("status") == "supported"
+    }
+    return tuple(
+        unit_id
+        for item in plans
+        if isinstance(item, Mapping)
+        and bool(item.get("required", True))
+        and (unit_id := str(item.get("unit_id") or "").strip()) in supported_ids
+    )
 
 
 # 生成节点。
@@ -1091,16 +1075,43 @@ def generate_node(state: GraphState) -> dict:
             messages_payload.insert(0, SystemMessage(content=correction_note))
 
     response_message = llm.invoke(messages_payload)
+    answer = str(response_message.content).strip()
+    generation_error = ""
+    if not answer:
+        answer = QA_GENERATION_FAILURE_ANSWER
+        response_message = AIMessage(content=answer)
+        generation_error = "qa_generation_empty"
 
-    # 证据保留页跨度，引用校验仍按页级格式。
+    # EID 只在父图声明审计通过后确定性渲染成用户可见页码引用。
     evidence = [_generation_evidence(doc) for doc in final_docs]
+    obligation_ids = _qa_generated_obligation_ids(state)
+    segment = (
+        ClaimAuditProjectionSegment.operational(
+            "qa:generation_error",
+            answer,
+            source_status=generation_error,
+            obligation_ids=obligation_ids,
+        )
+        if generation_error
+        else ClaimAuditProjectionSegment.generated(
+            "qa:answer",
+            answer,
+            source_status="generated",
+            obligation_ids=obligation_ids,
+        )
+    )
+    projection = build_claim_audit_projection(answer, (segment,))
 
-    return {
+    output: dict[str, Any] = {
         "messages": [response_message],
-        "answer": response_message.content,
+        "answer": answer,
         "sources": [doc["meta"] for doc in final_docs],
         "evidence": evidence,
+        "claim_audit_projection": projection.to_state(),
     }
+    if generation_error:
+        output["error"] = generation_error
+    return output
 
 
 # 处理引用节点。
@@ -1110,8 +1121,8 @@ def citation_node(state: GraphState) -> dict:
     iteration_count = state.get("iteration_count", 0)
     max_iteration_count = state.get("max_iteration_count", 2)
 
-    check_res = CitationValidatorAgent.validate_citations(
-        answer, cast(list[dict[str, Any]], final_docs)
+    check_res = CitationValidatorAgent.validate_evidence_citations(
+        answer, state.get("evidence_ledger", [])
     )
     log_event(
         "qa",

@@ -9,6 +9,7 @@ from cogdoc.tools.eval.retrieval_metrics import (
     aggregate,
     audit_coverage,
     coverage_minimums,
+    evaluate_evidence_unit_outcomes,
     evaluate_query,
     evaluate_requirement_coverage,
     evaluate_thresholds,
@@ -111,6 +112,37 @@ def test_requirement_coverage_supports_source_gold_and_hard_negatives():
     assert metrics["requirement_recall@2"] == 1.0
     assert metrics["hard_negative_rejection@1"] == 0.0
     assert metrics["hard_negative_rejection@2"] == 0.0
+
+
+def test_mixed_evidence_unit_outcomes_keep_no_evidence_labels_local():
+    retrieved = [
+        {
+            "chunk_id": "method-gold",
+            "source": "a.pdf",
+            "matched_unit_ids": ["method"],
+        },
+        {
+            "chunk_id": "limits-distractor",
+            "source": "a.pdf",
+            "matched_unit_ids": ["limits"],
+        },
+    ]
+
+    metrics = evaluate_evidence_unit_outcomes(
+        retrieved,
+        {"method": "supported", "limits": "no_evidence"},
+        [1, 2],
+        hard_negative_chunk_ids_by_unit={
+            "method": [],
+            "limits": ["limits-distractor"],
+        },
+    )
+
+    assert metrics["evidence_unit_count"] == 2.0
+    assert metrics["no_evidence_unit_false_positive@1"] == 0.0
+    assert metrics["no_evidence_unit_false_positive@2"] == 1.0
+    assert metrics["evidence_unit_hard_negative_rejection@1"] == 1.0
+    assert metrics["evidence_unit_hard_negative_rejection@2"] == 0.0
 
 
 def test_requirement_coverage_rate_measures_bounded_generation_context():
@@ -330,6 +362,121 @@ def test_retrieval_baseline_coverage_requires_layer_quotas():
     assert coverage["is_coverage_complete"] is False
 
 
+def test_retrieval_coverage_audits_effective_evidence_denominators():
+    valid_annotation = {
+        "query": "有效标注",
+        "expected_sources": ["a.pdf"],
+        "layer": "single-source",
+        "evidence_requirements": [
+            {
+                "requirement_id": "r1",
+                "question": "截止日期是什么？",
+                "retrieval_query": "申请截止日期",
+                "recovery_query": "提交关闭日期",
+            }
+        ],
+        "gold_requirements": [
+            {
+                "requirement_id": "r1",
+                "acceptable_chunk_ids": ["deadline"],
+                "acceptable_spans": [{"chunk_id": "deadline", "start": 10, "end": 20}],
+            }
+        ],
+        "hard_negative_chunk_ids": ["old-policy"],
+    }
+    malformed_annotation = {
+        "query": "无效标注",
+        "expected_sources": ["a.pdf"],
+        "layer": "hard",
+        "evidence_requirements": [
+            {"requirement_id": "r1", "retrieval_query": "缺少完整计划"}
+        ],
+        "gold_requirements": [
+            {
+                "requirement_id": "r1",
+                "acceptable_chunk_ids": [""],
+                "acceptable_spans": [{"chunk_id": "deadline", "start": 20, "end": 20}],
+            }
+        ],
+        "hard_negative_chunk_ids": ["old-policy"],
+    }
+    items = [
+        valid_annotation,
+        malformed_annotation,
+        {
+            "query": "多源",
+            "expected_sources": ["a.pdf", "b.pdf"],
+            "layer": "multi-source",
+        },
+        {"query": "无答案", "expected_sources": [], "layer": "no-answer"},
+    ]
+
+    coverage = audit_coverage(
+        items,
+        coverage_minimums(
+            "smoke",
+            annotation_minimums={
+                "evidence_requirements": 2,
+                "gold_requirements": 2,
+                "chunk_gold": 2,
+                "span_gold": 2,
+                "hard_negatives": 2,
+            },
+        ),
+    )
+
+    assert coverage["effective_sample_counts"] == {
+        "evidence_requirements": 1,
+        "gold_requirements": 1,
+        "chunk_gold": 1,
+        "span_gold": 1,
+        "hard_negatives": 1,
+    }
+    assert coverage["effective_annotation_counts"] == {
+        "evidence_requirements": 1,
+        "gold_requirements": 1,
+        "chunk_gold": 1,
+        "span_gold": 1,
+        "hard_negatives": 1,
+    }
+    assert coverage["invalid_sample_counts"] == {
+        "evidence_requirements": 1,
+        "gold_requirements": 1,
+        "chunk_gold": 1,
+        "span_gold": 1,
+        "hard_negatives": 1,
+    }
+    assert set(coverage["insufficient_annotations"]) == {
+        "evidence_requirements",
+        "gold_requirements",
+        "chunk_gold",
+        "span_gold",
+        "hard_negatives",
+    }
+    assert coverage["insufficient_layers"] == {}
+    assert coverage["is_coverage_complete"] is False
+
+
+def test_retrieval_smoke_coverage_keeps_clean_checkout_compatible():
+    minimums = coverage_minimums("smoke")
+
+    assert minimums["annotation:evidence_requirements"] == 0
+    assert minimums["annotation:gold_requirements"] == 0
+    assert minimums["annotation:chunk_gold"] == 0
+    assert minimums["annotation:span_gold"] == 0
+    assert minimums["annotation:hard_negatives"] == 0
+
+
+def test_retrieval_baseline_requires_mature_evidence_annotations():
+    minimums = coverage_minimums("baseline")
+
+    assert minimums["annotation:evidence_requirements"] == 20
+    assert minimums["annotation:gold_requirements"] == 20
+    assert minimums["annotation:chunk_gold"] == 20
+    assert minimums["annotation:span_gold"] == 10
+    assert minimums["annotation:hard_negatives"] == 10
+
+
 # 验证绝对门禁同时支持下限和上限指标。
 def test_retrieval_threshold_gate_handles_minimum_and_maximum():
     gate = evaluate_thresholds(
@@ -342,6 +489,30 @@ def test_retrieval_threshold_gate_handles_minimum_and_maximum():
 
     assert gate["passed"] is True
     assert all(row["passed"] for row in gate["rows"])
+
+
+def test_retrieval_threshold_gate_rejects_evidence_metric_with_tiny_denominator():
+    config = {
+        "minimum": {"requirement_recall@5": 0.8},
+        "minimum_samples": {"gold_requirements": 2},
+    }
+
+    insufficient = evaluate_thresholds(
+        {"requirement_recall@5": 1.0},
+        config,
+        metric_denominators={"requirement_recall@5": 1},
+    )
+    sufficient = evaluate_thresholds(
+        {"requirement_recall@5": 1.0},
+        config,
+        metric_denominators={"requirement_recall@5": 2},
+    )
+
+    assert insufficient["passed"] is False
+    assert insufficient["rows"][0]["failure_reason"] == "insufficient_samples"
+    assert insufficient["rows"][0]["sample_count"] == 1
+    assert insufficient["rows"][0]["minimum_samples"] == 2
+    assert sufficient["passed"] is True
 
 
 # 写入覆盖完整的检索评测集。
@@ -510,6 +681,14 @@ def test_retrieval_run_eval_reports_layers_and_latency(monkeypatch):
     assert report["config"]["verify_evidence"] is True
     assert report["aggregate"]["latency_p95_ms"] >= 0.0
     assert report["rows"][0]["metrics"]["generation_requirement_coverage"] == 1.0
+    assert report["metric_denominators"]["generation_requirement_coverage"] == 1
+    assert "generation_requirement_coverage" not in report["baseline_gated_metrics"]
+    assert report["baseline_skipped_metrics"]["generation_requirement_coverage"] == {
+        "sample_kind": "gold_requirements",
+        "denominator": 1,
+        "required": 20,
+        "reason": "insufficient_samples",
+    }
     assert "evidence_span_gold_recall_post" not in report["aggregate"]
     assert report["rows"][0]["evidence_span_gold_recall_post"] is None
     assert report["config"]["span_annotated_queries"] == 0
@@ -1044,7 +1223,7 @@ def test_retrieve_result_fails_closed_before_verifier_when_pack_is_over_budget(
     assert len(result["evidence_pack_context_items"]) == 2
 
 
-# Pack 容量与覆盖变化是诊断数据，报告应保留但不得自动进入历史 baseline gate。
+# Pack/span 指标保留诊断值；标注分母不足时不得自动进入历史 baseline gate。
 def test_run_eval_reports_pack_diagnostics_without_baseline_gating(monkeypatch):
     def fake_retrieve(
         query,
@@ -1120,26 +1299,26 @@ def test_run_eval_reports_pack_diagnostics_without_baseline_gating(monkeypatch):
         }
 
     monkeypatch.setattr(eval_retrieval, "retrieve_result", fake_retrieve)
+    items = [
+        {
+            "query": "比较两项要求",
+            "expected_sources": ["policy.pdf"],
+            "gold_requirements": [
+                {
+                    "requirement_id": "r1",
+                    "acceptable_chunk_ids": ["kept"],
+                    "acceptable_spans": [{"chunk_id": "kept", "start": 10, "end": 30}],
+                },
+                {
+                    "requirement_id": "r2",
+                    "acceptable_chunk_ids": ["dropped"],
+                },
+            ],
+            "hard_negative_chunk_ids": ["noise"],
+        }
+    ]
     report = eval_retrieval.run_eval(
-        [
-            {
-                "query": "比较两项要求",
-                "expected_sources": ["policy.pdf"],
-                "gold_requirements": [
-                    {
-                        "requirement_id": "r1",
-                        "acceptable_chunk_ids": ["kept"],
-                        "acceptable_spans": [
-                            {"chunk_id": "kept", "start": 10, "end": 30}
-                        ],
-                    },
-                    {
-                        "requirement_id": "r2",
-                        "acceptable_chunk_ids": ["dropped"],
-                    },
-                ],
-            }
-        ],
+        items,
         [1, 2],
         False,
     )
@@ -1185,3 +1364,24 @@ def test_run_eval_reports_pack_diagnostics_without_baseline_gating(monkeypatch):
         metric.startswith("evidence_span_")
         for metric in report["baseline_gated_metrics"]
     )
+
+    mature_report = eval_retrieval.run_eval(
+        items,
+        [1, 2],
+        False,
+        evidence_metric_minimum_samples={
+            "gold_requirements": 1,
+            "chunk_gold": 1,
+            "span_gold": 1,
+            "hard_negatives": 1,
+        },
+    )
+    mature_metrics = set(mature_report["baseline_gated_metrics"])
+    assert "all_requirements_covered@2" in mature_metrics
+    assert "chunk_precision@2" in mature_metrics
+    assert "hard_negative_rejection@2" in mature_metrics
+    assert "generation_requirement_coverage" in mature_metrics
+    assert "evidence_pack_requirement_coverage_post" in mature_metrics
+    assert "evidence_span_gold_recall_post" in mature_metrics
+    assert "evidence_pack_requirement_coverage_pre" not in mature_metrics
+    assert "evidence_span_gold_recall_pre" not in mature_metrics

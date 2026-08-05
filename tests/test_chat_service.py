@@ -29,6 +29,29 @@ def _doc() -> dict:
     }
 
 
+def _public_ledger(answer: str) -> list[dict]:
+    citation = "[a.pdf:P1]"
+    start = answer.index(citation)
+    return [
+        {
+            "evidence_id": "E001",
+            "chunk_id": "chunk:a:1",
+            "source_type": "document",
+            "source": "a.pdf",
+            "page": 1,
+            "span_start": 0,
+            "span_end": 5,
+            "occurrences": [
+                {
+                    "index": 0,
+                    "answer_start": start,
+                    "answer_end": start + len(citation),
+                }
+            ],
+        }
+    ]
+
+
 # 定义假应用数据结构。
 class FakeApp:
     # 流式返回结果。
@@ -68,11 +91,12 @@ class FakeApp:
             "updates",
             {
                 "qa_subgraph": {
-                    "answer": "需要满足报名要求。[a.pdf:P1]",
+                    "answer": (answer := "需要满足报名要求。[a.pdf:P1]"),
                     "critique": "",
                     "reranked_docs": [_doc()],
                     "sources": [_doc()["meta"]],
                     "evidence": [{"chunk_id": "chunk:a:1", "source": "a.pdf"}],
+                    "citation_ledger": _public_ledger(answer),
                 }
             },
         )
@@ -271,6 +295,49 @@ def test_run_chat_emits_evidence_rejected_event(monkeypatch):
     assert events[-1].payload["result"].answer == NO_RELEVANT_CONTENT_ANSWER
 
 
+class EvidenceReasonWithEidApp(EvidenceRejectedApp):
+    def stream(self, initial_state, config, stream_mode, subgraphs):
+        for namespace, mode, data in super().stream(
+            initial_state, config, stream_mode, subgraphs
+        ):
+            if "evidence_verify_node" in data:
+                verify_output = data["evidence_verify_node"]
+                verify_output["evidence_verification_reason"] = (
+                    "证据 [E001] 未覆盖报销比例"
+                )
+                verify_output["evidence_requirement_assessments"] = [
+                    {
+                        "requirement_id": "r1",
+                        "supported": False,
+                        "reason": "要求 r1 在 [E001] 中缺少明确数值",
+                    }
+                ]
+            yield namespace, mode, data
+
+
+def test_evidence_verification_event_hides_internal_eids(monkeypatch):
+    monkeypatch.setattr(chat_service, "app", EvidenceReasonWithEidApp())
+    monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
+    monkeypatch.setattr(chat_service, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(chat_service, "export_trace", lambda **kwargs: None)
+
+    events = list(chat_service.run_chat("kb", "报销比例是多少", is_local=False))
+
+    rejected = next(event for event in events if event.type == "evidence_rejected")
+    assert "[E001]" not in str(rejected.payload)
+    assert rejected.payload["reason"] == ("证据校验已完成，内部证据标识已隐藏。")
+    assert rejected.payload["requirement_assessments"][0]["reason"] == (
+        "证据校验已完成，内部证据标识已隐藏。"
+    )
+    assert chat_service._public_verification_reason("证据 E001 不足") == (
+        "证据校验已完成，内部证据标识已隐藏。"
+    )
+    assert chat_service._public_verification_reason("证据 [E-ID:002] 不足") == (
+        "证据校验已完成，内部证据标识已隐藏。"
+    )
+    assert chat_service._public_verification_reason("普通校验原因") == "普通校验原因"
+
+
 # 补检索中的低置信度不应提前发终态拒答，且 retry 事件与 trace 步骤各出现一次。
 class AdaptiveRetryApp:
     def stream(self, initial_state, config, stream_mode, subgraphs):
@@ -402,6 +469,65 @@ def test_stream_interrupt_after_retry_does_not_emit_empty_final(monkeypatch):
     ]
     assert exported[0]["status"] == "failed"
     assert exported[0]["execution_status"] == "TARGET_ERROR"
+
+
+# 模型流已有候选 token、图却未落地最终答案时，不能伪装成空成功结果。
+class BufferedWithoutFinalAnswerApp:
+    def stream(self, initial_state, config, stream_mode, subgraphs):
+        class CandidateMessage:
+            content = "候选答案。[E001]"
+
+        yield (
+            (),
+            "updates",
+            {"intent_router": {"task_type": "qa", "router_reason": "文档问答"}},
+        )
+        yield (("qa_subgraph",), "messages", CandidateMessage())
+
+
+def test_buffered_tokens_without_final_answer_emit_runtime_error(monkeypatch):
+    settings = Settings(_env_file=None, claim_verification_enabled=False)
+    exported = []
+    monkeypatch.setattr(chat_service, "app", BufferedWithoutFinalAnswerApp())
+    monkeypatch.setattr(chat_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
+    monkeypatch.setattr(chat_service, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        chat_service, "export_trace", lambda **kwargs: exported.append(kwargs)
+    )
+
+    events = list(chat_service.run_chat("kb", "报名要求是什么", is_local=False))
+
+    assert [event.type for event in events] == [
+        "request_started",
+        "router_decided",
+        "error",
+    ]
+    error = events[-1].payload
+    assert error["stage"] == "runtime"
+    assert error["error_class"] == "RuntimeError"
+    assert "no releasable final answer" in error["message"]
+    assert not any(event.type in {"token", "final"} for event in events)
+    assert exported[0]["status"] == "failed"
+    assert exported[0]["execution_status"] == "TARGET_ERROR"
+    assert exported[0]["error"]["stage"] == "runtime"
+    assert exported[0]["steps"][-1]["node_name"] == ("runtime.missing_final_answer")
+
+
+def test_buffered_tokens_without_final_answer_raise_in_sync_mode(monkeypatch):
+    settings = Settings(_env_file=None, claim_verification_enabled=False)
+    monkeypatch.setattr(chat_service, "app", BufferedWithoutFinalAnswerApp())
+    monkeypatch.setattr(chat_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
+    monkeypatch.setattr(chat_service, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(chat_service, "export_trace", lambda **kwargs: None)
+
+    with pytest.raises(ChatServiceError) as excinfo:
+        run_chat_sync("kb", "报名要求是什么", is_local=False)
+
+    assert excinfo.value.stage == "runtime"
+    assert excinfo.value.error_class == "RuntimeError"
+    assert "no releasable final answer" in excinfo.value.message
 
 
 # 路由后流式迭代中途崩溃，父子图始终未产出可信输出。
@@ -540,13 +666,14 @@ class ClaimGateStreamingApp:
             "updates",
             {
                 "qa_subgraph": {
-                    "answer": "最终验证答案。[a.pdf:P1]",
+                    "answer": (answer := "最终验证答案。[a.pdf:P1]"),
                     "critique": "",
                     "reranked_docs": [_doc()],
                     "sources": [_doc()["meta"]],
                     "evidence": [
                         {"chunk_id": "chunk:a:1", "source": "a.pdf", "page": 1}
                     ],
+                    "citation_ledger": _public_ledger(answer),
                 }
             },
         )
@@ -593,7 +720,7 @@ class ClaimGateCitationRetryApp:
             "updates",
             {
                 "citation_node": {
-                    "critique": "页码不存在",
+                    "critique": "页码不存在，内部证据 [E999] 无效",
                     "iteration_count": 2,
                     "max_iteration_count": 2,
                 }
@@ -605,6 +732,7 @@ class ClaimGateCitationRetryApp:
             "reranked_docs": [_doc()],
             "sources": [_doc()["meta"]],
             "evidence": [{"chunk_id": "chunk:a:1", "source": "a.pdf", "page": 1}],
+            "citation_ledger": _public_ledger("最终验证答案。[a.pdf:P1]"),
         }
         yield ((), "updates", {"qa_subgraph": final_output})
         yield (
@@ -622,6 +750,191 @@ class ClaimGateCitationRetryApp:
                 }
             },
         )
+
+
+class CitationLedgerStreamingApp:
+    def stream(self, initial_state, config, stream_mode, subgraphs):
+        class CandidateMessage:
+            content = "候选答案。[E001]"
+
+        public_ledger = [
+            {
+                "evidence_id": "E001",
+                "chunk_id": "chunk:a:1",
+                "source_type": "document",
+                "source": "a.pdf",
+                "page": 1,
+                "page_start": 1,
+                "page_end": 1,
+                "span_start": 0,
+                "span_end": 5,
+                "occurrences": [{"index": 0, "answer_start": 5, "answer_end": 15}],
+            }
+        ]
+        yield (
+            (),
+            "updates",
+            {"intent_router": {"task_type": "qa", "router_reason": "文档问答"}},
+        )
+        yield (("qa_subgraph",), "messages", CandidateMessage())
+        yield (
+            (),
+            "updates",
+            {
+                "qa_subgraph": {
+                    "answer": "候选答案。[E001]",
+                    "critique": "",
+                    "reranked_docs": [_doc()],
+                    "sources": [_doc()["meta"]],
+                    "evidence": [
+                        {"chunk_id": "chunk:a:1", "source": "a.pdf", "page": 1}
+                    ],
+                    "evidence_ledger": [
+                        {
+                            "evidence_id": "E001",
+                            "chunk_id": "chunk:a:1",
+                            "display_citation": "[a.pdf:P1]",
+                        }
+                    ],
+                }
+            },
+        )
+        yield (
+            (),
+            "updates",
+            {
+                "claim_audit_node": {
+                    "claim_audit_required": True,
+                    "claim_audit_passed": True,
+                    "claim_audit": {
+                        "status": "passed",
+                        "counts": {"claim_count": 1, "supported": 1},
+                        "metrics": {"claim_support_rate": 1.0},
+                    },
+                }
+            },
+        )
+        yield (
+            (),
+            "updates",
+            {
+                "citation_finalize_node": {
+                    "answer": "候选答案。[a.pdf:P1]",
+                    "citation_ledger": public_ledger,
+                }
+            },
+        )
+
+
+@pytest.mark.parametrize("claim_gate_enabled", [False, True])
+def test_audited_stream_buffers_eids_until_citation_finalizer(
+    monkeypatch, claim_gate_enabled
+):
+    settings = Settings(
+        _env_file=None,
+        claim_verification_enabled=claim_gate_enabled,
+    )
+    exported = []
+    monkeypatch.setattr(chat_service, "app", CitationLedgerStreamingApp())
+    monkeypatch.setattr(chat_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
+    monkeypatch.setattr(chat_service, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        chat_service, "export_trace", lambda **kwargs: exported.append(kwargs)
+    )
+
+    events = list(chat_service.run_chat("kb", "报名要求是什么", is_local=False))
+
+    token_events = [event for event in events if event.type == "token"]
+    assert [event.payload["content"] for event in token_events] == [
+        "候选答案。[a.pdf:P1]"
+    ]
+    assert all("[E001]" not in event.payload["content"] for event in token_events)
+    if claim_gate_enabled:
+        assert token_events[0].payload["verified"] is True
+    else:
+        assert "verified" not in token_events[0].payload
+
+    result = next(event.payload["result"] for event in events if event.type == "final")
+    assert result.answer == "候选答案。[a.pdf:P1]"
+    assert result.citation_ledger[0]["chunk_id"] == "chunk:a:1"
+    assert exported[0]["output_payload"]["answer"] == "候选答案。[a.pdf:P1]"
+    assert exported[0]["output_payload"]["citation_ledger"] == (result.citation_ledger)
+    assert "citation_finalize_node" in [step["node_name"] for step in result.steps]
+
+
+class MissingCitationFinalizerApp:
+    def stream(self, initial_state, config, stream_mode, subgraphs):
+        class CandidateMessage:
+            content = "不能发布。[E001]"
+
+        yield (
+            (),
+            "updates",
+            {"intent_router": {"task_type": "qa", "router_reason": "文档问答"}},
+        )
+        yield (("qa_subgraph",), "messages", CandidateMessage())
+        yield (
+            (),
+            "updates",
+            {
+                "qa_subgraph": {
+                    "answer": "不能发布。[E001]",
+                    "critique": "",
+                    "reranked_docs": [_doc()],
+                    "citation_ledger": [{"evidence_id": "E001"}],
+                }
+            },
+        )
+
+
+def test_audited_stream_fails_closed_when_finalizer_leaves_internal_eid(monkeypatch):
+    settings = Settings(_env_file=None, claim_verification_enabled=False)
+    monkeypatch.setattr(chat_service, "app", MissingCitationFinalizerApp())
+    monkeypatch.setattr(chat_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
+    monkeypatch.setattr(chat_service, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(chat_service, "export_trace", lambda **kwargs: None)
+
+    events = list(chat_service.run_chat("kb", "报名要求是什么", is_local=False))
+
+    token = next(event for event in events if event.type == "token")
+    assert token.payload["content"] == CLAIM_AUDIT_BLOCKED_ANSWER
+    assert "[E001]" not in token.payload["content"]
+    result = next(event.payload["result"] for event in events if event.type == "final")
+    assert result.answer == CLAIM_AUDIT_BLOCKED_ANSWER
+    assert result.citation_ledger == []
+    assert result.raw_output["claim_audit"]["reason_code"] == (
+        "citation_finalize_incomplete"
+    )
+
+
+@pytest.mark.parametrize(
+    "citation",
+    [
+        "[e001]",
+        "［Ｅ００１］",
+        "[E 001]",
+        "[E-002]",
+        "[E-ID:002]",
+        "[E001,E002]",
+        "[E001.]",
+        "[E-002",
+        "[E001：P1]",
+        "［Ｅ００１：Ｐ１］",
+        "[E001:P1",
+        "[[E001]]",
+        "[prefix [E001]]",
+    ],
+)
+def test_release_guard_rejects_malformed_internal_evidence_ids(citation):
+    output = {"answer": f"不能发布。{citation}", "citation_ledger": []}
+
+    blocked = chat_service._enforce_citation_finalize_release("qa", output)
+
+    assert blocked is True
+    assert output["answer"] == CLAIM_AUDIT_BLOCKED_ANSWER
+    assert output["citation_ledger"] == []
 
 
 def test_claim_gate_hides_candidate_token_and_emits_only_verified_answer(monkeypatch):
@@ -650,8 +963,14 @@ def test_claim_gate_hides_candidate_token_and_emits_only_verified_answer(monkeyp
     assert events[-1].payload["result"].answer == "最终验证答案。[a.pdf:P1]"
 
 
-def test_claim_gate_hides_candidate_from_citation_progress_event(monkeypatch):
-    settings = Settings(_env_file=None, claim_verification_enabled=True)
+@pytest.mark.parametrize("claim_gate_enabled", [False, True])
+def test_audited_tasks_hide_internal_critique_from_citation_progress_event(
+    monkeypatch, claim_gate_enabled
+):
+    settings = Settings(
+        _env_file=None,
+        claim_verification_enabled=claim_gate_enabled,
+    )
     monkeypatch.setattr(chat_service, "app", ClaimGateCitationRetryApp())
     monkeypatch.setattr(chat_service, "get_settings", lambda: settings)
     monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
@@ -663,13 +982,208 @@ def test_claim_gate_hides_candidate_from_citation_progress_event(monkeypatch):
     rejected = next(event for event in events if event.type == "citation_rejected")
     assert "round_answer" not in rejected.payload
     assert "未验证" not in str(rejected.payload)
+    assert "[E999]" not in str(rejected.payload)
+    assert "页码不存在" not in str(rejected.payload)
+    assert rejected.payload["critique"] == "引用格式未通过，正在重新生成。"
     assert rejected.payload["will_retry"] is True
+
+
+class CompareCitationRetryApp:
+    def stream(self, initial_state, config, stream_mode, subgraphs):
+        yield (
+            (),
+            "updates",
+            {"intent_router": {"task_type": "compare", "router_reason": "文档对比"}},
+        )
+        yield (
+            ("compare_subgraph",),
+            "updates",
+            {
+                "compare_citation_node": {
+                    "critique": "内部绑定 [E777] 失败",
+                }
+            },
+        )
+        answer = "对比结论。[a.pdf:P1]"
+        yield (
+            (),
+            "updates",
+            {
+                "compare_subgraph": {
+                    "answer": answer,
+                    "critique": "",
+                    "sources": [_doc()["meta"]],
+                    "evidence": [
+                        {"chunk_id": "chunk:a:1", "source": "a.pdf", "page": 1}
+                    ],
+                    "citation_ledger": _public_ledger(answer),
+                }
+            },
+        )
+
+
+def test_compare_citation_progress_hides_internal_critique(monkeypatch):
+    settings = Settings(_env_file=None, claim_verification_enabled=False)
+    monkeypatch.setattr(chat_service, "app", CompareCitationRetryApp())
+    monkeypatch.setattr(chat_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(chat_service, "configure_logging", lambda: None)
+    monkeypatch.setattr(chat_service, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(chat_service, "export_trace", lambda **kwargs: None)
+
+    events = list(chat_service.run_chat("kb", "对比文档", is_local=False))
+
+    rejected = next(
+        event for event in events if event.type == "compare_citation_rejected"
+    )
+    assert rejected.payload == {"critique": "引用格式未通过，正在重新生成。"}
+    assert "[E777]" not in str(rejected.payload)
+
+
+def test_delivery_preserves_answer_offsets_and_sanitizes_audited_critique():
+    answer = "  结论。[a.pdf:P1]"
+    output = {
+        "answer": answer,
+        "critique": "内部证据 [E999] 无效",
+        "evidence": [{"chunk_id": "chunk:a:1", "source": "a.pdf", "page": 1}],
+        "citation_ledger": _public_ledger(answer),
+    }
+
+    assert chat_service._enforce_citation_finalize_release("qa", output) is False
+    result = chat_service._build_result("qa", output, "问题", "trace", [], None)
+
+    occurrence = result.citation_ledger[0]["occurrences"][0]
+    assert result.answer == answer
+    assert result.answer[occurrence["answer_start"] : occurrence["answer_end"]] == (
+        "[a.pdf:P1]"
+    )
+    assert result.critique == "回答未通过引用或声明证据校验。"
+    assert "[E999]" not in result.critique
+
+
+def test_release_guard_uses_global_registry_for_repaired_citation():
+    answer = "补充检索后的结论。[b.pdf:P2]"
+    citation = "[b.pdf:P2]"
+    citation_start = answer.index(citation)
+    output = {
+        "answer": answer,
+        # 修复前的公开 evidence 不包含实际引用条目。
+        "evidence": [
+            {
+                "evidence_id": "E001",
+                "chunk_id": "chunk:a:1",
+                "source": "a.pdf",
+                "page": 1,
+                "span_start": 0,
+                "span_end": 8,
+            }
+        ],
+        "evidence_ledger": [
+            {
+                "evidence_id": "E001",
+                "chunk_id": "chunk:a:1",
+                "source_type": "document",
+                "source": "a.pdf",
+                "page": 1,
+                "span_start": 0,
+                "span_end": 8,
+            },
+            {
+                "evidence_id": "E002",
+                "chunk_id": "chunk:b:2",
+                "source_type": "document",
+                "source": "b.pdf",
+                "page": 2,
+                "span_start": 4,
+                "span_end": 18,
+            },
+        ],
+        "citation_ledger": [
+            {
+                "evidence_id": "E002",
+                "chunk_id": "chunk:b:2",
+                "source_type": "document",
+                "source": "b.pdf",
+                "page": 2,
+                "span_start": 4,
+                "span_end": 18,
+                "occurrences": [
+                    {
+                        "index": 0,
+                        "answer_start": citation_start,
+                        "answer_end": citation_start + len(citation),
+                    }
+                ],
+            }
+        ],
+    }
+
+    blocked = chat_service._enforce_citation_finalize_release("qa", output)
+
+    assert blocked is False
+    assert output["answer"] == answer
+    assert output["citation_ledger"][0]["evidence_id"] == "E002"
+
+
+def test_release_guard_clears_entire_mixed_invalid_public_ledger():
+    first = "[a.pdf:P1]"
+    second = "[b.pdf:P2]"
+    answer = f"结论{first}和{second}"
+    first_start = answer.index(first)
+    second_start = answer.index(second)
+    output = {
+        "answer": answer,
+        "evidence": [
+            {"chunk_id": "c1", "source": "a.pdf", "page": 1},
+            {"chunk_id": "c2", "source": "b.pdf", "page": 2},
+        ],
+        "citation_ledger": [
+            {
+                "evidence_id": "E001",
+                "chunk_id": "c1",
+                "source_type": "document",
+                "source": "a.pdf",
+                "page": 1,
+                "span_start": 0,
+                "span_end": 4,
+                "occurrences": [
+                    {
+                        "index": 0,
+                        "answer_start": first_start,
+                        "answer_end": first_start + len(first),
+                    }
+                ],
+            },
+            {
+                # 第二行有冗余前导零，整表都必须失败关闭。
+                "evidence_id": "E01000",
+                "chunk_id": "c2",
+                "source_type": "document",
+                "source": "b.pdf",
+                "page": 2,
+                "span_start": 0,
+                "span_end": 4,
+                "occurrences": [
+                    {
+                        "index": 1,
+                        "answer_start": second_start,
+                        "answer_end": second_start + len(second),
+                    }
+                ],
+            },
+        ],
+    }
+
+    assert chat_service._enforce_citation_finalize_release("qa", output) is True
+    assert output["answer"] == CLAIM_AUDIT_BLOCKED_ANSWER
+    assert output["citation_ledger"] == []
+    assert output["claim_audit"]["reason_code"] == "citation_ledger_invalid"
 
 
 def test_claim_gate_does_not_release_broad_not_run_reason():
     settings = Settings(_env_file=None, claim_verification_enabled=True)
     output = {
         "answer": "报名截止日期是 9 月 30 日。[a.pdf:P1]",
+        "citation_ledger": [{"evidence_id": "E001"}],
         "claim_audit": {
             "status": "not_run",
             "reason_code": "no_evidence_documents",
@@ -680,6 +1194,7 @@ def test_claim_gate_does_not_release_broad_not_run_reason():
 
     assert blocked is True
     assert output["answer"] == CLAIM_AUDIT_BLOCKED_ANSWER
+    assert output["citation_ledger"] == []
     assert output["claim_audit"]["status"] == "rejected"
 
 

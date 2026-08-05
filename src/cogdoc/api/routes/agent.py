@@ -140,7 +140,7 @@ async def _task_endpoint(
 
 # 运行检索。
 def _run_retrieve(body: RetrieveRequest, *, state_runtime=None) -> list:
-    from cogdoc.graph.subgraphs.qa import RetrieverFactory
+    from cogdoc.service.retriever_factory import RetrieverFactory
     from cogdoc.service.kb_readers import kb_read_lease
     from cogdoc.service.retrieval_pipeline import (
         build_retrieval_queries,

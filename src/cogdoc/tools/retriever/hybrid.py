@@ -2,6 +2,7 @@ from typing import List
 from cogdoc.config.settings import get_settings
 from cogdoc.graph.state import RetrievedDoc
 from cogdoc.tools.retriever.base_retriever import BaseRetriever
+from cogdoc.tools.retriever.scope import RetrievalScope
 from cogdoc.tools.rust_core_loader import ensure_rust_core
 
 
@@ -98,15 +99,28 @@ class HybridRetriever(BaseRetriever):
         return self.bm25_retriever.load_source_chunks(source)
 
     # 检索。
-    def search(self, query: str, top_k: int = 3) -> List[RetrievedDoc]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 3,
+        *,
+        scope: RetrievalScope | None = None,
+    ) -> List[RetrievedDoc]:
         # 两路召回后交给 native RRF 做去重融合。
         self._ensure_servable()
         recall_top_k = top_k * 3  # 扩大召回池提高融合质量
 
-        vector_results = self.vector_retriever.search(
-            query, top_k=recall_top_k
-        )  # 向量召回
-        bm25_results = self.bm25_retriever.search(query, top_k=recall_top_k)  # BM25召回
+        if scope is None:
+            # 不带 scope 时保持旧调用形状，兼容现有自定义 retriever。
+            vector_results = self.vector_retriever.search(query, top_k=recall_top_k)
+            bm25_results = self.bm25_retriever.search(query, top_k=recall_top_k)
+        else:
+            vector_results = self.vector_retriever.search(
+                query, top_k=recall_top_k, scope=scope
+            )
+            bm25_results = self.bm25_retriever.search(
+                query, top_k=recall_top_k, scope=scope
+            )
 
         return rust_core.rrf_fusion_native(
             vector_results, bm25_results, float(self.k), top_k

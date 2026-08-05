@@ -51,6 +51,8 @@ class RetrievalMetrics(TypedDict, total=False):
     matched_queries: List[str]
     matched_channels: List[str]
     matched_requirement_ids: List[str]
+    # 通用 Evidence Unit 命名；迁移期与 matched_requirement_ids 双写。
+    matched_unit_ids: List[str]
     best_query_rank: int
     original_query_hit: bool
     retrieval_round: int
@@ -68,7 +70,10 @@ class RetrievalMetrics(TypedDict, total=False):
     evidence_span_score: float
     evidence_span_matched_terms: List[str]
     evidence_span_matched_requirement_ids: List[str]
+    evidence_span_matched_unit_ids: List[str]
     evidence_span_reason: str
+    # 本次响应内冻结的精确证据身份；只供模型内部引用与审计。
+    evidence_id: str
 
 
 # RetrievedDoc 是检索、重排和生成节点共享的文档结构。
@@ -103,6 +108,7 @@ class AgentStepTrace(TypedDict):
 
 # Evidence 面向前端和审计展示。
 class Evidence(TypedDict, total=False):
+    evidence_id: str
     chunk_id: str
     parent_chunk_id: str
     section_title: str
@@ -120,6 +126,42 @@ class Evidence(TypedDict, total=False):
     rewrite_query: Optional[str]
     text_preview: str
     retrieval: Dict[str, Any]
+
+
+# EvidenceLedgerEntry 是内部精确引用注册表，不含证据正文。
+class EvidenceLedgerEntry(TypedDict, total=False):
+    evidence_id: str
+    chunk_id: str
+    source_type: str
+    knowledge_id: str
+    source: str
+    page: int
+    page_start: int
+    page_end: int
+    span_start: int
+    span_end: int
+    display_citation: str
+
+
+class CitationOccurrence(TypedDict):
+    index: int
+    answer_start: int
+    answer_end: int
+
+
+# CitationLedgerEntry 是可安全返回给 API 的实际引用账本。
+class CitationLedgerEntry(TypedDict, total=False):
+    evidence_id: str
+    chunk_id: str
+    source_type: str
+    knowledge_id: str
+    source: str
+    page: int
+    page_start: int
+    page_end: int
+    span_start: int
+    span_end: int
+    occurrences: List[CitationOccurrence]
 
 
 # EvidenceRequirementPlan 是问题改写阶段生成、服务端分配稳定标识的原子证据需求。
@@ -150,7 +192,11 @@ class SummarySectionResult(TypedDict):
     section_id: str
     title: str
     content: str
+    unit_id: NotRequired[str]
     evidence: NotRequired[List[Evidence]]
+    status: NotRequired[str]
+    failure_stage: NotRequired[str]
+    error_class: NotRequired[str]
 
 
 # CompareDimensionPlan 定义多文档对比的固定维度。
@@ -165,7 +211,11 @@ class CompareCell(TypedDict):
     dimension_id: str
     source: str
     content: str
+    unit_id: NotRequired[str]
     evidence: NotRequired[List[Evidence]]
+    status: NotRequired[str]
+    failure_stage: NotRequired[str]
+    error_class: NotRequired[str]
 
 
 # DocumentProfile 是 Compare 子图里单篇文档的结构化画像。
@@ -247,13 +297,36 @@ class GraphState(TypedDict):
     claim_repair_error: NotRequired[str]
     claim_repair_citation_valid: NotRequired[bool]
     claim_repair_critique: NotRequired[str]
+    # 与最终 answer 摘要及渲染顺序绑定的通用结构化 claim 审计投影。
+    claim_audit_projection: NotRequired[Dict[str, Any]]
     # 仅程序确定性生成的引导/错误答案可携带；原因码与完整答案绑定。
     claim_audit_exemption: NotRequired[Dict[str, str]]
+
+    # evidence_ledger 在最终渲染前保存 response-scoped EID 注册表；
+    # citation_ledger 仅保存最终答案中真实出现的安全公开映射。
+    evidence_ledger: NotRequired[List[EvidenceLedgerEntry]]
+    citation_ledger: NotRequired[List[CitationLedgerEntry]]
 
     answer: NotRequired[str]
     critique: NotRequired[str]
     sources: NotRequired[List[DocMeta]]
     evidence: NotRequired[List[Evidence]]
+    # QA/Summary/Compare 共享的生成前证据单元计划、闭集和聚合指标。
+    evidence_units: NotRequired[List[Dict[str, Any]]]
+    evidence_unit_results: NotRequired[List[Dict[str, Any]]]
+    evidence_unit_metrics: NotRequired[Dict[str, Any]]
+    evidence_unit_retry_history: NotRequired[List[List[str]]]
+    evidence_unit_assessments: NotRequired[List[Dict[str, Any]]]
+    evidence_unit_verification_metrics: NotRequired[Dict[str, Any]]
+    evidence_unit_verification_protocol_errors: NotRequired[List[str]]
+    evidence_unit_verifier_error: NotRequired[str]
+    evidence_unit_gate_decisions: NotRequired[List[Dict[str, Any]]]
+    evidence_unit_generate_ids: NotRequired[List[str]]
+    evidence_unit_retry_ids: NotRequired[List[str]]
+    evidence_unit_terminal_ids: NotRequired[List[str]]
+    evidence_unit_batch_can_generate: NotRequired[bool]
+    evidence_unit_gate_metrics: NotRequired[Dict[str, Any]]
+    evidence_unit_adapter_outcome: NotRequired[str]
     summary_source: NotRequired[str]
     summary_docs: NotRequired[List[RetrievedDoc]]
     summary_section_plans: NotRequired[List[SummarySectionPlan]]
