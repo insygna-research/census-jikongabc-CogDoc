@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import math
 from collections.abc import Mapping
 from enum import Enum
@@ -56,6 +58,9 @@ class ErrorCode(str, Enum):
     KB_CLEANUP_FAILED = "KB_CLEANUP_FAILED"
     TRACE_NOT_FOUND = "TRACE_NOT_FOUND"
     KNOWLEDGE_NOT_FOUND = "KNOWLEDGE_NOT_FOUND"
+    RESEARCH_JOB_NOT_FOUND = "RESEARCH_JOB_NOT_FOUND"
+    RESEARCH_JOB_REVISION_CONFLICT = "RESEARCH_JOB_REVISION_CONFLICT"
+    RESEARCH_JOB_STATE_CONFLICT = "RESEARCH_JOB_STATE_CONFLICT"
 
 
 # 带查询和知识库标识的请求基类。
@@ -283,6 +288,209 @@ class KnowledgeBase(ApiModel):
     document_count: int = 0
     tenant_id: str = "default"
     owner_id: str = "default"
+
+
+class ResearchJobCreate(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    kb_id: str = Field(min_length=1, max_length=56)
+    objective: str = Field(min_length=1, max_length=4000)
+    title: str = Field(default="", max_length=160)
+    section_titles: list[str] = Field(default_factory=list, max_length=12)
+
+    @field_validator("kb_id", "objective", "title")
+    @classmethod
+    def _strip_research_text(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("kb_id")
+    @classmethod
+    def _require_research_kb_id(cls, value: str) -> str:
+        if not value:
+            raise ValueError("kb_id must not be blank")
+        return value
+
+    @field_validator("objective")
+    @classmethod
+    def _require_objective(cls, value: str) -> str:
+        if not value:
+            raise ValueError("objective must not be blank")
+        return value
+
+    @field_validator("section_titles")
+    @classmethod
+    def _normalize_section_titles(cls, values: list[str]) -> list[str]:
+        normalized = [" ".join(value.split()) for value in values]
+        if any(not value for value in normalized):
+            raise ValueError("section titles must not be blank")
+        if len({value.casefold() for value in normalized}) != len(normalized):
+            raise ValueError("section titles must be unique")
+        return normalized
+
+
+class ResearchPlanSectionInput(ApiModel):
+    title: str = Field(min_length=1, max_length=160)
+    research_question: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("title", "research_question")
+    @classmethod
+    def _strip_plan_text(cls, value: str) -> str:
+        stripped = " ".join(value.split())
+        if not stripped:
+            raise ValueError("must not be blank")
+        return stripped
+
+
+class ResearchPlanUpdate(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    expected_revision: int = Field(ge=1, strict=True)
+    sections: list[ResearchPlanSectionInput] = Field(min_length=1, max_length=12)
+
+
+class ResearchReviewDecision(ApiModel):
+    section_id: str = Field(min_length=1, max_length=64)
+    decision: Literal["approved", "accepted_gap", "changes_requested"]
+    note: str = Field(default="", max_length=2000)
+
+    @field_validator("section_id", "note")
+    @classmethod
+    def _strip_review_text(cls, value: str) -> str:
+        return " ".join(value.split())
+
+    @model_validator(mode="after")
+    def _require_change_note(self):
+        if self.decision == "changes_requested" and not self.note:
+            raise ValueError("changes_requested review requires a non-blank note")
+        return self
+
+
+class ResearchReportReviewUpdate(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    expected_revision: int = Field(ge=1, strict=True)
+    decisions: list[ResearchReviewDecision] = Field(min_length=1, max_length=12)
+
+
+class ResearchReportPublishRequest(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    expected_revision: int = Field(ge=1, strict=True)
+
+
+class ResearchPlanSection(ApiModel):
+    section_id: str
+    position: int = Field(ge=1, strict=True)
+    title: str
+    research_question: str
+    status: Literal["pending", "running", "completed", "failed"] = "pending"
+    evidence_status: Literal[
+        "unsearched", "missing", "partial", "supported", "contradictory"
+    ] = "unsearched"
+    evidence_requirement_ids: list[str] = Field(default_factory=list)
+    evidence: list["ResearchEvidenceItem"] = Field(default_factory=list)
+    execution_metrics: dict[str, Any] = Field(default_factory=dict)
+    citation_ledger: list[CitationLedgerEntry] = Field(default_factory=list)
+    revision_instruction: str = ""
+    verification_status: str = ""
+    verification_reason_code: str = ""
+    generation_status: str = ""
+    content: str = ""
+    review_status: Literal[
+        "not_started",
+        "pending",
+        "approved",
+        "accepted_gap",
+        "changes_requested",
+    ] = "not_started"
+    review_note: str = ""
+    reviewed_at: str | None = None
+    error: str = ""
+
+
+class ResearchEvidenceItem(ApiModel):
+    chunk_id: str = ""
+    source_type: str = "document"
+    knowledge_id: str = ""
+    source: str = ""
+    page: int | None = None
+    page_start: int | None = None
+    page_end: int | None = None
+    section_title: str = ""
+    text_preview: str = ""
+    search_channel: str = ""
+    rerank_score: float | int | None = None
+    rrf_score: float | int | None = None
+
+
+class ResearchReportArtifact(ApiModel):
+    format: Literal["markdown"] = "markdown"
+    content: str
+    citation_ledger: list[CitationLedgerEntry] = Field(default_factory=list)
+    verification_metrics: dict[str, Any] = Field(default_factory=dict)
+    version: int = Field(default=1, ge=1, strict=True)
+    generated_at: str
+    published_at: str | None = None
+
+
+class ResearchReportVersion(ApiModel):
+    version: int = Field(ge=1, strict=True)
+    report_status: str
+    review_status: str
+    archived_at: str
+    report: ResearchReportArtifact
+
+
+class ResearchJob(ApiModel):
+    job_id: str
+    kb_id: str
+    title: str
+    objective: str
+    status: Literal[
+        "planned",
+        "running",
+        "paused",
+        "evidence_ready",
+        "generating",
+        "completed",
+        "failed",
+        "cancelled",
+    ]
+    revision: int = Field(ge=1, strict=True)
+    created_at: str
+    updated_at: str
+    sections: list[ResearchPlanSection]
+    execution_id: str = ""
+    started_at: str | None = None
+    evidence_completed_at: str | None = None
+    report_status: Literal[
+        "not_started",
+        "generating",
+        "ready",
+        "ready_with_gaps",
+        "published",
+        "failed",
+    ] = "not_started"
+    report_execution_id: str = ""
+    report_completed_at: str | None = None
+    report: ResearchReportArtifact | None = None
+    report_version: int = Field(default=0, ge=0, strict=True)
+    report_history: list[ResearchReportVersion] = Field(default_factory=list)
+    review_status: Literal[
+        "not_started", "pending", "approved", "changes_requested", "published"
+    ] = "not_started"
+    review_history: list[dict[str, Any]] = Field(default_factory=list)
+    published_report: ResearchReportArtifact | None = None
+    published_at: str | None = None
+    regeneration_section_ids: list[str] = Field(default_factory=list)
+    last_regenerated_section_ids: list[str] = Field(default_factory=list)
+    error: str = ""
+
+
+class ResearchJobResponse(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    job: ResearchJob
+
+
+class ResearchJobListResponse(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    jobs: list[ResearchJob] = Field(default_factory=list)
 
 
 # 知识库内的一篇文档，来自清单。

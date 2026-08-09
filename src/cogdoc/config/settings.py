@@ -64,6 +64,18 @@ class Settings(BaseSettings):
     cogdoc_offload_workers: int = Field(
         default=2, validation_alias="COGDOC_OFFLOAD_WORKERS"
     )
+    cogdoc_research_workers: int = Field(
+        default=2,
+        ge=1,
+        le=16,
+        validation_alias="COGDOC_RESEARCH_WORKERS",
+    )
+    cogdoc_research_retrieval_top_k: int = Field(
+        default=8,
+        ge=1,
+        le=50,
+        validation_alias="COGDOC_RESEARCH_RETRIEVAL_TOP_K",
+    )
 
     # 分层记忆预算：展示历史不受这些限制，只有送入模型的工作上下文会被裁剪。
     memory_short_message_limit: int = Field(
@@ -652,6 +664,10 @@ class Settings(BaseSettings):
     @property
     def retrieval_eval_drafts_path(self) -> str:
         return str(self.data_dir / "feedback" / "retrieval_eval_drafts.jsonl")
+
+    @property
+    def research_jobs_path(self) -> str:
+        return str(self.data_dir / "research" / "research_jobs.json")
 
     # 返回根目录。
     @property

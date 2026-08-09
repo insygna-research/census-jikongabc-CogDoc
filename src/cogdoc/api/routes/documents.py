@@ -58,6 +58,7 @@ def _delete_kb(
     feedback_analysis_store=None,
     retrieval_feedback_store=None,
     retrieval_eval_draft_store=None,
+    research_job_store=None,
 ):
     # registry 删除与落 tombstone 必须与 create 在同一把锁内原子完成。
     try:
@@ -74,6 +75,7 @@ def _delete_kb(
                         feedback_analysis_store,
                         retrieval_feedback_store,
                         retrieval_eval_draft_store,
+                        research_job_store,
                     ),
                 )
             except Exception as exc:
@@ -201,6 +203,7 @@ async def delete_knowledge_base(kb_id: str, request: Request):
             request.app.state.feedback_analysis_store,
             request.app.state.retrieval_feedback_store,
             request.app.state.retrieval_eval_draft_store,
+            request.app.state.research_job_store,
         )
     except KBCleanupError:
         # 清理不完整：registry 与 manifest 均保留，返回可重试错误而非误报删除成功。

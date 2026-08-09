@@ -13,6 +13,7 @@ from cogdoc.api.retrieval_eval_draft_store import (
     RetrievalEvalDraftStore,
     SqliteRetrievalEvalDraftStore,
 )
+from cogdoc.api.research_job_store import ResearchJobStore, SqliteResearchJobStore
 from cogdoc.tools.eval.retrieval_eval_drafts import (
     EvidenceUnitDraft,
     EvidenceUnitTask,
@@ -113,6 +114,11 @@ def _seed_jsonl_state(data_dir: Path) -> None:
         )
     )
     draft_store.close()
+    ResearchJobStore(str(data_dir / "research" / "research_jobs.json")).create(
+        kb_id="kb",
+        objective="形成迁移后的研究报告",
+        section_titles=["证据", "结论"],
+    )
 
 
 def test_state_migration_is_atomic_verifiable_and_idempotent(tmp_path):
@@ -153,6 +159,7 @@ def test_state_migration_is_atomic_verifiable_and_idempotent(tmp_path):
         "derived_knowledge": 1,
         "retrieval_feedback": 1,
         "retrieval_eval_drafts": 1,
+        "research_jobs": 1,
     }
 
     connection = sqlite3.connect(state_db)
@@ -169,6 +176,9 @@ def test_state_migration_is_atomic_verifiable_and_idempotent(tmp_path):
     assert len(migrated_drafts) == 1
     assert migrated_drafts[0]["status"] == "pending"
     assert migrated_drafts[0]["units"][0]["task_kind"] == "summary_section"
+    migrated_research = SqliteResearchJobStore(str(state_db)).export_records()
+    assert len(migrated_research) == 1
+    assert migrated_research[0]["objective"] == "形成迁移后的研究报告"
 
     verified = migrate_state(data_dir, verify_only=True)
     assert verified["operation"] == "verify"
@@ -180,5 +190,5 @@ def test_state_migration_is_atomic_verifiable_and_idempotent(tmp_path):
     assert (
         connection.execute("SELECT COUNT(*) FROM state_migrations").fetchone()[0] == 1
     )
-    assert connection.execute("SELECT version FROM state_migrations").fetchone()[0] == 2
+    assert connection.execute("SELECT version FROM state_migrations").fetchone()[0] == 3
     connection.close()

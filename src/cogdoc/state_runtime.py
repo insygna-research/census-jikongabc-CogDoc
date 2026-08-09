@@ -21,6 +21,7 @@ from cogdoc.api.retrieval_eval_draft_store import (
     RetrievalEvalDraftStore,
     SqliteRetrievalEvalDraftStore,
 )
+from cogdoc.api.research_job_store import ResearchJobStore, SqliteResearchJobStore
 from cogdoc.config.settings import Settings, get_settings
 
 
@@ -37,6 +38,7 @@ class StateRuntime:
     # Appended after the legacy positional fields to preserve direct-construction
     # compatibility. Runtimes from ``from_settings`` always own a real store.
     retrieval_eval_draft_store: RetrievalEvalDraftStore | None = None
+    research_job_store: ResearchJobStore | None = None
     _derived_knowledge_index: Any = field(default=None, init=False, repr=False)
     _derived_knowledge_retriever: Any = field(default=None, init=False, repr=False)
     _index_lock: Lock = field(default_factory=Lock, init=False, repr=False)
@@ -70,6 +72,7 @@ class StateRuntime:
         knowledge_store: DerivedKnowledgeStore | None = None,
         retrieval_feedback_store: RetrievalFeedbackStore | None = None,
         retrieval_eval_draft_store: RetrievalEvalDraftStore | None = None,
+        research_job_store: ResearchJobStore | None = None,
     ) -> "StateRuntime":
         settings = settings or get_settings()
         return cls(
@@ -97,6 +100,11 @@ class StateRuntime:
                 retrieval_eval_draft_store
                 if retrieval_eval_draft_store is not None
                 else cls.default_retrieval_eval_draft_store(settings)
+            ),
+            research_job_store=(
+                research_job_store
+                if research_job_store is not None
+                else cls.default_research_job_store(settings)
             ),
             derived_knowledge_index_persist_directory=settings.chroma_persist_dir,
             derived_knowledge_index_state_directory=str(
@@ -158,6 +166,15 @@ class StateRuntime:
         if settings.cogdoc_state_backend == "sqlite":
             return SqliteRetrievalEvalDraftStore(settings.state_db_path)
         return RetrievalEvalDraftStore(settings.retrieval_eval_drafts_path)
+
+    @staticmethod
+    def default_research_job_store(
+        settings: Settings | None = None,
+    ) -> ResearchJobStore:
+        settings = settings or get_settings()
+        if settings.cogdoc_state_backend == "sqlite":
+            return SqliteResearchJobStore(settings.state_db_path)
+        return ResearchJobStore(settings.research_jobs_path)
 
     @property
     def derived_knowledge_index(self):
@@ -247,6 +264,7 @@ class StateRuntime:
                 self.knowledge_store,
                 self.retrieval_feedback_store,
                 self.retrieval_eval_draft_store,
+                self.research_job_store,
             ):
                 if id(store) in seen:
                     continue
@@ -281,6 +299,7 @@ def _settings_key(settings: Settings) -> tuple[str, ...]:
         settings.derived_knowledge_path,
         settings.retrieval_feedback_path,
         settings.retrieval_eval_drafts_path,
+        settings.research_jobs_path,
         settings.chroma_persist_dir,
         str(settings.data_dir / "knowledge" / "derived_index_state"),
     )

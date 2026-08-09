@@ -15,7 +15,7 @@ from cogdoc.frontend.api_client import (
 )
 
 DEFAULT_API_URL = os.getenv("COGDOC_API_URL", "http://localhost:8000")
-MAIN_VIEWS = ["对话", "派生知识", "调试"]
+MAIN_VIEWS = ["对话", "研究", "派生知识", "调试"]
 STREAM_RERUN_INTERVAL_SECONDS = 0.8
 STREAM_PREVIEW_HEAD_CHARS = 1200
 STREAM_PREVIEW_TAIL_CHARS = 3600
@@ -79,6 +79,7 @@ def _init_state() -> None:
     st.session_state.setdefault("trace_session_error", {})
     st.session_state.setdefault("retrieve_debug_by_context", {})
     st.session_state.setdefault("feedback_action_by_message", {})
+    st.session_state.setdefault("research_notice", None)
     # 兼容旧状态：升级前只有一份全局消息，迁移到当前上下文桶里。
     if "messages" in st.session_state:
         if st.session_state.kb_id and st.session_state.messages:
@@ -2884,6 +2885,364 @@ def _drain_stream_events() -> None:
             _finish_stream(key, pending)
 
 
+def _research_area(kb_id: str | None) -> None:
+    st.subheader("研究计划")
+    if not kb_id:
+        st.info("请先选择知识库。")
+        return
+
+    client = _client()
+    notice = st.session_state.pop("research_notice", None)
+    if isinstance(notice, Mapping):
+        if notice.get("kind") == "success":
+            st.success(str(notice.get("message") or "操作成功"))
+        else:
+            st.error(str(notice.get("message") or "操作失败"))
+
+    st.caption(
+        "先确定研究目标和可验证问题，再检索候选证据、执行闭集校验并生成带引用报告。"
+    )
+    if st.button("刷新研究进度", key=f"research-refresh-{kb_id}"):
+        st.rerun()
+    with st.form(f"research-create-{kb_id}", clear_on_submit=True):
+        title = st.text_input("任务标题（可选）", max_chars=160)
+        objective = st.text_area(
+            "研究目标",
+            height=110,
+            max_chars=4000,
+            placeholder="例如：比较三份赛事规程，形成带证据的参赛选择建议",
+        )
+        raw_titles = st.text_area(
+            "自定义章节（可选，每行一个）",
+            height=90,
+            placeholder="参赛门槛\n时间成本\n评分规则\n结论与建议",
+        )
+        create_submitted = st.form_submit_button(
+            "创建研究计划", type="primary", use_container_width=True
+        )
+    if create_submitted:
+        if not objective.strip():
+            st.warning("请输入研究目标。")
+        else:
+            section_titles = [
+                line.strip() for line in raw_titles.splitlines() if line.strip()
+            ]
+            response = client.create_research_job(
+                kb_id,
+                objective.strip(),
+                title=title.strip(),
+                section_titles=section_titles,
+            )
+            if response.status_code == 201:
+                st.session_state.research_notice = {
+                    "kind": "success",
+                    "message": "研究计划已创建。",
+                }
+                st.rerun()
+            else:
+                st.error(_response_error(response, "创建研究计划失败"))
+
+    try:
+        response = client.list_research_jobs(kb_id)
+    except Exception as exc:
+        st.error(f"读取研究计划失败：{exc}")
+        return
+    if response.status_code != 200:
+        st.error(_response_error(response, "读取研究计划失败"))
+        return
+    payload = response_payload(response)
+    jobs = payload.get("jobs", []) if isinstance(payload, Mapping) else []
+    if not jobs:
+        st.info("暂无研究计划。")
+        return
+
+    for job in jobs:
+        if not isinstance(job, Mapping):
+            continue
+        job_id = str(job.get("job_id") or "")
+        title_label = str(job.get("title") or job.get("objective") or job_id)
+        status = str(job.get("status") or "planned")
+        report_status = str(job.get("report_status") or "not_started")
+        revision = int(job.get("revision") or 1)
+        with st.expander(f"{title_label} · {status} · r{revision}"):
+            st.write(str(job.get("objective") or ""))
+            st.caption(f"任务 ID：`{job_id}` · 最后更新：{job.get('updated_at') or '-'}")
+            action_columns = st.columns(3)
+            requested_action = None
+            if status == "evidence_ready" and action_columns[0].button(
+                "校验并生成报告", key=f"research-generate-{job_id}-{revision}"
+            ):
+                requested_action = "generate"
+            elif (
+                status == "completed"
+                and str(job.get("review_status") or "") == "changes_requested"
+                and action_columns[0].button(
+                    "仅重新校验生成退回章节",
+                    key=f"research-review-regenerate-{job_id}-{revision}",
+                )
+            ):
+                requested_action = "generate"
+            elif status == "failed" and report_status == "failed" and action_columns[0].button(
+                "重试报告生成", key=f"research-regenerate-{job_id}-{revision}"
+            ):
+                requested_action = "generate"
+            elif status in {"planned", "failed"} and action_columns[0].button(
+                "开始证据检索", key=f"research-start-{job_id}-{revision}"
+            ):
+                requested_action = "start"
+            elif status == "paused" and action_columns[0].button(
+                "恢复检索", key=f"research-resume-{job_id}-{revision}"
+            ):
+                requested_action = "resume"
+            elif status == "running" and action_columns[0].button(
+                "暂停", key=f"research-pause-{job_id}-{revision}"
+            ):
+                requested_action = "pause"
+            elif status == "generating":
+                action_columns[0].info("正在校验并生成报告…")
+            if status in {"planned", "running", "paused", "failed"}:
+                if action_columns[1].button(
+                    "取消任务", key=f"research-cancel-{job_id}-{revision}"
+                ):
+                    requested_action = "cancel"
+            if requested_action:
+                action_response = client.research_action(job_id, requested_action)
+                if action_response.status_code in {200, 202}:
+                    st.session_state.research_notice = {
+                        "kind": "success",
+                        "message": "研究任务状态已更新。",
+                    }
+                    st.rerun()
+                st.error(_response_error(action_response, "更新研究任务状态失败"))
+            sections = [
+                section
+                for section in (job.get("sections") or [])
+                if isinstance(section, Mapping)
+            ]
+            with st.form(f"research-plan-{job_id}-r{revision}"):
+                edited_sections = []
+                for position, section in enumerate(sections, start=1):
+                    st.markdown(f"**章节 {position}**")
+                    edited_title = st.text_input(
+                        "标题",
+                        value=str(section.get("title") or ""),
+                        key=f"research-title-{job_id}-{revision}-{position}",
+                        disabled=status in {"running", "generating"},
+                    )
+                    edited_question = st.text_area(
+                        "可验证研究问题",
+                        value=str(section.get("research_question") or ""),
+                        height=80,
+                        key=f"research-question-{job_id}-{revision}-{position}",
+                        disabled=status in {"running", "generating"},
+                    )
+                    edited_sections.append(
+                        {
+                            "title": edited_title.strip(),
+                            "research_question": edited_question.strip(),
+                        }
+                    )
+                    st.caption(
+                        "证据状态："
+                        f"{section.get('evidence_status') or 'unsearched'}"
+                    )
+                    if section.get("verification_status"):
+                        st.caption(
+                            "闭集校验："
+                            f"{section.get('verification_status')}"
+                            f" · 生成：{section.get('generation_status') or '-'}"
+                        )
+                    if section.get("content"):
+                        st.markdown(str(section.get("content") or ""))
+                    for evidence in section.get("evidence") or []:
+                        if not isinstance(evidence, Mapping):
+                            continue
+                        page = _page_range_label(
+                            evidence.get("page_start", evidence.get("page")),
+                            evidence.get("page_end"),
+                        )
+                        location = " · ".join(
+                            part
+                            for part in [str(evidence.get("source") or ""), page]
+                            if part
+                        )
+                        st.caption(
+                            f"证据候选 · {location or evidence.get('chunk_id') or '-'}"
+                        )
+                        st.write(str(evidence.get("text_preview") or ""))
+                update_submitted = st.form_submit_button(
+                    "保存计划修订",
+                    use_container_width=True,
+                    disabled=status in {"running", "generating"},
+                )
+            if update_submitted:
+                if any(
+                    not item["title"] or not item["research_question"]
+                    for item in edited_sections
+                ):
+                    st.warning("章节标题和研究问题都不能为空。")
+                    continue
+                update_response = client.update_research_plan(
+                    job_id,
+                    expected_revision=revision,
+                    sections=edited_sections,
+                )
+                if update_response.status_code == 200:
+                    st.session_state.research_notice = {
+                        "kind": "success",
+                        "message": "研究计划已更新。",
+                    }
+                    st.rerun()
+                st.error(_response_error(update_response, "更新研究计划失败"))
+
+            report = job.get("report")
+            if isinstance(report, Mapping) and report.get("content"):
+                st.divider()
+                report_version = int(job.get("report_version") or 1)
+                review_status = str(job.get("review_status") or "pending")
+                st.markdown(f"### 研究报告 · v{report_version}")
+                st.caption(
+                    f"审阅状态：{review_status} · "
+                    f"历史版本：{len(job.get('report_history') or [])}"
+                )
+                last_regenerated = [
+                    str(section_id)
+                    for section_id in job.get("last_regenerated_section_ids") or []
+                    if str(section_id)
+                ]
+                if last_regenerated:
+                    st.caption(
+                        "本版本仅重生成章节：" + "、".join(last_regenerated)
+                    )
+                if report_status == "ready_with_gaps":
+                    st.warning("部分章节因证据不足、冲突或生成错误被明确留空。")
+                report_content = str(report.get("content") or "")
+                st.download_button(
+                    "下载 Markdown 报告",
+                    data=report_content,
+                    file_name=f"{job_id}.md",
+                    mime="text/markdown",
+                    key=f"research-download-{job_id}-{revision}",
+                    use_container_width=True,
+                )
+                st.markdown(report_content)
+
+                if review_status not in {"published", "not_started"}:
+                    with st.form(f"research-review-{job_id}-r{revision}"):
+                        st.markdown("#### 逐章审阅")
+                        review_decisions = []
+                        for section in sections:
+                            section_id = str(section.get("section_id") or "")
+                            section_title = str(section.get("title") or section_id)
+                            generated = section.get("generation_status") == "generated"
+                            options = (
+                                ["pending", "approved", "changes_requested"]
+                                if generated
+                                else ["pending", "accepted_gap", "changes_requested"]
+                            )
+                            current_review = str(
+                                section.get("review_status") or "pending"
+                            )
+                            default_index = (
+                                options.index(current_review)
+                                if current_review in options
+                                else 0
+                            )
+                            decision = st.selectbox(
+                                f"{section_title} · 审阅决定",
+                                options,
+                                index=default_index,
+                                format_func=lambda value: {
+                                    "pending": "暂不处理",
+                                    "approved": "批准正文",
+                                    "accepted_gap": "接受证据缺口",
+                                    "changes_requested": "退回修订",
+                                }[value],
+                                key=(
+                                    f"research-review-decision-{job_id}-"
+                                    f"{revision}-{section_id}"
+                                ),
+                            )
+                            note = st.text_area(
+                                f"{section_title} · 审阅意见",
+                                value=str(section.get("review_note") or ""),
+                                height=70,
+                                max_chars=2000,
+                                key=(
+                                    f"research-review-note-{job_id}-"
+                                    f"{revision}-{section_id}"
+                                ),
+                                help="退回修订时必填；该意见会进入下一轮检索和生成。",
+                            )
+                            if decision != "pending":
+                                review_decisions.append(
+                                    {
+                                        "section_id": section_id,
+                                        "decision": decision,
+                                        "note": note.strip(),
+                                    }
+                                )
+                        review_submitted = st.form_submit_button(
+                            "保存审阅决定",
+                            use_container_width=True,
+                        )
+                    if review_submitted:
+                        if not review_decisions:
+                            st.warning("请至少选择一个审阅决定。")
+                        elif any(
+                            item["decision"] == "changes_requested"
+                            and not item["note"]
+                            for item in review_decisions
+                        ):
+                            st.warning("退回修订必须填写审阅意见。")
+                        else:
+                            review_response = client.review_research_report(
+                                job_id,
+                                expected_revision=revision,
+                                decisions=review_decisions,
+                            )
+                            if review_response.status_code == 200:
+                                st.session_state.research_notice = {
+                                    "kind": "success",
+                                    "message": "审阅决定已保存。",
+                                }
+                                st.rerun()
+                            st.error(
+                                _response_error(review_response, "保存审阅决定失败")
+                            )
+
+                if review_status == "approved":
+                    if st.button(
+                        "发布已审阅报告",
+                        type="primary",
+                        key=f"research-publish-{job_id}-{revision}",
+                        use_container_width=True,
+                    ):
+                        publish_response = client.publish_research_report(
+                            job_id,
+                            expected_revision=revision,
+                        )
+                        if publish_response.status_code == 200:
+                            st.session_state.research_notice = {
+                                "kind": "success",
+                                "message": "研究报告已发布并冻结。",
+                            }
+                            st.rerun()
+                        st.error(_response_error(publish_response, "发布报告失败"))
+                elif review_status == "published":
+                    published = job.get("published_report")
+                    if isinstance(published, Mapping) and published.get("content"):
+                        st.success("该版本已完成审阅并发布。")
+                        st.download_button(
+                            "下载已发布报告",
+                            data=str(published.get("content") or ""),
+                            file_name=f"{job_id}-published.md",
+                            mime="text/markdown",
+                            key=f"research-published-download-{job_id}-{revision}",
+                            use_container_width=True,
+                        )
+
+
 # 处理对话区。
 def _chat_area() -> None:
     # 主对话区按上下文还原历史并渲染气泡。
@@ -2958,6 +3317,8 @@ def _chat_area() -> None:
         if prompt:
             _start_stream(kb_id, prompt, mode)
             st.rerun()
+    elif view == "研究":
+        _research_area(kb_id)
     elif view == "派生知识":
         _knowledge_area(kb_id)
     else:

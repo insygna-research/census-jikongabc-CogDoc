@@ -62,7 +62,7 @@ python scripts/restore_state.py backups/cogdoc-backup-YYYYMMDD-HHMMSS.tar.gz \
 
 ## 统一 SQLite 状态迁移
 
-默认后端仍为 `COGDOC_STATE_BACKEND=jsonl`。迁移完成并通过校验前不要切换后端。先停止 API、worker，以及所有可能写入 sessions、jobs、feedback、analysis、derived knowledge 或 retrieval feedback 的进程，再针对同一实例依次执行：
+默认后端仍为 `COGDOC_STATE_BACKEND=jsonl`。迁移完成并通过校验前不要切换后端。先停止 API、worker，以及所有可能写入 sessions、jobs、research plans、feedback、analysis、derived knowledge 或 retrieval feedback 的进程，再针对同一实例依次执行：
 
 ```bash
 python scripts/migrate_state.py
@@ -77,6 +77,10 @@ COGDOC_STATE_BACKEND=sqlite
 ```
 
 随后启动服务，检查 `/readyz`、会话历史、未完成/已完成索引任务、反馈数量、派生知识，以及一条代表性的检索反馈查询。在整个回滚窗口内保留 `state.db.pre-unified-*.bak` 和原始 JSONL；它们是恢复工件，不能在迁移后立即清理。
+
+Research 证据执行以章节为恢复粒度。若服务在任务处于 `running` 时退出，启动过程会把执行中的章节重置为 `pending`，并把任务协调到 `paused`，必须由运维或用户显式恢复。报告生成会重新走闭集 Evidence Unit 校验，只有 `supported` 的 grounding ID 能进入章节生成；无证据、冲突、校验失败和生成失败都会成为报告中的显式缺口。若服务在 `generating` 时退出，任务会回到 `evidence_ready` 等待显式重试。状态库只保存有界证据预览、定位、公开引用账本和渲染后的 Markdown 报告，不保存完整来源 chunk。
+
+Research 发布是独立的乐观并发状态转换。已生成章节必须标记为 `approved`，被阻断章节必须显式标记为 `accepted_gap`；任何 `changes_requested` 决定都必须附带修订要求，且只能通过同一检索与校验链路重新生成。系统最多归档十个完整报告版本，审阅历史最多保留 100 个事件。只有退回章节会消耗检索、校验和生成资源；保留章节与新章节的局部账本会重新编号、换算偏移并合成为经过校验的全局账本。发布会冻结独立不可变快照，已发布任务拒绝继续修改计划。
 
 dry-run、apply 或 verify 任一步失败时，保持服务停止且不要切换后端。保存命令输出的 JSON 错误，确认没有遗留迁移进程占用实例锁，检查数据目录的剩余空间和权限，并修复 malformed/duplicate canonical records 后重新从 dry-run 开始。禁止手工提升临时数据库。
 

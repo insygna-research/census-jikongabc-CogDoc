@@ -125,6 +125,79 @@ def test_trace_client_methods_call_expected_endpoints(monkeypatch):
     }
 
 
+def test_research_client_methods_call_expected_endpoints(monkeypatch):
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append(("post", url, kwargs))
+        return httpx.Response(201, json={"job": {"job_id": "rj_1"}})
+
+    def fake_get(url, **kwargs):
+        calls.append(("get", url, kwargs))
+        return httpx.Response(200, json={"jobs": []})
+
+    def fake_put(url, **kwargs):
+        calls.append(("put", url, kwargs))
+        return httpx.Response(200, json={"job": {"job_id": "rj_1"}})
+
+    monkeypatch.setattr("cogdoc.frontend.api_client.httpx.post", fake_post)
+    monkeypatch.setattr("cogdoc.frontend.api_client.httpx.get", fake_get)
+    monkeypatch.setattr("cogdoc.frontend.api_client.httpx.put", fake_put)
+    client = CogDocClient("http://api", api_key="secret")
+
+    client.create_research_job(
+        "kb", "研究目标", title="标题", section_titles=["证据"]
+    )
+    client.list_research_jobs("kb", status="planned", limit=12)
+    client.get_research_job("rj_1")
+    client.update_research_plan(
+        "rj_1",
+        expected_revision=2,
+        sections=[{"title": "证据", "research_question": "有哪些证据？"}],
+    )
+    client.research_action("rj_1", "pause")
+    client.research_action("rj_1", "generate")
+    client.get_research_report("rj_1")
+    client.review_research_report(
+        "rj_1",
+        expected_revision=7,
+        decisions=[
+            {"section_id": "s1", "decision": "approved", "note": "已核对"}
+        ],
+    )
+    client.publish_research_report("rj_1", expected_revision=8)
+    client.get_published_research_report("rj_1")
+
+    assert calls[0][0:2] == ("post", "http://api/v1/research-jobs")
+    assert calls[0][2]["json"]["section_titles"] == ["证据"]
+    assert calls[1][0:2] == ("get", "http://api/v1/research-jobs")
+    assert calls[1][2]["params"] == {
+        "kb_id": "kb",
+        "limit": 12,
+        "status": "planned",
+    }
+    assert calls[2][0:2] == ("get", "http://api/v1/research-jobs/rj_1")
+    assert calls[3][0:2] == ("put", "http://api/v1/research-jobs/rj_1/plan")
+    assert calls[3][2]["json"]["expected_revision"] == 2
+    assert calls[3][2]["headers"] == {"Authorization": "Bearer secret"}
+    assert calls[4][0:2] == ("post", "http://api/v1/research-jobs/rj_1/pause")
+    assert calls[5][0:2] == (
+        "post",
+        "http://api/v1/research-jobs/rj_1/generate",
+    )
+    assert calls[6][0:2] == ("get", "http://api/v1/research-jobs/rj_1/report")
+    assert calls[7][0:2] == ("put", "http://api/v1/research-jobs/rj_1/review")
+    assert calls[7][2]["json"]["expected_revision"] == 7
+    assert calls[8][0:2] == ("post", "http://api/v1/research-jobs/rj_1/publish")
+    assert calls[8][2]["json"] == {"expected_revision": 8}
+    assert calls[9][0:2] == (
+        "get",
+        "http://api/v1/research-jobs/rj_1/published-report",
+    )
+    with pytest.raises(ValueError, match="unsupported research action"):
+        client.research_action("rj_1", "delete")
+
+
 # 验证反馈客户端发送证据载荷场景。
 def test_feedback_client_sends_citation_and_evidence_payload(monkeypatch):
     calls = []

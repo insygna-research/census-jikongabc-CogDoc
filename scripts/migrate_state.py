@@ -31,6 +31,7 @@ from cogdoc.api.retrieval_eval_draft_store import (
     RetrievalEvalDraftStore,
     SqliteRetrievalEvalDraftStore,
 )
+from cogdoc.api.research_job_store import ResearchJobStore, SqliteResearchJobStore
 from cogdoc.config.settings import get_settings
 from cogdoc.service.process_lock import (
     acquire_single_instance_lock,
@@ -38,7 +39,7 @@ from cogdoc.service.process_lock import (
 )
 
 
-MIGRATION_VERSION = 2
+MIGRATION_VERSION = 3
 
 
 class MigrationError(RuntimeError):
@@ -93,6 +94,9 @@ def _source_stores(data_dir: Path) -> tuple[dict[str, Any], list[Any]]:
             str(data_dir / "feedback" / "retrieval_feedback.jsonl")
         ),
         "retrieval_eval_drafts": retrieval_eval_drafts,
+        "research_jobs": ResearchJobStore(
+            str(data_dir / "research" / "research_jobs.json")
+        ),
     }, close_after
 
 
@@ -108,6 +112,7 @@ def _target_stores(db_path: Path, scratch: Path) -> dict[str, Any]:
         "derived_knowledge": SqliteDerivedKnowledgeStore(str(db_path)),
         "retrieval_feedback": SqliteRetrievalFeedbackStore(str(db_path)),
         "retrieval_eval_drafts": SqliteRetrievalEvalDraftStore(str(db_path)),
+        "research_jobs": SqliteResearchJobStore(str(db_path)),
     }
 
 

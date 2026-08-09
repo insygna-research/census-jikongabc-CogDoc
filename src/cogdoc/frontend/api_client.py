@@ -655,6 +655,114 @@ class CogDocClient:
             **kwargs,
         )
 
+    def create_research_job(
+        self,
+        kb_id: str,
+        objective: str,
+        *,
+        title: str = "",
+        section_titles: list[str] | None = None,
+    ) -> httpx.Response:
+        payload = {
+            "kb_id": kb_id,
+            "objective": objective,
+            "title": title,
+            "section_titles": section_titles or [],
+        }
+        return httpx.post(
+            self._url("/v1/research-jobs"),
+            json=payload,
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    def list_research_jobs(
+        self, kb_id: str, *, status: str | None = None, limit: int = 100
+    ) -> httpx.Response:
+        params = {"kb_id": kb_id, "limit": limit}
+        if status:
+            params["status"] = status
+        return httpx.get(
+            self._url("/v1/research-jobs"),
+            params=params,
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    def get_research_job(self, job_id: str) -> httpx.Response:
+        return httpx.get(
+            self._url(f"/v1/research-jobs/{job_id}"),
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    def update_research_plan(
+        self,
+        job_id: str,
+        *,
+        expected_revision: int,
+        sections: list[dict[str, str]],
+    ) -> httpx.Response:
+        return httpx.put(
+            self._url(f"/v1/research-jobs/{job_id}/plan"),
+            json={
+                "expected_revision": expected_revision,
+                "sections": sections,
+            },
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    def research_action(self, job_id: str, action: str) -> httpx.Response:
+        if action not in {"start", "pause", "resume", "cancel", "generate"}:
+            raise ValueError(f"unsupported research action: {action}")
+        return httpx.post(
+            self._url(f"/v1/research-jobs/{job_id}/{action}"),
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    def get_research_report(self, job_id: str) -> httpx.Response:
+        return httpx.get(
+            self._url(f"/v1/research-jobs/{job_id}/report"),
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    def review_research_report(
+        self,
+        job_id: str,
+        *,
+        expected_revision: int,
+        decisions: list[dict[str, str]],
+    ) -> httpx.Response:
+        return httpx.put(
+            self._url(f"/v1/research-jobs/{job_id}/review"),
+            json={
+                "expected_revision": expected_revision,
+                "decisions": decisions,
+            },
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    def publish_research_report(
+        self, job_id: str, *, expected_revision: int
+    ) -> httpx.Response:
+        return httpx.post(
+            self._url(f"/v1/research-jobs/{job_id}/publish"),
+            json={"expected_revision": expected_revision},
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    def get_published_research_report(self, job_id: str) -> httpx.Response:
+        return httpx.get(
+            self._url(f"/v1/research-jobs/{job_id}/published-report"),
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
     # 构造对话请求体。
     def _chat_payload(
         self, kb_id: str, query: str, mode: str, session_id: str | None, is_local: bool

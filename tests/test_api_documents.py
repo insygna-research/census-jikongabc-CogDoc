@@ -11,6 +11,7 @@ from cogdoc.api.feedback_store import FeedbackStore
 from cogdoc.api.ingest import IndexJobManager, KnowledgeBaseRegistry
 from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
 from cogdoc.api.retrieval_eval_draft_store import RetrievalEvalDraftStore
+from cogdoc.api.research_job_store import ResearchJobStore
 from cogdoc.tools.eval.retrieval_eval_drafts import create_pending_draft
 
 
@@ -71,6 +72,9 @@ def _make_app(tmp_path, ingest_fn=_ok_ingest, monkeypatch=None):
         ),
         retrieval_eval_draft_store=RetrievalEvalDraftStore(
             path=str(tmp_path / "retrieval_eval_drafts.jsonl")
+        ),
+        research_job_store=ResearchJobStore(
+            path=str(tmp_path / "research_jobs.json")
         ),
     )
     return app, source_dir_for
@@ -244,6 +248,11 @@ async def test_delete_recreated_kb_clears_review_state(tmp_path, monkeypatch):
                     now="2026-08-05T00:00:00+00:00",
                 )
             )
+            research_response = await client.post(
+                "/v1/research-jobs",
+                json={"kb_id": "kb", "objective": "删除后不应保留的研究目标"},
+            )
+            assert research_response.status_code == 201
 
             before = await client.get("/v1/review-queue", params={"kb_id": "kb"})
             deleted = await client.delete("/v1/knowledge-bases/kb")
@@ -253,6 +262,7 @@ async def test_delete_recreated_kb_clears_review_state(tmp_path, monkeypatch):
                 "/v1/knowledge/pending-count", params={"kb_id": "kb"}
             )
             eval_drafts_after = app.state.retrieval_eval_draft_store.export_records()
+            research_jobs_after = app.state.research_job_store.export_records()
 
     assert before.json()["feedback_counts"]["total"] == 1
     assert before.json()["retrieval_feedback"]["enabled"] == 1
@@ -265,6 +275,7 @@ async def test_delete_recreated_kb_clears_review_state(tmp_path, monkeypatch):
     assert body["feedback_analysis"]["needs_review"] == 0
     assert body["retrieval_feedback"]["enabled"] == 0
     assert eval_drafts_after == []
+    assert research_jobs_after == []
     assert pending_count.json()["total"] == 0
 
 

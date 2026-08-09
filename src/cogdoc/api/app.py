@@ -17,6 +17,7 @@ from cogdoc.api.metrics import Metrics, MetricsMiddleware
 from cogdoc.api.persistence import SqliteJobStore, SqliteSessionStore
 from cogdoc.api.retrieval_feedback_store import RetrievalFeedbackStore
 from cogdoc.api.retrieval_eval_draft_store import RetrievalEvalDraftStore
+from cogdoc.api.research_job_store import ResearchJobStore
 from cogdoc.api.routes import (
     agent_router,
     chat_router,
@@ -25,6 +26,7 @@ from cogdoc.api.routes import (
     health_router,
     knowledge_router,
     retrieval_eval_drafts_router,
+    research_router,
     traces_router,
 )
 from cogdoc.api.schemas import ErrorCode, build_error_response
@@ -43,6 +45,7 @@ from cogdoc.service.process_lock import (
     release_single_instance_lock,
     strict_single_process,
 )
+from cogdoc.service.research_execution import ResearchExecutionManager
 from cogdoc.service.sweeper import BackgroundSweeper
 from cogdoc.state_runtime import StateRuntime
 
@@ -97,6 +100,8 @@ def create_app(
     knowledge_store: DerivedKnowledgeStore | None = None,
     retrieval_feedback_store: RetrievalFeedbackStore | None = None,
     retrieval_eval_draft_store: RetrievalEvalDraftStore | None = None,
+    research_job_store: ResearchJobStore | None = None,
+    research_execution_manager: ResearchExecutionManager | None = None,
     state_runtime: StateRuntime | None = None,
     webhook_dispatcher: WebhookDispatcher | None = None,
     derived_knowledge_index_refresher: Callable | None = None,
@@ -140,6 +145,11 @@ def create_app(
                 )
             # 必须在拿到单实例锁且变更日志恢复之后对账，避免误改其他实例的任务状态。
             app.state.index_jobs.reconcile_orphans()
+            research_manager = getattr(
+                app.state, "research_execution_manager", None
+            )
+            if research_manager is not None:
+                research_manager.reconcile_orphans()
             # 重试上次遗留的删库外部资源清理，持久队列在此兜底。
             drain_purge_queue()
             # 后台清扫僵尸索引代、空闲执行器和锁表。
@@ -172,6 +182,20 @@ def create_app(
                 log_event(
                     "shutdown",
                     "sweeper_stop_failed",
+                    {},
+                    level=logging.ERROR,
+                    error_class=type(exc).__name__,
+                )
+            try:
+                research_manager = getattr(
+                    app.state, "research_execution_manager", None
+                )
+                if research_manager is not None:
+                    research_manager.shutdown(wait=True)
+            except Exception as exc:
+                log_event(
+                    "shutdown",
+                    "research_execution_shutdown_failed",
                     {},
                     level=logging.ERROR,
                     error_class=type(exc).__name__,
@@ -257,6 +281,7 @@ def create_app(
         knowledge_store,
         retrieval_feedback_store,
         retrieval_eval_draft_store,
+        research_job_store,
     )
     if state_runtime is not None and any(
         store is not None for store in store_overrides
@@ -270,6 +295,7 @@ def create_app(
         knowledge_store=knowledge_store,
         retrieval_feedback_store=retrieval_feedback_store,
         retrieval_eval_draft_store=retrieval_eval_draft_store,
+        research_job_store=research_job_store,
     )
     app.state.state_runtime = runtime
     app.state.close_state_runtime_on_shutdown = (
@@ -313,12 +339,27 @@ def create_app(
         max_workers=offload_workers or get_settings().cogdoc_offload_workers,
         thread_name_prefix="cogdoc-offload",
     )
+    app.state.research_execution_manager = (
+        research_execution_manager
+        or (
+            ResearchExecutionManager.from_runtime(
+                runtime.research_job_store,
+                state_runtime=runtime,
+                kb_exists=app.state.kb_registry.exists,
+                max_workers=get_settings().cogdoc_research_workers,
+                top_k=get_settings().cogdoc_research_retrieval_top_k,
+            )
+            if runtime.research_job_store is not None
+            else None
+        )
+    )
     # 旧 app.state 属性保留为 runtime store 的身份别名，兼容路由与注入测试。
     app.state.feedback_store = runtime.feedback_store
     app.state.feedback_analysis_store = runtime.feedback_analysis_store
     app.state.knowledge_store = runtime.knowledge_store
     app.state.retrieval_feedback_store = runtime.retrieval_feedback_store
     app.state.retrieval_eval_draft_store = runtime.retrieval_eval_draft_store
+    app.state.research_job_store = runtime.research_job_store
     app.state.webhook_dispatcher = webhook_dispatcher or WebhookDispatcher()
 
     # 访问控制留空则鉴权关闭，限流默认按配置令牌桶。
@@ -370,6 +411,7 @@ def create_app(
     app.include_router(feedback_router)
     app.include_router(knowledge_router)
     app.include_router(retrieval_eval_drafts_router)
+    app.include_router(research_router)
     app.include_router(traces_router)
     return app
 

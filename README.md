@@ -28,6 +28,8 @@ A local RAG knowledge-base console for individuals and teams, built on **LangGra
 
 - **Multiple knowledge bases · multiple conversations · layered memory** — full display history is persisted for replay; validated recent turns form bounded short-term memory, evicted turns become session-level summaries and decisions, and only explicit stable facts enter cross-session long-term memory. Wrong answers never enter Agent memory.
 
+- **Durable research evidence workspace** — create an editable research outline, execute every section through the production hybrid retrieval path, inspect bounded evidence previews, and pause/resume/cancel safely. Candidate hits remain `partial` until a semantic verifier explicitly promotes them; service restarts reconcile interrupted runs to `paused`.
+
 - **Web, CLI, and Debug entry points** — a slash-command CLI console, a Streamlit web UI over FastAPI, and a focused `make debug` console for trace inspection.
 
 - **Derived knowledge review loop** — manually add knowledge, save validated answers, or turn corrections / no-evidence feedback into pending knowledge cards with source bindings, conflict groups, stale scans, revisions, batch approve/reject, and archive/delete flows.
@@ -160,6 +162,12 @@ The Streamlit app is a thin client over the FastAPI service — you can hit it d
 | `GET /v1/retrieval-eval-drafts`, `GET /v1/retrieval-eval-drafts/{id}` | Review pending evidence-unit annotations and their live stale status |
 | `POST /v1/retrieval-eval-drafts/{id}/review` | Approve/reject a draft with optimistic revision checking |
 | `GET /v1/retrieval-eval-drafts/export` | Export approved, non-stale training or release-gate rows; QA-only export reports excluded Summary/Compare drafts explicitly |
+| `POST /v1/research-jobs`, `GET /v1/research-jobs` | Create or list persistent research plans |
+| `GET /v1/research-jobs/{id}`, `PUT /v1/research-jobs/{id}/plan` | Inspect or revision-safely edit a research outline |
+| `POST /v1/research-jobs/{id}/start`, `/pause`, `/resume`, `/cancel` | Control durable section-by-section evidence retrieval |
+| `POST /v1/research-jobs/{id}/generate`, `GET /v1/research-jobs/{id}/report` | Closed-set verify section evidence, generate cited sections, and download the Markdown report |
+| `PUT /v1/research-jobs/{id}/review`, `POST /v1/research-jobs/{id}/publish` | Review each generated section or evidence gap with optimistic revision protection, then publish only a fully reviewed report |
+| `GET /v1/research-jobs/{id}/published-report` | Download the immutable published Markdown snapshot |
 | `GET /healthz`, `GET /readyz`, `GET /metrics` | Health, readiness, Prometheus metrics |
 
 `/v1/chat/stream` always streams lifecycle and node-progress events. For QA,
@@ -225,7 +233,7 @@ python scripts/migrate_state.py --apply         # import legacy state
 python scripts/migrate_state.py --verify-only   # verify the imported state
 ```
 
-Only after all three steps succeed should `.env` be changed to `COGDOC_STATE_BACKEND=sqlite`. The unified SQLite backend stores sessions, index jobs, feedback records, feedback analyses, derived knowledge, retrieval-feedback/tuning state, and retrieval-eval drafts together in `COGDOC_DATA_DIR/state.db`. The latter five are the feedback/knowledge/evaluation state families migrated from their legacy stores.
+Only after all three steps succeed should `.env` be changed to `COGDOC_STATE_BACKEND=sqlite`. The unified SQLite backend stores sessions, index jobs, research plans, feedback records, feedback analyses, derived knowledge, retrieval-feedback/tuning state, and retrieval-eval drafts together in `COGDOC_DATA_DIR/state.db`. The migration copies the six research/feedback/knowledge/evaluation state families from their legacy stores.
 
 `COGDOC_FEEDBACK_STORE` remains only for compatibility with deployments that still select the legacy standalone feedback backend. It does not select the unified backend and should not be used instead of `COGDOC_STATE_BACKEND` after migration.
 
@@ -651,6 +659,8 @@ CogDoc/
 | `RATE_LIMIT_PER_MINUTE` | `120` | Token-bucket refill rate for protected API routes |
 | `RATE_LIMIT_BURST` | `120` | Token-bucket burst capacity; `<=0` disables rate limiting |
 | `COGDOC_MAX_UPLOAD_MB` | `50` | Maximum PDF upload size through the API/frontend |
+| `COGDOC_RESEARCH_WORKERS` | `2` | Maximum concurrent background research evidence/report jobs |
+| `COGDOC_RESEARCH_RETRIEVAL_TOP_K` | `8` | Candidate depth retrieved and reranked per research section |
 | `QA_PARENT_CONTEXT_ENABLED` | `true` | Hydrate reranked child hits with bounded siblings from the same detected section; `false` keeps legacy neighbor expansion |
 | `QA_PARENT_CONTEXT_MAX_CHUNKS` | `5` | Maximum child chunks retained per structural parent window, including the anchor |
 | `QA_PARENT_CONTEXT_MAX_CHARS` | `3600` | Soft character budget per structural parent window; the anchor is never dropped |
@@ -719,6 +729,7 @@ Requirements: Python 3.11+ (developed on 3.13; the extension targets 3.8+), a Ru
 | `make serve` | Start the FastAPI service (`uvicorn cogdoc.api.app:app`) |
 | `make frontend` | Start the Streamlit web app |
 | `make debug` | Start the standalone Debug console |
+| `uvicorn scripts.cogeval_cogdoc_wrapper:app --port 8003` | Start the optional CogEval-compatible adapter for a running CogDoc API |
 | `cd rust_core && cargo test` | Run Rust unit tests |
 | `cd rust_core && cargo fmt --check` | Check Rust formatting |
 
@@ -777,6 +788,7 @@ Backup/restore and index rebuild rules are covered in [PRODUCTION_zh-CN.md](docs
 
 - **OCR is an opt-in Tesseract MVP.** It is disabled by default, supports locally installed language packs, and intentionally has no hosted provider. Recognition quality depends on scan quality, selected languages, and DPI.
 - Summary and Compare are fixed-schema MVPs; cloud mode runs independent section/dimension LLM cells concurrently with stable output order, while local Ollama mode stays serial to avoid memory pressure. The default section/dimension sets are fixed unless passed through graph state.
+- Research reports now support closed-set verification, deterministic citations, per-section review, explicit gap acceptance, change requests, bounded version history, selective regeneration, and immutable publication. Selective regeneration only retrieves, verifies, and rewrites `changes_requested` sections; approved sections and accepted gaps are preserved while the global public citation ledger is rebuilt and validated. The published export format is currently Markdown only.
 - Local Compare intentionally supports only two documents, uses four core dimensions, and skips the extra conclusion generation step to reduce Ollama memory pressure.
 - With the semantic gate disabled (the default), citation validation proves only physical citation legality (`source` / `page` or knowledge ID), not that the surrounding claim is semantically supported or that every factual sentence is cited. Enabling `CLAIM_VERIFICATION_ENABLED` adds a model-based claim/evidence gate for QA, Summary, and Compare; it fails closed on unsupported/insufficient claims and verifier/repair errors, but still requires calibration against a reviewed domain baseline.
 - The rewrite similarity threshold defaults to `0.5` and should be calibrated on real project data.

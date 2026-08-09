@@ -28,6 +28,8 @@
 
 - **多知识库 · 多对话 · 分层记忆** — 完整展示历史持久化用于回放；通过引用校验的近期回合组成有界短期记忆，被淘汰回合转为会话级摘要和决策，只有带明确记忆信号的稳定事实才进入跨会话长期记忆，错误答案不会进入 Agent 记忆。
 
+- **持久化研究证据工作台** — 从研究目标创建可编辑大纲，每章复用生产混合检索链执行，展示有界证据预览，并支持安全暂停、恢复和取消。候选命中在语义校验器明确提升前只标记为 `partial`；服务重启会把中断任务协调为 `paused`。
+
 - **网页端、CLI 与 Debug 入口** — 斜杠命令 CLI、基于 FastAPI 的 Streamlit 网页端，以及聚焦 trace 诊断的 `make debug` 控制台。
 
 - **派生知识审核闭环** — 支持手动新增知识、保存已校验答案、把纠错/无依据反馈转成待审核知识卡片；每条知识可绑定来源、检测冲突、扫描过期、创建修订版本，并支持批量通过/驳回、归档和删除。
@@ -160,6 +162,12 @@ Streamlit 前端只是 FastAPI 服务上的瘦客户端——你也可以直接�
 | `GET /v1/retrieval-eval-drafts`、`GET /v1/retrieval-eval-drafts/{id}` | 查看证据单元标注草稿及实时过期状态 |
 | `POST /v1/retrieval-eval-drafts/{id}/review` | 带 revision 乐观并发校验地通过或驳回草稿 |
 | `GET /v1/retrieval-eval-drafts/export` | 导出已通过且未过期的 training/release-gate 数据；QA 专用格式会显式报告被排除的 Summary/Compare 草稿 |
+| `POST /v1/research-jobs`、`GET /v1/research-jobs` | 创建或列出持久化研究计划 |
+| `GET /v1/research-jobs/{id}`、`PUT /v1/research-jobs/{id}/plan` | 查询或带版本冲突保护地修订研究大纲 |
+| `POST /v1/research-jobs/{id}/start`、`/pause`、`/resume`、`/cancel` | 控制持久化的逐章节证据检索 |
+| `POST /v1/research-jobs/{id}/generate`、`GET /v1/research-jobs/{id}/report` | 对章节证据执行闭集校验、生成带引用正文并下载 Markdown 报告 |
+| `PUT /v1/research-jobs/{id}/review`、`POST /v1/research-jobs/{id}/publish` | 带 revision 冲突保护地逐章审阅正文或证据缺口，并只发布完成全部审阅的报告 |
+| `GET /v1/research-jobs/{id}/published-report` | 下载冻结的已发布 Markdown 快照 |
 | `GET /healthz`、`GET /readyz`、`GET /metrics` | 健康、就绪、Prometheus 指标 |
 
 `/v1/chat/stream` 始终会流式发送生命周期和节点进度事件。QA、Summary 和
@@ -627,7 +635,7 @@ python scripts/migrate_state.py --apply         # 导入旧状态
 python scripts/migrate_state.py --verify-only   # 校验导入结果
 ```
 
-只有三步全部成功后，才能把 `.env` 改为 `COGDOC_STATE_BACKEND=sqlite`。统一 SQLite 后端会把会话、索引任务、反馈记录、反馈分析、派生知识、检索反馈/调权状态以及检索评测草稿共同存入 `COGDOC_DATA_DIR/state.db`；后五项就是从旧存储迁移的五类反馈/知识/评测状态。
+只有三步全部成功后，才能把 `.env` 改为 `COGDOC_STATE_BACKEND=sqlite`。统一 SQLite 后端会把会话、索引任务、研究计划、反馈记录、反馈分析、派生知识、检索反馈/调权状态以及检索评测草稿共同存入 `COGDOC_DATA_DIR/state.db`；迁移会复制六类研究/反馈/知识/评测状态。
 
 `COGDOC_FEEDBACK_STORE` 仅为仍在使用旧版独立反馈后端的部署保留兼容性。它不能选择统一状态后端；迁移后不应使用它代替 `COGDOC_STATE_BACKEND`。
 
@@ -649,6 +657,8 @@ python scripts/migrate_state.py --verify-only   # 校验导入结果
 | `RATE_LIMIT_PER_MINUTE` | `120` | 受保护 API 路由的令牌桶补充速率 |
 | `RATE_LIMIT_BURST` | `120` | 令牌桶突发容量；`<=0` 表示关闭限流 |
 | `COGDOC_MAX_UPLOAD_MB` | `50` | 网页/API 上传 PDF 的单文件大小上限 |
+| `COGDOC_RESEARCH_WORKERS` | `2` | 后台 Research 证据与报告任务最大并发数 |
+| `COGDOC_RESEARCH_RETRIEVAL_TOP_K` | `8` | 每个研究章节的候选召回与重排深度 |
 | `QA_PARENT_CONTEXT_ENABLED` | `true` | 为 rerank 命中的 child 补充同章节有界 sibling；设为 `false` 时保留旧邻块扩展 |
 | `QA_PARENT_CONTEXT_MAX_CHUNKS` | `5` | 每个结构父级窗口最多保留的 child 数（含 anchor） |
 | `QA_PARENT_CONTEXT_MAX_CHARS` | `3600` | 每个结构父级窗口的软字符预算；anchor 永不被丢弃 |
@@ -717,6 +727,7 @@ python scripts/migrate_state.py --verify-only   # 校验导入结果
 | `make serve` | 启动 FastAPI 服务（`uvicorn cogdoc.api.app:app`） |
 | `make frontend` | 启动 Streamlit 网页端 |
 | `make debug` | 启动独立 Debug 控制台 |
+| `uvicorn scripts.cogeval_cogdoc_wrapper:app --port 8003` | 为已运行的 CogDoc API 启动可选的 CogEval 兼容适配服务 |
 | `cd rust_core && cargo test` | 运行 Rust 单元测试 |
 | `cd rust_core && cargo fmt --check` | 检查 Rust 代码格式 |
 
@@ -779,6 +790,7 @@ python scripts/migrate_state.py --verify-only   # 校验导入结果
 
 - **OCR 是默认关闭的 Tesseract MVP。** 仅支持本机已安装的语言包，不提供托管 OCR provider；识别质量取决于扫描质量、语言选择和 DPI。
 - Summary 与 Compare 是固定 schema MVP：云端模式会并发执行相互独立的章节/维度 LLM cell，并保持输出顺序稳定；本地 Ollama 模式为避免内存压力仍走串行。默认章节/维度集合固定，除非通过 graph state 传入自定义配置。
+- Research 报告现已支持闭集校验、确定性引用、逐章审阅、显式接受证据缺口、退回修订、有界版本历史、选择性重新生成和冻结发布。选择性重生成只会检索、校验并改写 `changes_requested` 章节；已批准章节和已接受缺口原样保留，同时重新构建并校验全文公开引用账本。已发布导出格式暂时仅支持 Markdown。
 - 本地 Compare 有意限制为 2 篇文档、4 个核心维度，并跳过额外结论生成，以降低 Ollama 内存压力。
 - 语义门禁关闭（默认）时，Citation 校验只证明引用的 `source` / `page` 或知识 ID 物理合法，不证明周围声明获得语义支持，也不保证每条事实句都有引用。开启 `CLAIM_VERIFICATION_ENABLED` 后，QA、Summary、Compare 会增加模型驱动的声明/证据门禁；遇到 `unsupported` / `insufficient` 声明或校验/修复异常时 fail-closed，但仍应使用领域人工基线做标定。
 - Rewrite 相似度阈值默认 `0.5`，后续应基于真实数据标定。

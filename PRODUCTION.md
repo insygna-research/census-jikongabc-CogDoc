@@ -62,7 +62,7 @@ Run a restore drill at least once per release and after every index-contract cha
 
 ## Unified SQLite State Migration
 
-The default remains `COGDOC_STATE_BACKEND=jsonl`. Do not change the backend before the migration has completed and passed verification. Stop the API, workers, and every other process that can write sessions, jobs, feedback, analysis, derived knowledge, or retrieval feedback, then run the migration against the same instance in this order:
+The default remains `COGDOC_STATE_BACKEND=jsonl`. Do not change the backend before the migration has completed and passed verification. Stop the API, workers, and every other process that can write sessions, jobs, research plans, feedback, analysis, derived knowledge, or retrieval feedback, then run the migration against the same instance in this order:
 
 ```bash
 python scripts/migrate_state.py
@@ -77,6 +77,10 @@ COGDOC_STATE_BACKEND=sqlite
 ```
 
 Start the service and check `/readyz`, session history, outstanding/completed index jobs, feedback counts, derived knowledge, and a representative retrieval-feedback query. Keep `state.db.pre-unified-*.bak` and the original JSONL files for the entire rollback window; they are recovery artifacts, not files to clean up immediately.
+
+Research evidence runs are section-granular and restart-safe. If the service exits while a research job is `running`, startup resets an in-flight section to `pending` and reconciles the job to `paused`; an operator or user must explicitly resume it. Report generation re-runs retrieval through the closed-set Evidence Unit verifier and only `supported` grounding IDs may reach section generation. No evidence, contradictions, verifier failures, and generation failures remain explicit report gaps. An interrupted `generating` job returns to `evidence_ready` for an explicit retry. The store contains bounded evidence previews, coordinates, the public citation ledger, and the rendered Markdown report—not full source chunks.
+
+Research publication is a separate optimistic-concurrency transition. Generated sections require `approved`; blocked sections require explicit `accepted_gap`; any `changes_requested` decision must include an instruction and permits regeneration only through the same retrieval/verifier pipeline. Regeneration archives up to ten complete report versions and review history is bounded to 100 events. Only rejected sections consume retrieval/verifier/generation work; preserved and regenerated section-local ledgers are re-keyed and rebased into a newly validated global ledger. Publication freezes a separate immutable snapshot, and published jobs reject plan edits.
 
 If dry-run, apply, or verification fails, keep the service stopped and do not switch the backend. Capture the command's JSON error, confirm that no stale migration process owns the instance lock, check free disk space and permissions for the data directory, and resolve malformed or duplicate canonical records before rerunning the dry run. Never promote a temporary database manually.
 

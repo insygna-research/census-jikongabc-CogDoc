@@ -155,6 +155,20 @@ def test_settings_rejects_evidence_span_values_outside_safe_bounds(field, value)
         Settings(_env_file=None, **{field: value})
 
 
+def test_settings_exposes_bounded_research_execution_controls(monkeypatch):
+    monkeypatch.setenv("COGDOC_RESEARCH_WORKERS", "3")
+    monkeypatch.setenv("COGDOC_RESEARCH_RETRIEVAL_TOP_K", "12")
+
+    settings = get_settings()
+
+    assert settings.cogdoc_research_workers == 3
+    assert settings.cogdoc_research_retrieval_top_k == 12
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, cogdoc_research_workers=0)
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, cogdoc_research_retrieval_top_k=51)
+
+
 # 验证节点可以独立选择后端和模型。
 def test_settings_resolves_node_backend_and_model(monkeypatch):
     monkeypatch.setenv("LLM_EVIDENCE_VERIFIER_BACKEND", "local")

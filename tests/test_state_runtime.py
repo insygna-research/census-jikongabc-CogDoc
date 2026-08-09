@@ -66,6 +66,7 @@ def test_state_runtime_close_is_idempotent_and_closes_unique_stores():
     analysis = Store()
     knowledge = Store()
     drafts = Store()
+    research = Store()
     runtime = StateRuntime(
         feedback_store=shared,
         feedback_analysis_store=analysis,
@@ -74,6 +75,7 @@ def test_state_runtime_close_is_idempotent_and_closes_unique_stores():
         derived_knowledge_index_persist_directory="/tmp/cogdoc-test-index",
         derived_knowledge_index_state_directory="/tmp/cogdoc-test-index-state",
         retrieval_eval_draft_store=drafts,
+        research_job_store=research,
     )
 
     runtime.close()
@@ -84,6 +86,7 @@ def test_state_runtime_close_is_idempotent_and_closes_unique_stores():
     assert analysis.close_count == 1
     assert knowledge.close_count == 1
     assert drafts.close_count == 1
+    assert research.close_count == 1
     with pytest.raises(RuntimeError, match="closed"):
         _ = runtime.derived_knowledge_index
     with pytest.raises(RuntimeError, match="closed"):
