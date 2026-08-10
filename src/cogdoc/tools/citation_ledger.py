@@ -65,6 +65,20 @@ def is_valid_evidence_id(value: Any) -> bool:
         return False
 
 
+def citation_source_label(value: Any) -> str:
+    """Escape filename characters that collide with public citation syntax."""
+
+    return (
+        str(value or "")
+        .strip()
+        .replace("%", "%25")
+        .replace("[", "%5B")
+        .replace("]", "%5D")
+        .replace("\r", "%0D")
+        .replace("\n", "%0A")
+    )
+
+
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
@@ -128,7 +142,7 @@ def _display_citation(doc: Mapping[str, Any]) -> str:
             raise CitationLedgerError("derived evidence is missing knowledge_id")
         return f"[knowledge:{knowledge_id}]"
 
-    source = str(meta.get("source") or "").strip()
+    source = citation_source_label(meta.get("source"))
     page = _non_negative_int(meta.get("page"))
     if not source or page is None:
         raise CitationLedgerError("document evidence is missing source or page")
@@ -311,7 +325,7 @@ def _normalized_ledger_entry(raw: Any, *, index: int) -> dict[str, Any]:
         knowledge_id = str(raw.get("knowledge_id") or "").strip()
         expected_display = f"[knowledge:{knowledge_id}]" if knowledge_id else ""
     elif source_type == "document":
-        source = str(raw.get("source") or "").strip()
+        source = citation_source_label(raw.get("source"))
         page = _optional_non_negative_int(raw.get("page"), "page")
         expected_display = f"[{source}:P{page}]" if source and page is not None else ""
     else:

@@ -9,6 +9,7 @@ from cogdoc.service.kb_state import (
     GENERATION_READY,
 )
 from cogdoc.service import ingest_service
+from cogdoc.service import index_provenance
 from cogdoc.service.ingest_service import (
     build_kb_index_transactional,
     _hardlink_snapshot,
@@ -172,6 +173,7 @@ def test_transactional_build_commits_generation(tmp_path, monkeypatch):
     assert active is not None
     assert active["expected_count"] == 1
     assert active["status"] == GENERATION_READY
+    assert active["chunk_identity_version"] == ingest_service.CHUNK_IDENTITY_VERSION
     assert result.chunk_count == 1
 
 
@@ -340,6 +342,7 @@ def test_transactional_empty_creates_active_gen(tmp_path, monkeypatch):
     active = state.active()
     assert active is not None
     assert active["expected_count"] == 0
+    assert active["chunk_identity_version"] == ingest_service.CHUNK_IDENTITY_VERSION
     assert result.document_count == 0
     assert result.chunk_count == 0
 
@@ -477,6 +480,14 @@ def test_post_commit_exception_does_not_mark_failed(tmp_path, monkeypatch):
     active = state.active()
     assert active is not None
     assert active["status"] == GENERATION_READY
+    monkeypatch.setattr(index_provenance, "KBState", lambda _kb_id: state)
+    monkeypatch.setattr(index_provenance, "load_index_manifest", lambda _kb_id: {})
+    assert index_provenance.current_index_provenance(kb_id) == {
+        "index_generation": active["id"],
+        "index_build_version": ingest_service.INDEX_BUILD_VERSION,
+        "chunk_identity_version": ingest_service.CHUNK_IDENTITY_VERSION,
+        "source_versions": [],
+    }
     assert result is not None
 
 

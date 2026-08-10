@@ -1,4 +1,6 @@
 import asyncio
+import gc
+import weakref
 from contextlib import contextmanager
 from functools import partial
 from types import SimpleNamespace
@@ -170,6 +172,7 @@ def test_create_app_runtime_shutdown_ownership(tmp_path, monkeypatch):
     )
     asyncio.run(cycle(caller_app))
     assert caller_owned.closed is False
+    assert caller_app.state.single_instance_lock_handle is None
     caller_owned.close()
 
     app_owned = runtime_for("app")
@@ -180,6 +183,99 @@ def test_create_app_runtime_shutdown_ownership(tmp_path, monkeypatch):
     )
     asyncio.run(cycle(owned_app))
     assert app_owned.closed is True
+    assert owned_app.state.single_instance_lock_handle is None
+
+
+@pytest.mark.parametrize("undrained_component", ["research", "planning"])
+def test_create_app_retains_process_lock_while_background_work_is_undrained(
+    tmp_path, monkeypatch, undrained_component
+):
+    import cogdoc.api.app as app_module
+    from cogdoc.service.process_lock import acquire_single_instance_lock
+
+    lock_path = str(tmp_path / "deferred.lock")
+    monkeypatch.setattr(app_module, "configure_logging", lambda: None)
+    monkeypatch.setattr(
+        app_module,
+        "acquire_single_instance_lock",
+        lambda: acquire_single_instance_lock(lock_path),
+    )
+    monkeypatch.setattr(app_module, "cancel_all_timers", lambda: True)
+    monkeypatch.setattr(app_module, "drain_purge_queue", lambda: None)
+    monkeypatch.setattr(
+        app_module,
+        "shared_mutation_journal",
+        lambda: SimpleNamespace(recover_all=lambda: []),
+    )
+
+    class Sweeper:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    class UndrainedResearchManager:
+        def bind_observer(self, _observer):
+            pass
+
+        def reconcile_orphans(self):
+            return 0
+
+        def shutdown(self, *, wait=True):
+            assert wait is False
+            return undrained_component != "research"
+
+    class UndrainedPlanningRuntime:
+        def shutdown(self, *, wait=False, cancel_futures=True):
+            assert wait is False
+            assert cancel_futures is True
+            return False
+
+    monkeypatch.setattr(app_module, "BackgroundSweeper", Sweeper)
+    runtime = StateRuntime.from_settings(
+        Settings(
+            _env_file=None,
+            cogdoc_data_dir=str(tmp_path / "runtime"),
+            cogdoc_state_backend="jsonl",
+            cogdoc_feedback_store="jsonl",
+        )
+    )
+    app = create_app(
+        state_runtime=runtime,
+        close_state_runtime_on_shutdown=True,
+        research_execution_manager=UndrainedResearchManager(),
+        session_store=SessionStore(),
+    )
+    if undrained_component == "planning":
+        app.state.research_planning_executor = UndrainedPlanningRuntime()
+
+    async def cycle():
+        async with app.router.lifespan_context(app):
+            assert app.state.lifecycle_status == "ready"
+
+    contender = None
+    retained_ref = None
+    try:
+        asyncio.run(cycle())
+        retained_ref = weakref.ref(app.state.single_instance_lock_handle)
+        gc.collect()
+
+        assert retained_ref() is not None
+        assert retained_ref().closed is False
+        assert runtime.closed is False
+        contender = acquire_single_instance_lock(lock_path)
+        assert contender is None
+    finally:
+        if contender is not None:
+            app_module.release_single_instance_lock(contender)
+        retained = retained_ref() if retained_ref is not None else None
+        app_module._release_retained_single_instance_lock(retained)
+        app.state.single_instance_lock_handle = None
+        runtime.close()
 
 
 # 验证显式 Settings 会完整决定 JSONL runtime 路径，不会回退全局缓存配置。

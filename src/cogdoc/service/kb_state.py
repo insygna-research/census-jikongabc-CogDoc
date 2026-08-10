@@ -97,16 +97,25 @@ class KBState:
     # 代际生命周期。
 
     # begin_generation：处理对应功能。
-    def begin_generation(self, embedding_model: str, index_build_version: str) -> str:
+    def begin_generation(
+        self,
+        embedding_model: str,
+        index_build_version: str,
+        chunk_identity_version: str | None = None,
+    ) -> str:
         if not isinstance(embedding_model, str) or not embedding_model:
             raise ValueError("embedding_model must be a non-empty string")
         if not isinstance(index_build_version, str) or not index_build_version:
             raise ValueError("index_build_version must be a non-empty string")
+        if chunk_identity_version is not None and (
+            not isinstance(chunk_identity_version, str) or not chunk_identity_version
+        ):
+            raise ValueError("chunk_identity_version must be a non-empty string")
         with self._lock:
             data = self._load()
             gen_id = new_generation_id()
             # 记录构建起点的 epoch；切换时比对，期间被删库则拒绝提交。
-            data["generations"][gen_id] = {
+            generation = {
                 "id": gen_id,
                 "status": GENERATION_BUILDING,
                 "embedding_model": embedding_model,
@@ -116,6 +125,11 @@ class KBState:
                 "documents": [],
                 "created_at": time.time(),
             }
+            # 新代将分块身份契约与构建版本一起持久化。旧 state 可以没有
+            # 该字段；激活后的读者将从 state 中原子读取它，不再依赖提交后 manifest。
+            if chunk_identity_version is not None:
+                generation["chunk_identity_version"] = chunk_identity_version
+            data["generations"][gen_id] = generation
             self._save(data)
             return gen_id
 
@@ -250,6 +264,11 @@ def _valid_generation(gid: object, gen: object) -> bool:
     base_epoch = gen.get("base_epoch")
     created_at = gen.get("created_at")
     expected_count = gen.get("expected_count")
+    if "chunk_identity_version" in gen and (
+        not isinstance(gen["chunk_identity_version"], str)
+        or not gen["chunk_identity_version"]
+    ):
+        return False
     if (
         gen.get("id") != gid
         or status not in _VALID_STATUS

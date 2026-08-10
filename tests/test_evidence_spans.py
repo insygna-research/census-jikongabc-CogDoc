@@ -92,7 +92,7 @@ def test_context_fact_is_removed_from_model_visible_span_snapshot():
 
     assert "context" not in selected["meta"]
     assert "PRIVATE FACT" not in rendered
-    assert "Methods > Retrieval" in rendered
+    assert "Methods &gt; Retrieval" in rendered
     assert original["meta"]["context"] == "PRIVATE FACT OUTSIDE THE VERIFIED BODY"
 
 

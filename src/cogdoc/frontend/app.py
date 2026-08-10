@@ -4,8 +4,9 @@ import os
 import queue
 import threading
 import time
+import unicodedata
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import streamlit as st
 from cogdoc.frontend.api_client import (
     CogDocAPIError,
@@ -22,6 +23,7 @@ STREAM_PREVIEW_TAIL_CHARS = 3600
 SIDEBAR_CACHE_TTL_SECONDS = 2.0
 SIDEBAR_STREAM_CACHE_TTL_SECONDS = 30.0
 SIDEBAR_STALE_CACHE_GRACE_SECONDS = 120.0
+RESEARCH_SUMMARY_PAGE_SIZE = 20
 NO_REFERENCE_ANSWER = "在所提供的参考资料中未找到与该问题相关的内容，建议查阅更多资料。"
 TRACE_NODE_LABELS = {
     "runtime.setup": "运行准备",
@@ -37,7 +39,202 @@ TRACE_NODE_LABELS = {
     "compare_subgraph": "对比流程",
 }
 
-st.set_page_config(page_title="CogDoc", layout="wide")
+
+def _research_contract_key(value: object) -> str:
+    normalized = " ".join(str(value or "").split())
+    return unicodedata.normalize("NFKC", normalized).casefold()
+
+
+def _distinct_recovery_query(question: str, retrieval_query: str) -> str:
+    clean_question = " ".join(question.split())
+    retrieval_key = _research_contract_key(retrieval_query)
+    for prefix in ("直接证据：", "同一问题的相关资料：", "替代检索："):
+        candidate = f"{prefix}{clean_question}"[:1000]
+        if _research_contract_key(candidate) != retrieval_key:
+            return candidate
+    return f"{clean_question[:994]} 证据".strip()
+
+
+def _research_requirement_editor_lines(
+    original_requirements: Sequence[Mapping],
+) -> tuple[str, str, str]:
+    questions: list[str] = []
+    retrieval_queries: list[str] = []
+    recovery_queries: list[str] = []
+    for requirement in original_requirements:
+        question = " ".join(str(requirement.get("question") or "").split())
+        if not question:
+            continue
+        retrieval_query = " ".join(
+            str(requirement.get("retrieval_query") or question).split()
+        )
+        recovery_query = " ".join(
+            str(requirement.get("recovery_query") or "").split()
+        )
+        if (
+            not recovery_query
+            or _research_contract_key(retrieval_query)
+            == _research_contract_key(recovery_query)
+        ):
+            recovery_query = _distinct_recovery_query(question, retrieval_query)
+        questions.append(question)
+        retrieval_queries.append(retrieval_query)
+        recovery_queries.append(recovery_query)
+    return (
+        "\n".join(questions),
+        "\n".join(retrieval_queries),
+        "\n".join(recovery_queries),
+    )
+
+
+def _build_edited_research_requirements(
+    requirement_text: str,
+    retrieval_query_text: str,
+    recovery_query_text: str,
+    original_requirements: Sequence[Mapping],
+) -> list[dict[str, str]]:
+    questions = [
+        " ".join(line.split())
+        for line in requirement_text.splitlines()
+        if " ".join(line.split())
+    ][:3]
+    retrieval_rows = [
+        " ".join(line.split()) for line in retrieval_query_text.splitlines()
+    ]
+    recovery_rows = [
+        " ".join(line.split()) for line in recovery_query_text.splitlines()
+    ]
+    edited: list[dict[str, str]] = []
+    for position, question in enumerate(questions):
+        original = (
+            original_requirements[position]
+            if position < len(original_requirements)
+            else {}
+        )
+        original_question = " ".join(
+            str(original.get("question") or "").split()
+        )
+        original_retrieval = " ".join(
+            str(original.get("retrieval_query") or original_question).split()
+        )
+        original_recovery = " ".join(
+            str(original.get("recovery_query") or "").split()
+        )
+        if (
+            not original_recovery
+            or _research_contract_key(original_recovery)
+            == _research_contract_key(original_retrieval)
+        ):
+            original_recovery = _distinct_recovery_query(
+                original_question, original_retrieval
+            )
+        entered_retrieval = (
+            retrieval_rows[position] if position < len(retrieval_rows) else ""
+        )
+        entered_recovery = (
+            recovery_rows[position] if position < len(recovery_rows) else ""
+        )
+        question_changed = _research_contract_key(
+            question
+        ) != _research_contract_key(original_question)
+        retrieval_was_edited = bool(entered_retrieval) and (
+            _research_contract_key(entered_retrieval)
+            != _research_contract_key(original_retrieval)
+        )
+        recovery_was_edited = bool(entered_recovery) and (
+            _research_contract_key(entered_recovery)
+            != _research_contract_key(original_recovery)
+        )
+        retrieval_query = (
+            entered_retrieval
+            if not question_changed or retrieval_was_edited
+            else question
+        ) or question
+        recovery_query = (
+            entered_recovery
+            if not question_changed or recovery_was_edited
+            else _distinct_recovery_query(question, retrieval_query)
+        )
+        if (
+            not recovery_query
+            or _research_contract_key(recovery_query)
+            == _research_contract_key(retrieval_query)
+        ):
+            recovery_query = _distinct_recovery_query(question, retrieval_query)
+        edited.append(
+            {
+                "question": question,
+                "retrieval_query": retrieval_query,
+                "recovery_query": recovery_query,
+            }
+        )
+    return edited
+
+
+def _research_summary_cache_key(
+    base_url: str,
+    kb_id: str,
+    cursor: str | None,
+    status: str | None = None,
+    auth_identity: str = "anonymous",
+) -> tuple[str, str, str, str, str, str]:
+    return (
+        "research-summaries",
+        base_url,
+        auth_identity,
+        kb_id,
+        status or "",
+        cursor or "",
+    )
+
+
+def _research_summary_progress_label(summary: Mapping) -> str:
+    counts = summary.get("section_counts")
+    if not isinstance(counts, Mapping):
+        return "章节进度未知"
+    total = counts.get("total")
+    completed = counts.get("completed")
+    running = counts.get("running")
+    failed = counts.get("failed")
+    if any(type(value) is not int or value < 0 for value in (total, completed, running, failed)):
+        return "章节进度未知"
+    label = f"章节 {completed}/{total}"
+    if running:
+        label += f" · 进行中 {running}"
+    if failed:
+        label += f" · 失败 {failed}"
+    return label
+
+
+def _research_summary_status_label(value: object) -> str:
+    return {
+        "planned": "待开始",
+        "running": "取证中",
+        "paused": "已暂停",
+        "evidence_ready": "证据就绪",
+        "generating": "报告生成中",
+        "completed": "已完成",
+        "failed": "失败",
+        "cancelled": "已取消",
+    }.get(str(value or ""), "状态未知")
+
+
+def _research_summary_response_payload(response, cached_payload: object) -> Mapping:
+    if response.status_code == 304:
+        if not isinstance(cached_payload, Mapping):
+            raise ValueError("摘要接口返回 304，但本地没有可复用的案卷索引")
+        return cached_payload
+    if response.status_code != 200:
+        raise ValueError(_response_error(response, "读取研究案卷索引失败"))
+    payload = response_payload(response)
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("jobs"), list):
+        raise ValueError("研究案卷索引响应格式不符合预期")
+    if type(payload.get("has_more", False)) is not bool:
+        raise ValueError("研究案卷索引分页状态不符合预期")
+    next_cursor = payload.get("next_cursor")
+    if next_cursor is not None and type(next_cursor) is not str:
+        raise ValueError("研究案卷索引游标不符合预期")
+    return payload
 
 
 # 创建测试客户端。
@@ -80,6 +277,9 @@ def _init_state() -> None:
     st.session_state.setdefault("retrieve_debug_by_context", {})
     st.session_state.setdefault("feedback_action_by_message", {})
     st.session_state.setdefault("research_notice", None)
+    st.session_state.setdefault("research_summary_cache", {})
+    st.session_state.setdefault("research_summary_pages", {})
+    st.session_state.setdefault("research_open_job_by_kb", {})
     # 兼容旧状态：升级前只有一份全局消息，迁移到当前上下文桶里。
     if "messages" in st.session_state:
         if st.session_state.kb_id and st.session_state.messages:
@@ -143,6 +343,19 @@ def _clear_api_cache(prefix: tuple | None = None) -> None:
     for key in list(st.session_state.api_cache):
         if key[: len(prefix)] == prefix:
             st.session_state.api_cache.pop(key, None)
+
+
+def _clear_research_summary_cache(client: CogDocClient, kb_id: str) -> None:
+    cache = st.session_state.research_summary_cache
+    prefix = (
+        "research-summaries",
+        client.base_url,
+        getattr(client, "auth_cache_identity", "anonymous"),
+        kb_id,
+    )
+    for key in list(cache):
+        if isinstance(key, tuple) and key[: len(prefix)] == prefix:
+            cache.pop(key, None)
 
 
 # 处理上下文键。
@@ -2903,6 +3116,7 @@ def _research_area(kb_id: str | None) -> None:
         "先确定研究目标和可验证问题，再检索候选证据、执行闭集校验并生成带引用报告。"
     )
     if st.button("刷新研究进度", key=f"research-refresh-{kb_id}"):
+        _clear_research_summary_cache(client, kb_id)
         st.rerun()
     with st.form(f"research-create-{kb_id}", clear_on_submit=True):
         title = st.text_input("任务标题（可选）", max_chars=160)
@@ -2932,8 +3146,20 @@ def _research_area(kb_id: str | None) -> None:
                 objective.strip(),
                 title=title.strip(),
                 section_titles=section_titles,
+                is_local=bool(st.session_state.get("is_local", False)),
             )
             if response.status_code == 201:
+                created_payload = response_payload(response)
+                created_job = (
+                    created_payload.get("job")
+                    if isinstance(created_payload, Mapping)
+                    else None
+                )
+                if isinstance(created_job, Mapping) and created_job.get("job_id"):
+                    st.session_state.research_open_job_by_kb[kb_id] = str(
+                        created_job["job_id"]
+                    )
+                _clear_research_summary_cache(client, kb_id)
                 st.session_state.research_notice = {
                     "kind": "success",
                     "message": "研究计划已创建。",
@@ -2942,19 +3168,146 @@ def _research_area(kb_id: str | None) -> None:
             else:
                 st.error(_response_error(response, "创建研究计划失败"))
 
+    auth_identity = getattr(client, "auth_cache_identity", "anonymous")
+    page_state_key = (auth_identity, kb_id)
+    page_state = st.session_state.research_summary_pages.setdefault(
+        page_state_key, {"cursor": None, "history": []}
+    )
+    if not isinstance(page_state, dict):
+        page_state = {"cursor": None, "history": []}
+        st.session_state.research_summary_pages[page_state_key] = page_state
+    cursor = page_state.get("cursor")
+    if cursor is not None and type(cursor) is not str:
+        cursor = None
+        page_state["cursor"] = None
+    history = page_state.get("history")
+    if not isinstance(history, list):
+        history = []
+        page_state["history"] = history
+    cache_key = _research_summary_cache_key(
+        client.base_url,
+        kb_id,
+        cursor,
+        auth_identity=auth_identity,
+    )
+    cache_entry = st.session_state.research_summary_cache.get(cache_key)
+    cached_payload = (
+        cache_entry.get("payload") if isinstance(cache_entry, Mapping) else None
+    )
+    cached_etag = cache_entry.get("etag") if isinstance(cache_entry, Mapping) else None
     try:
-        response = client.list_research_jobs(kb_id)
+        response = client.list_research_job_summaries(
+            kb_id,
+            limit=RESEARCH_SUMMARY_PAGE_SIZE,
+            cursor=cursor,
+            if_none_match=(cached_etag if type(cached_etag) is str else None),
+        )
+        payload = _research_summary_response_payload(response, cached_payload)
     except Exception as exc:
-        st.error(f"读取研究计划失败：{exc}")
+        st.error(f"读取研究案卷索引失败：{exc}")
         return
-    if response.status_code != 200:
-        st.error(_response_error(response, "读取研究计划失败"))
+    if response.status_code == 200:
+        st.session_state.research_summary_cache[cache_key] = {
+            "etag": str(response.headers.get("ETag") or ""),
+            "payload": dict(payload),
+        }
+    summaries = [item for item in payload.get("jobs", []) if isinstance(item, Mapping)]
+    selected_job_id = str(
+        st.session_state.research_open_job_by_kb.get(kb_id) or ""
+    )
+
+    st.markdown("#### 案卷索引")
+    st.caption("索引只显示进度与审阅信号；打开一份案卷后才读取计划、证据和报告。")
+    if not summaries:
+        st.info("当前页没有研究案卷。" if cursor else "暂无研究计划。")
+    for summary in summaries:
+        summary_job_id = str(summary.get("job_id") or "")
+        title_label = str(
+            summary.get("title") or summary.get("objective_preview") or summary_job_id
+        )
+        summary_status = str(summary.get("status") or "")
+        revision = int(summary.get("revision") or 1)
+        index_columns = st.columns([5.2, 2.2, 1.4], vertical_alignment="center")
+        index_columns[0].markdown(f"**{title_label}**")
+        index_columns[0].caption(
+            str(summary.get("objective_preview") or "（未提供研究目标摘要）")
+        )
+        status_bits = [
+            _research_summary_status_label(summary_status),
+            _research_summary_progress_label(summary),
+            f"r{revision}",
+        ]
+        if summary.get("provenance_status") == "stale":
+            status_bits.append("证据已过期")
+        elif summary.get("review_status") == "published":
+            status_bits.append("已发布")
+        index_columns[1].caption(" · ".join(status_bits))
+        is_open = selected_job_id == summary_job_id
+        if index_columns[2].button(
+            "当前工作区" if is_open else "打开工作区",
+            key=f"research-open-{kb_id}-{summary_job_id}-{revision}",
+            type="primary" if is_open else "secondary",
+            disabled=is_open,
+            use_container_width=True,
+        ):
+            st.session_state.research_open_job_by_kb[kb_id] = summary_job_id
+            st.rerun()
+
+    previous_column, page_label_column, next_column = st.columns([1, 3, 1])
+    if previous_column.button(
+        "上一页",
+        key=f"research-summary-previous-{kb_id}-{cursor or 'first'}",
+        disabled=not history,
+        use_container_width=True,
+    ):
+        page_state["cursor"] = history.pop() if history else None
+        st.rerun()
+    page_label_column.caption(
+        f"第 {len(history) + 1} 页 · 本页 {len(summaries)} 份案卷"
+    )
+    next_cursor = payload.get("next_cursor")
+    has_more = bool(payload.get("has_more")) and type(next_cursor) is str
+    if next_column.button(
+        "下一页",
+        key=f"research-summary-next-{kb_id}-{cursor or 'first'}",
+        disabled=not has_more,
+        use_container_width=True,
+    ):
+        history.append(cursor)
+        page_state["cursor"] = next_cursor
+        st.rerun()
+
+    selected_job_id = str(
+        st.session_state.research_open_job_by_kb.get(kb_id) or ""
+    )
+    if not selected_job_id:
         return
-    payload = response_payload(response)
-    jobs = payload.get("jobs", []) if isinstance(payload, Mapping) else []
-    if not jobs:
-        st.info("暂无研究计划。")
+    st.divider()
+    workspace_header, workspace_close = st.columns([5, 1], vertical_alignment="center")
+    workspace_header.markdown("#### 打开的研究工作区")
+    if workspace_close.button(
+        "收起",
+        key=f"research-workspace-close-{kb_id}-{selected_job_id}",
+        use_container_width=True,
+    ):
+        st.session_state.research_open_job_by_kb.pop(kb_id, None)
+        st.rerun()
+    try:
+        detail_response = client.get_research_job(selected_job_id)
+    except Exception as exc:
+        st.error(f"读取研究工作区失败：{exc}")
         return
+    if detail_response.status_code != 200:
+        st.error(_response_error(detail_response, "读取研究工作区失败"))
+        return
+    detail_payload = response_payload(detail_response)
+    detail_job = (
+        detail_payload.get("job") if isinstance(detail_payload, Mapping) else None
+    )
+    if not isinstance(detail_job, Mapping):
+        st.error("研究工作区响应格式不符合预期")
+        return
+    jobs = [detail_job]
 
     for job in jobs:
         if not isinstance(job, Mapping):
@@ -2963,13 +3316,46 @@ def _research_area(kb_id: str | None) -> None:
         title_label = str(job.get("title") or job.get("objective") or job_id)
         status = str(job.get("status") or "planned")
         report_status = str(job.get("report_status") or "not_started")
+        provenance_status = str(job.get("provenance_status") or "untracked")
+        provenance_stale = provenance_status == "stale"
         revision = int(job.get("revision") or 1)
-        with st.expander(f"{title_label} · {status} · r{revision}"):
+        with st.expander(
+            f"{title_label} · {status} · r{revision}", expanded=True
+        ):
             st.write(str(job.get("objective") or ""))
             st.caption(f"任务 ID：`{job_id}` · 最后更新：{job.get('updated_at') or '-'}")
+            st.caption(
+                "执行后端：" + ("本地 Ollama" if job.get("is_local") else "云端模型")
+            )
+            if provenance_stale:
+                reasons = [
+                    str(reason)
+                    for reason in job.get("provenance_stale_reasons") or []
+                    if str(reason)
+                ]
+                st.warning(
+                    "知识库索引、来源文件或审核知识已变化；旧证据不能继续生成、"
+                    "审阅或发布。"
+                    + (f"\n\n变更：{'；'.join(reasons)}" if reasons else "")
+                )
+            elif provenance_status == "current":
+                snapshot = job.get("evidence_provenance") or {}
+                st.caption(
+                    "证据版本已锁定"
+                    f" · 索引代：{snapshot.get('index_generation') or '-'}"
+                )
             action_columns = st.columns(3)
             requested_action = None
-            if status == "evidence_ready" and action_columns[0].button(
+            if (
+                provenance_stale
+                and str(job.get("review_status") or "") != "published"
+            ):
+                if action_columns[0].button(
+                    "按当前索引重新取证",
+                    key=f"research-refresh-evidence-{job_id}-{revision}",
+                ):
+                    requested_action = "refresh"
+            elif status == "evidence_ready" and action_columns[0].button(
                 "校验并生成报告", key=f"research-generate-{job_id}-{revision}"
             ):
                 requested_action = "generate"
@@ -3005,6 +3391,26 @@ def _research_area(kb_id: str | None) -> None:
                     "取消任务", key=f"research-cancel-{job_id}-{revision}"
                 ):
                     requested_action = "cancel"
+            plan_locked = status in {"running", "generating"} or str(
+                job.get("review_status") or ""
+            ) == "published"
+            if not plan_locked and action_columns[2].button(
+                "AI 规划大纲",
+                key=f"research-auto-plan-{job_id}-{revision}",
+                help="根据研究目标与当前知识库来源生成可编辑的原子取证计划。",
+            ):
+                plan_response = client.generate_research_plan(
+                    job_id,
+                    expected_revision=revision,
+                    is_local=bool(job.get("is_local", False)),
+                )
+                if plan_response.status_code == 200:
+                    st.session_state.research_notice = {
+                        "kind": "success",
+                        "message": "智能大纲已生成，请审阅后再开始检索。",
+                    }
+                    st.rerun()
+                st.error(_response_error(plan_response, "生成智能大纲失败"))
             if requested_action:
                 action_response = client.research_action(job_id, requested_action)
                 if action_response.status_code in {200, 202}:
@@ -3027,19 +3433,70 @@ def _research_area(kb_id: str | None) -> None:
                         "标题",
                         value=str(section.get("title") or ""),
                         key=f"research-title-{job_id}-{revision}-{position}",
-                        disabled=status in {"running", "generating"},
+                        disabled=plan_locked,
                     )
                     edited_question = st.text_area(
                         "可验证研究问题",
                         value=str(section.get("research_question") or ""),
                         height=80,
                         key=f"research-question-{job_id}-{revision}-{position}",
-                        disabled=status in {"running", "generating"},
+                        disabled=plan_locked,
+                    )
+                    original_requirements = [
+                        requirement
+                        for requirement in section.get("evidence_requirements") or []
+                        if isinstance(requirement, Mapping)
+                    ]
+                    (
+                        requirement_editor_value,
+                        retrieval_editor_value,
+                        recovery_editor_value,
+                    ) = _research_requirement_editor_lines(original_requirements)
+                    edited_requirement_text = st.text_area(
+                        "原子证据需求（每行一个，最多 3 项）",
+                        value=requirement_editor_value,
+                        height=90,
+                        key=f"research-requirements-{job_id}-{revision}-{position}",
+                        disabled=plan_locked,
+                    )
+                    edited_retrieval_text = st.text_area(
+                        "主检索表达（与需求逐行对应）",
+                        value=retrieval_editor_value,
+                        height=90,
+                        key=(
+                            f"research-retrieval-queries-{job_id}-{revision}-{position}"
+                        ),
+                        disabled=plan_locked,
+                    )
+                    edited_recovery_text = st.text_area(
+                        "恢复检索表达（语义一致，但措辞必须不同）",
+                        value=recovery_editor_value,
+                        height=90,
+                        key=(
+                            f"research-recovery-queries-{job_id}-{revision}-{position}"
+                        ),
+                        disabled=plan_locked,
+                        help="当需求改变时，未手动改写的两条查询会自动重建；恢复查询不会与主查询相同。",
+                    )
+                    edited_requirements = _build_edited_research_requirements(
+                        edited_requirement_text,
+                        edited_retrieval_text,
+                        edited_recovery_text,
+                        original_requirements,
+                    )
+                    edited_success_criteria = st.text_area(
+                        "完成标准",
+                        value=str(section.get("success_criteria") or ""),
+                        height=70,
+                        key=f"research-success-{job_id}-{revision}-{position}",
+                        disabled=plan_locked,
                     )
                     edited_sections.append(
                         {
                             "title": edited_title.strip(),
                             "research_question": edited_question.strip(),
+                            "evidence_requirements": edited_requirements,
+                            "success_criteria": edited_success_criteria.strip(),
                         }
                     )
                     st.caption(
@@ -3051,6 +3508,37 @@ def _research_area(kb_id: str | None) -> None:
                             "闭集校验："
                             f"{section.get('verification_status')}"
                             f" · 生成：{section.get('generation_status') or '-'}"
+                        )
+                    claim_audit = section.get("claim_audit")
+                    if isinstance(claim_audit, Mapping) and claim_audit.get("status"):
+                        repair = claim_audit.get("repair") or {}
+                        st.caption(
+                            "声明审计："
+                            f"{claim_audit.get('status')}"
+                            + (
+                                " · 已执行一次有界修复"
+                                if isinstance(repair, Mapping)
+                                and repair.get("attempted")
+                                else ""
+                            )
+                        )
+                    coverage_audit = section.get("coverage_audit")
+                    if (
+                        isinstance(coverage_audit, Mapping)
+                        and coverage_audit.get("status")
+                    ):
+                        missing_ids = coverage_audit.get("missing_requirement_ids")
+                        missing_label = (
+                            " · 缺失：" + ", ".join(str(item) for item in missing_ids)
+                            if isinstance(missing_ids, list) and missing_ids
+                            else ""
+                        )
+                        st.caption(
+                            "原子需求覆盖："
+                            f"{coverage_audit.get('status')}"
+                            f" · {coverage_audit.get('covered_count', 0)}/"
+                            f"{coverage_audit.get('requirement_count', 0)}"
+                            f"{missing_label}"
                         )
                     if section.get("content"):
                         st.markdown(str(section.get("content") or ""))
@@ -3073,7 +3561,7 @@ def _research_area(kb_id: str | None) -> None:
                 update_submitted = st.form_submit_button(
                     "保存计划修订",
                     use_container_width=True,
-                    disabled=status in {"running", "generating"},
+                    disabled=plan_locked,
                 )
             if update_submitted:
                 if any(
@@ -3081,6 +3569,11 @@ def _research_area(kb_id: str | None) -> None:
                     for item in edited_sections
                 ):
                     st.warning("章节标题和研究问题都不能为空。")
+                    continue
+                if any(
+                    not item["evidence_requirements"] for item in edited_sections
+                ):
+                    st.warning("每个章节至少需要一条原子证据需求。")
                     continue
                 update_response = client.update_research_plan(
                     job_id,
@@ -3127,7 +3620,10 @@ def _research_area(kb_id: str | None) -> None:
                 )
                 st.markdown(report_content)
 
-                if review_status not in {"published", "not_started"}:
+                if (
+                    review_status not in {"published", "not_started"}
+                    and not provenance_stale
+                ):
                     with st.form(f"research-review-{job_id}-r{revision}"):
                         st.markdown("#### 逐章审阅")
                         review_decisions = []
@@ -3172,7 +3668,10 @@ def _research_area(kb_id: str | None) -> None:
                                     f"research-review-note-{job_id}-"
                                     f"{revision}-{section_id}"
                                 ),
-                                help="退回修订时必填；该意见会进入下一轮检索和生成。",
+                                help=(
+                                    "退回修订或接受证据缺口时必填；退回意见会进入"
+                                    "下一轮检索和生成。"
+                                ),
                             )
                             if decision != "pending":
                                 review_decisions.append(
@@ -3190,11 +3689,12 @@ def _research_area(kb_id: str | None) -> None:
                         if not review_decisions:
                             st.warning("请至少选择一个审阅决定。")
                         elif any(
-                            item["decision"] == "changes_requested"
+                            item["decision"]
+                            in {"changes_requested", "accepted_gap"}
                             and not item["note"]
                             for item in review_decisions
                         ):
-                            st.warning("退回修订必须填写审阅意见。")
+                            st.warning("退回修订或接受证据缺口必须填写审阅意见。")
                         else:
                             review_response = client.review_research_report(
                                 job_id,
@@ -3211,7 +3711,7 @@ def _research_area(kb_id: str | None) -> None:
                                 _response_error(review_response, "保存审阅决定失败")
                             )
 
-                if review_status == "approved":
+                if review_status == "approved" and not provenance_stale:
                     if st.button(
                         "发布已审阅报告",
                         type="primary",
@@ -3230,17 +3730,79 @@ def _research_area(kb_id: str | None) -> None:
                             st.rerun()
                         st.error(_response_error(publish_response, "发布报告失败"))
                 elif review_status == "published":
-                    published = job.get("published_report")
-                    if isinstance(published, Mapping) and published.get("content"):
-                        st.success("该版本已完成审阅并发布。")
-                        st.download_button(
-                            "下载已发布报告",
-                            data=str(published.get("content") or ""),
-                            file_name=f"{job_id}-published.md",
-                            mime="text/markdown",
-                            key=f"research-published-download-{job_id}-{revision}",
-                            use_container_width=True,
+                    st.success("该版本已完成审阅并发布。")
+                    published_response = None
+                    if st.button(
+                        "准备已发布 Markdown",
+                        key=f"research-published-report-{job_id}-{revision}",
+                        use_container_width=True,
+                        help=(
+                            "始终从服务端完整性校验端点读取；旧版报告会明确"
+                            "标记为未验证。"
+                        ),
+                    ):
+                        published_response = client.get_published_research_report(
+                            job_id
                         )
+                    if published_response is not None:
+                        if published_response.status_code == 200:
+                            integrity = published_response.headers.get(
+                                "X-CogDoc-Integrity", "legacy-unverified"
+                            )
+                            if integrity == "legacy-unverified":
+                                st.warning(
+                                    "这是升级前的旧版 Markdown，可下载查阅，但没有"
+                                    "完整审计承诺，不能作为可验证交付包。"
+                                )
+                            else:
+                                st.caption("完整性状态：verified")
+                            st.download_button(
+                                "下载已发布报告",
+                                data=published_response.content,
+                                file_name=f"{job_id}-published.md",
+                                mime="text/markdown",
+                                key=(
+                                    f"research-published-download-{job_id}-{revision}"
+                                ),
+                                use_container_width=True,
+                            )
+                        else:
+                            st.error(
+                                _response_error(
+                                    published_response, "读取已发布报告失败"
+                                )
+                            )
+                    bundle_response = None
+                    if st.button(
+                        "准备可验证交付包",
+                        key=f"research-published-bundle-{job_id}-{revision}",
+                        use_container_width=True,
+                        help=(
+                            "生成包含 Markdown、引用账本、证据版本快照、"
+                            "审计承诺和完整性清单的 ZIP。"
+                        ),
+                    ):
+                        bundle_response = client.get_published_research_bundle(job_id)
+                    if bundle_response is not None:
+                        if bundle_response.status_code == 200:
+                            st.download_button(
+                                "下载 ZIP 交付包",
+                                data=bundle_response.content,
+                                file_name=f"{job_id}-published-bundle.zip",
+                                mime="application/zip",
+                                key=(
+                                    f"research-published-bundle-download-"
+                                    f"{job_id}-{revision}"
+                                ),
+                                use_container_width=True,
+                            )
+                        else:
+                            st.error(
+                                _response_error(
+                                    bundle_response,
+                                    "生成可验证交付包失败",
+                                )
+                            )
 
 
 # 处理对话区。
@@ -3359,6 +3921,7 @@ def _brand_header() -> None:
 
 # 启动入口。
 def main() -> None:
+    st.set_page_config(page_title="CogDoc", layout="wide")
     _init_state()
     _hide_default_chrome()
     _brand_header()
@@ -3366,4 +3929,5 @@ def main() -> None:
     _chat_area()
 
 
-main()
+if __name__ == "__main__":
+    main()

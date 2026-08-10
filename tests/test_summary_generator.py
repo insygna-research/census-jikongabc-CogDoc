@@ -40,7 +40,7 @@ def test_summary_and_compare_use_the_shared_claim_evidence_renderer():
     rendered = format_summary_context([doc])
 
     assert rendered == render_evidence_context([doc])
-    assert "章节路径：Methods > Training" in rendered
+    assert "章节路径：Methods &gt; Training" in rendered
     assert "定位上下文：" in rendered
 
 

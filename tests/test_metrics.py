@@ -1,8 +1,10 @@
+import json
 import pytest
 from httpx import ASGITransport, AsyncClient
 from cogdoc.api.app import create_app
 from cogdoc.api.metrics import Metrics
 from cogdoc.api.session_store import SessionStore
+from cogdoc.service.research_observability import ResearchObserver
 from cogdoc.service.chat_service import ChatResult
 
 
@@ -399,3 +401,279 @@ async def test_rejected_requests_are_counted(monkeypatch):
             await c.post("/v1/chat", json={"query": "q", "doc_id": "kb"})
             scraped = (await c.get("/metrics")).text
     assert 'status="401"' in scraped
+
+
+def test_research_metrics_normalize_unknown_labels_and_malformed_values():
+    metrics = Metrics()
+    secret = "tenant-a/private report body"
+
+    metrics.observe_research_lifecycle(secret, secret)
+    metrics.research_background_started(secret)
+    metrics.research_background_finished(
+        secret,
+        secret,
+        duration_ms=float("nan"),
+    )
+    metrics.observe_research_termination(secret)
+    metrics.observe_research_section(
+        candidate_count=-4,
+        evidence_count=float("inf"),
+    )
+    metrics.observe_research_coverage_audit(
+        {"status": secret, "claims": [{"text": secret}]}
+    )
+    metrics.observe_research_provider_call(
+        secret,
+        secret,
+        secret,
+        duration_ms=float("inf"),
+    )
+
+    scraped = metrics.render().decode()
+    assert (
+        'cogdoc_research_lifecycle_total{action="unknown",outcome="unknown"} 1.0'
+        in scraped
+    )
+    assert (
+        'cogdoc_research_background_total{outcome="unknown",stage="unknown"} 1.0'
+        in scraped
+    )
+    assert 'cogdoc_research_background_in_progress{stage="unknown"} 0.0' in scraped
+    assert 'cogdoc_research_terminations_total{reason="unknown"} 1.0' in scraped
+    assert 'cogdoc_research_coverage_audits_total{status="unknown"} 1.0' in scraped
+    assert (
+        'cogdoc_research_provider_calls_total{isolation="unknown",outcome="unknown",provider="unknown"} 1.0'
+        in scraped
+    )
+    assert "cogdoc_research_section_candidate_count_count 1.0" in scraped
+    assert "cogdoc_research_section_candidate_count_sum 0.0" in scraped
+    assert "cogdoc_research_section_evidence_count_count 1.0" in scraped
+    assert "cogdoc_research_section_evidence_count_sum 0.0" in scraped
+    # An invalid duration is omitted rather than becoming a NaN/Inf sample.
+    assert (
+        'cogdoc_research_background_duration_seconds_count{stage="unknown"}'
+        not in scraped
+    )
+    assert (
+        'cogdoc_research_provider_call_duration_seconds_count{isolation="unknown",outcome="unknown",provider="unknown"}'
+        not in scraped
+    )
+    assert secret not in scraped
+
+
+def test_research_orphan_metrics_preserve_reason_counts():
+    metrics = Metrics()
+    observer = ResearchObserver(metrics)
+
+    observer.orphan_reconciled(
+        count=3,
+        termination_counts={"service_restarted": 2, "deadline_exceeded": 1},
+    )
+
+    scraped = metrics.render().decode()
+    assert (
+        'cogdoc_research_terminations_total{reason="service_restarted"} 2.0'
+        in scraped
+    )
+    assert (
+        'cogdoc_research_terminations_total{reason="deadline_exceeded"} 1.0'
+        in scraped
+    )
+
+
+def test_research_observer_emits_only_content_free_structured_fields(monkeypatch):
+    import cogdoc.service.research_observability as observability
+
+    emitted = []
+
+    def capture(logger_name, event, state, level, **fields):
+        emitted.append(
+            {
+                "logger": logger_name,
+                "event": event,
+                "state": state,
+                "level": level,
+                "fields": fields,
+            }
+        )
+
+    monkeypatch.setattr(observability, "log_event", capture)
+    metrics = Metrics()
+    observer = ResearchObserver(metrics)
+    secret = "PRIVATE objective query evidence claim and full report content"
+
+    observer.lifecycle(
+        action="start",
+        outcome="accepted",
+        job_id="rj_safe",
+        kb_id="kb-safe",
+        execution_id="exec-safe",
+        status="running",
+        error_class=secret,
+    )
+    observer.background_started(
+        stage="evidence",
+        job_id="rj_safe",
+        kb_id="kb-safe",
+        execution_id="exec-safe",
+    )
+    observer.section_completed(
+        job_id="rj_safe",
+        kb_id="kb-safe",
+        execution_id="exec-safe",
+        section_id="s1",
+        status="partial",
+        candidate_count=7,
+        evidence_count=3,
+        query_count=2,
+        duration_ms=12.5,
+        error_class=secret,
+    )
+    observer.coverage_audit(
+        audit={
+            "status": "failed",
+            "requirement_count": 2,
+            "covered_count": 1,
+            "missing_requirement_ids": ["s1:r2"],
+            "reason_code": secret,
+            "claims": [{"text": secret}],
+            "report": secret,
+            "repair": {"attempt_count": 1, "error": secret},
+        },
+        job_id="rj_safe",
+        kb_id="kb-safe",
+        execution_id="report-safe",
+        section_id="s1",
+        error_class=secret,
+    )
+    observer.background_finished(
+        stage="evidence",
+        outcome="succeeded",
+        job_id="rj_safe",
+        kb_id="kb-safe",
+        execution_id="exec-safe",
+        status="evidence_ready",
+        duration_ms=50,
+    )
+    observer.control_terminated(
+        reason=secret,
+        job_id="rj_safe",
+        kb_id="kb-safe",
+        execution_id="exec-safe",
+        section_id="s1",
+        stage=secret,
+        status=secret,
+        error_class=secret,
+    )
+    observer.provider_call(
+        provider=secret,
+        isolation=secret,
+        outcome=secret,
+        job_id="rj_safe",
+        kb_id="kb-safe",
+        execution_id="exec-safe",
+        section_id="s1",
+        stage=secret,
+        duration_ms=12.5,
+        error_class=secret,
+    )
+
+    serialized = json.dumps(emitted, ensure_ascii=False)
+    assert secret not in serialized
+    assert emitted
+    assert all(item["logger"] == "research" for item in emitted)
+    allowed_state_fields = {"request_id", "trace_id"}
+    allowed_log_fields = {
+        "job_id",
+        "kb_id",
+        "execution_id",
+        "section_id",
+        "action",
+        "outcome",
+        "stage",
+        "status",
+        "candidate_count",
+        "evidence_count",
+        "query_count",
+        "requirement_count",
+        "covered_count",
+        "missing_count",
+        "repair_attempt_count",
+        "duration_ms",
+        "error_class",
+        "reason",
+        "count",
+    }
+    assert all(set(item["state"]) <= allowed_state_fields for item in emitted)
+    assert all(set(item["fields"]) <= allowed_log_fields for item in emitted)
+    coverage = next(
+        item for item in emitted if item["event"] == "research_coverage_audit"
+    )
+    assert coverage["fields"]["requirement_count"] == 2
+    assert coverage["fields"]["covered_count"] == 1
+    assert coverage["fields"]["missing_count"] == 1
+    assert coverage["fields"]["error_class"] == "unknown"
+    provider_call = next(
+        item for item in emitted if item["event"] == "research_provider_call"
+    )
+    assert provider_call["fields"] == {
+        "job_id": "rj_safe",
+        "kb_id": "kb-safe",
+        "execution_id": "exec-safe",
+        "section_id": "s1",
+        "stage": "unknown",
+        "duration_ms": 12.5,
+        "error_class": "unknown",
+    }
+    scraped = metrics.render().decode()
+    assert (
+        'cogdoc_research_provider_calls_total{isolation="unknown",outcome="unknown",provider="unknown"} 1.0'
+        in scraped
+    )
+    assert secret not in scraped
+
+
+def test_research_provider_metrics_record_closed_labels_and_duration():
+    metrics = Metrics()
+
+    metrics.observe_research_provider_call(
+        "LLM",
+        "PROCESS",
+        "SUCCEEDED",
+        duration_ms=250,
+    )
+
+    scraped = metrics.render().decode()
+    labels = 'isolation="process",outcome="succeeded",provider="llm"'
+    assert f"cogdoc_research_provider_calls_total{{{labels}}} 1.0" in scraped
+    assert (
+        f"cogdoc_research_provider_call_duration_seconds_count{{{labels}}} 1.0"
+        in scraped
+    )
+    assert (
+        f"cogdoc_research_provider_call_duration_seconds_sum{{{labels}}} 0.25"
+        in scraped
+    )
+
+
+def test_research_observer_never_propagates_metric_or_log_failures(monkeypatch):
+    import cogdoc.service.research_observability as observability
+
+    class BrokenMetrics:
+        def observe_research_lifecycle(self, *_args, **_kwargs):
+            raise RuntimeError("metrics unavailable")
+
+    def broken_log(*_args, **_kwargs):
+        raise RuntimeError("logging unavailable")
+
+    monkeypatch.setattr(observability, "log_event", broken_log)
+    observer = ResearchObserver(BrokenMetrics())
+
+    # Telemetry must remain a side channel even when both sinks are unavailable.
+    observer.lifecycle(
+        action=object(),
+        outcome=object(),
+        job_id=object(),
+        status=object(),
+        error_class=object(),
+    )

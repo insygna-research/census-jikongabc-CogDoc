@@ -19,6 +19,7 @@ RELIABILITY_SOAK_CONCURRENCY ?= 10
 RELIABILITY_REQUEST_TIMEOUT ?= 3
 RELIABILITY_MIN_SUCCESS_RATE ?= 0.99
 RELIABILITY_MAX_P95_MS ?= 750
+UVICORN_GRACEFUL_SHUTDOWN_SECONDS ?= 15
 
 # src-layout：包源码在 src/，入口经 PYTHONPATH 注入，无需先安装即可 run/serve/test。
 export PYTHONPATH := src
@@ -78,7 +79,7 @@ reliability-gate:
 	$(PYTHON) scripts/run_guarded.py --timeout $(RELIABILITY_TEST_TIMEOUT) --grace $(RELIABILITY_GRACE) --diagnostic $(RELIABILITY_DIR)/test-timeout.json -- $(PYTHON) -m pytest
 	$(PYTHON) scripts/run_guarded.py --timeout $(RELIABILITY_EVAL_TIMEOUT) --grace $(RELIABILITY_GRACE) --diagnostic $(RELIABILITY_DIR)/eval-index-timeout.json -- env COGDOC_DATA_DIR=$(RELIABILITY_EVAL_DATA_DIR) $(PYTHON) scripts/prepare_eval_index.py --kb-id $(RELIABILITY_EVAL_KB_ID) --source-dir $(RELIABILITY_EVAL_SOURCE_DIR) --eval-set eval/retrieval_eval.jsonl --json $(RELIABILITY_DIR)/eval-index.json
 	$(PYTHON) scripts/run_guarded.py --timeout $(RELIABILITY_EVAL_TIMEOUT) --grace $(RELIABILITY_GRACE) --diagnostic $(RELIABILITY_DIR)/eval-timeout.json -- env COGDOC_DATA_DIR=$(RELIABILITY_EVAL_DATA_DIR) $(PYTHON) scripts/eval_suite.py $(EVAL_SUITE_RELEASE_ARGS) --json $(RELIABILITY_DIR)/eval-suite.json
-	$(PYTHON) scripts/run_guarded.py --timeout $(RELIABILITY_SOAK_TIMEOUT) --grace $(RELIABILITY_GRACE) --diagnostic $(RELIABILITY_DIR)/soak-timeout.json -- $(SHELL) -c 'set -euo pipefail; $(PYTHON) -m uvicorn cogdoc.api.app:app --host $(RELIABILITY_API_HOST) --port $(RELIABILITY_API_PORT) & pid=$$!; cleanup() { kill -TERM $$pid 2>/dev/null || true; wait $$pid 2>/dev/null || true; }; trap cleanup EXIT INT TERM; $(PYTHON) scripts/soak_api.py --url $(RELIABILITY_API_URL) --requests $(RELIABILITY_SOAK_REQUESTS) --concurrency $(RELIABILITY_SOAK_CONCURRENCY) --timeout $(RELIABILITY_REQUEST_TIMEOUT) --startup-timeout 30 --min-success-rate $(RELIABILITY_MIN_SUCCESS_RATE) --max-p95-ms $(RELIABILITY_MAX_P95_MS) --json $(RELIABILITY_DIR)/soak.json'
+	$(PYTHON) scripts/run_guarded.py --timeout $(RELIABILITY_SOAK_TIMEOUT) --grace $(RELIABILITY_GRACE) --diagnostic $(RELIABILITY_DIR)/soak-timeout.json -- $(SHELL) -c 'set -euo pipefail; $(PYTHON) -m uvicorn cogdoc.api.app:app --host $(RELIABILITY_API_HOST) --port $(RELIABILITY_API_PORT) --timeout-graceful-shutdown $(UVICORN_GRACEFUL_SHUTDOWN_SECONDS) & pid=$$!; cleanup() { kill -TERM $$pid 2>/dev/null || true; wait $$pid 2>/dev/null || true; }; trap cleanup EXIT INT TERM; $(PYTHON) scripts/soak_api.py --url $(RELIABILITY_API_URL) --requests $(RELIABILITY_SOAK_REQUESTS) --concurrency $(RELIABILITY_SOAK_CONCURRENCY) --timeout $(RELIABILITY_REQUEST_TIMEOUT) --startup-timeout 30 --min-success-rate $(RELIABILITY_MIN_SUCCESS_RATE) --max-p95-ms $(RELIABILITY_MAX_P95_MS) --json $(RELIABILITY_DIR)/soak.json'
 
 backup:
 	$(PYTHON) scripts/backup_state.py
@@ -126,7 +127,7 @@ debug:
 	$(PYTHON) -m cogdoc.debug
 
 serve:
-	$(PYTHON) -m uvicorn cogdoc.api.app:app --host 0.0.0.0 --port 8000
+	$(PYTHON) -m uvicorn cogdoc.api.app:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown $(UVICORN_GRACEFUL_SHUTDOWN_SECONDS)
 
 frontend:
 	$(PYTHON) -m streamlit run src/cogdoc/frontend/app.py

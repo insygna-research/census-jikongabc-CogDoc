@@ -949,7 +949,11 @@ def _build_transactional_locked(
     )
     source_hash_by_name = _documents_by_name(manifest)
 
-    gen_id = state.begin_generation(Embedder.MODEL_NAME, INDEX_BUILD_VERSION)
+    gen_id = state.begin_generation(
+        Embedder.MODEL_NAME,
+        INDEX_BUILD_VERSION,
+        CHUNK_IDENTITY_VERSION,
+    )
     gen_dir = get_settings().kb_generation_dir(kb_id, gen_id)
     ocr_summary = _empty_ocr_summary()
 
@@ -1035,7 +1039,11 @@ def _transactional_empty(
     if previous_documents is None:
         active = state.active()
         previous_documents = active.get("documents", []) if active is not None else []
-    gen_id = state.begin_generation(Embedder.MODEL_NAME, INDEX_BUILD_VERSION)
+    gen_id = state.begin_generation(
+        Embedder.MODEL_NAME,
+        INDEX_BUILD_VERSION,
+        CHUNK_IDENTITY_VERSION,
+    )
     try:
         state.mark_ready(gen_id, expected_count=0, documents=[])
         if on_commit is not None:

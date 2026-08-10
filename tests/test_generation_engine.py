@@ -131,7 +131,7 @@ def test_generator_prompt_includes_section_path_without_replacing_child_identity
     rendered = Generator._build_context_string(docs)
 
     assert 'chunk_id="child:7" evidence_id="E001"' in rendered
-    assert "章节路径：Methods > Training" in rendered
+    assert "章节路径：Methods &gt; Training" in rendered
     assert 'chunk_id="child:7"' in rendered
     assert "section:2" not in rendered
 

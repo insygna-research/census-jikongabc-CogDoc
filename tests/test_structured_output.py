@@ -1,12 +1,19 @@
 from langchain_core.messages import AIMessage
 from pydantic import BaseModel
 import pytest
+from threading import Event
 from cogdoc.agents.structured_output import (
     _METHOD_CACHE,
     _extract_json_object,
     invoke_structured,
 )
 from cogdoc.config.settings import get_settings
+from cogdoc.research_control import (
+    ResearchCancelled,
+    ResearchProviderTimeout,
+    ResearchRunController,
+    bind_research_control,
+)
 
 
 # 定义 DemoSchema 的接口数据模型。
@@ -186,3 +193,74 @@ def test_extract_json_object_uses_balanced_object_not_last_brace():
     content = '结果如下：{"value":"ok", "nested":{"x":"{literal}"}}。希望有帮助 {face}'
 
     assert _extract_json_object(content) == '{"value":"ok", "nested":{"x":"{literal}"}}'
+
+
+def test_invoke_structured_reserves_research_model_budget(monkeypatch):
+    monkeypatch.setenv("LLM_STRUCTURED_OUTPUT_METHOD", "json_mode")
+    reservations = []
+    control = ResearchRunController(
+        job_id="rj",
+        phase="report",
+        attempt_id="attempt",
+        lease_id="lease",
+        reserve_callback=lambda costs: reservations.append(dict(costs)),
+        stop_event=Event(),
+    )
+    messages = [{"role": "user", "content": "12345"}]
+
+    with bind_research_control(control):
+        result = invoke_structured(
+            MethodAwareLLM({"json_mode"}), DemoSchema, messages
+        )
+
+    assert result.value == "json_mode"
+    assert [row for row in reservations if row] == [
+        {"llm_calls": 1, "model_input_chars": 5}
+    ]
+
+
+def test_invoke_structured_does_not_swallow_research_cancel(monkeypatch):
+    monkeypatch.setenv("LLM_STRUCTURED_OUTPUT_METHOD", "json_mode")
+    control = ResearchRunController(
+        job_id="rj",
+        phase="report",
+        attempt_id="attempt",
+        lease_id="lease",
+        reserve_callback=lambda _costs: None,
+        stop_event=Event(),
+    )
+    control.request_stop("cancelled")
+
+    with bind_research_control(control), pytest.raises(ResearchCancelled):
+        invoke_structured(
+            MethodAwareLLM({"json_mode"}),
+            DemoSchema,
+            [{"role": "user", "content": "json"}],
+        )
+
+
+def test_invoke_structured_does_not_retry_protocol_after_provider_timeout(
+    monkeypatch,
+):
+    monkeypatch.delenv("LLM_STRUCTURED_OUTPUT_METHOD", raising=False)
+    llm = MethodAwareLLM({"json_mode", "json_schema"})
+    control = ResearchRunController(
+        job_id="rj",
+        phase="report",
+        attempt_id="attempt",
+        lease_id="lease",
+        reserve_callback=lambda _costs: None,
+        stop_event=Event(),
+        provider_runner=lambda *_args: (_ for _ in ()).throw(
+            ResearchProviderTimeout("timed out")
+        ),
+    )
+
+    with bind_research_control(control), pytest.raises(ResearchProviderTimeout):
+        invoke_structured(
+            llm,
+            DemoSchema,
+            [{"role": "user", "content": "json"}],
+        )
+
+    assert llm.methods_seen == ["json_mode"]

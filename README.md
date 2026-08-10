@@ -28,7 +28,7 @@ A local RAG knowledge-base console for individuals and teams, built on **LangGra
 
 - **Multiple knowledge bases · multiple conversations · layered memory** — full display history is persisted for replay; validated recent turns form bounded short-term memory, evicted turns become session-level summaries and decisions, and only explicit stable facts enter cross-session long-term memory. Wrong answers never enter Agent memory.
 
-- **Durable research evidence workspace** — create an editable research outline, execute every section through the production hybrid retrieval path, inspect bounded evidence previews, and pause/resume/cancel safely. Candidate hits remain `partial` until a semantic verifier explicitly promotes them; service restarts reconcile interrupted runs to `paused`.
+- **Deep Research workspace with reproducible evidence** — generate or edit an outline whose sections contain atomic evidence requirements, execute every requirement through the production hybrid retrieval path, and pause/resume/cancel through durable attempt leases. Admission, phase deadlines, retrieval/document/LLM/input budgets, and stale-worker commits are bounded fail-closed. Report claims are independently audited, every atomic requirement must be covered by supported cited claims, and the two gates share at most one repair before failing closed. Each run freezes index/source/derived-knowledge/tuning and retrieval-contract provenance; stale evidence must be refreshed before review or publication, and publication produces an integrity-checked Markdown snapshot plus a deterministic verification bundle. A paginated, ETag-aware summary index keeps collection polling independent of report and evidence size.
 
 - **Web, CLI, and Debug entry points** — a slash-command CLI console, a Streamlit web UI over FastAPI, and a focused `make debug` console for trace inspection.
 
@@ -164,10 +164,12 @@ The Streamlit app is a thin client over the FastAPI service — you can hit it d
 | `GET /v1/retrieval-eval-drafts/export` | Export approved, non-stale training or release-gate rows; QA-only export reports excluded Summary/Compare drafts explicitly |
 | `POST /v1/research-jobs`, `GET /v1/research-jobs` | Create or list persistent research plans |
 | `GET /v1/research-jobs/{id}`, `PUT /v1/research-jobs/{id}/plan` | Inspect or revision-safely edit a research outline |
+| `POST /v1/research-jobs/{id}/plan/auto` | Generate an editable outline with 1–3 atomic evidence requirements per section |
 | `POST /v1/research-jobs/{id}/start`, `/pause`, `/resume`, `/cancel` | Control durable section-by-section evidence retrieval |
+| `GET /v1/research-jobs/{id}/provenance`, `POST /v1/research-jobs/{id}/refresh` | Inspect the frozen evidence inputs or archive and refresh a stale run |
 | `POST /v1/research-jobs/{id}/generate`, `GET /v1/research-jobs/{id}/report` | Closed-set verify section evidence, generate cited sections, and download the Markdown report |
 | `PUT /v1/research-jobs/{id}/review`, `POST /v1/research-jobs/{id}/publish` | Review each generated section or evidence gap with optimistic revision protection, then publish only a fully reviewed report |
-| `GET /v1/research-jobs/{id}/published-report` | Download the immutable published Markdown snapshot |
+| `GET /v1/research-jobs/{id}/published-report`, `/published-bundle` | Download the integrity-checked Markdown snapshot or deterministic ZIP verification bundle |
 | `GET /healthz`, `GET /readyz`, `GET /metrics` | Health, readiness, Prometheus metrics |
 
 `/v1/chat/stream` always streams lifecycle and node-progress events. For QA,
@@ -178,7 +180,7 @@ normal `final` event, not as token-by-token prose. Other tasks retain live model
 tokens unless the global claim-verification gate requires buffering.
 
 If `COGDOC_API_KEYS` is configured, `/v1` requests are authenticated and rate-limited; with no keys set, `/v1` is open (the server logs a warning at startup).
-Evidence-eval list/review/export routes remain disabled until the independent `COGDOC_EVAL_REVIEW_API_KEYS` set is configured. Reviewer identities are server-derived key fingerprints; raw keys and client-provided actor names are never persisted.
+Evidence-eval list/review/export and Research review/publication routes remain disabled until the independent `COGDOC_EVAL_REVIEW_API_KEYS` set is configured. Research gap acceptance requires a non-blank rationale. Reviewer/publisher identities are server-derived key fingerprints; raw keys and client-provided actor names are never persisted.
 
 ### Layered memory
 
@@ -655,12 +657,31 @@ CogDoc/
 | `COGDOC_FEEDBACK_STORE` | `jsonl` | Feedback storage backend; set `sqlite` to use SQLite with JSONL export |
 | `COGDOC_DERIVED_KNOWLEDGE_INDEX_AUTO_REFRESH` | `false` | Rebuild approved derived-knowledge vectors in the background after review changes |
 | `COGDOC_API_KEYS` | unset | Comma-separated API keys; empty disables API auth |
-| `COGDOC_EVAL_REVIEW_API_KEYS` | unset | Independent admin keys for evidence-eval list/review/export; empty keeps those routes disabled |
+| `COGDOC_EVAL_REVIEW_API_KEYS` | unset | Independent admin keys for evidence-eval curation and Research review/publication; empty keeps those routes disabled |
 | `RATE_LIMIT_PER_MINUTE` | `120` | Token-bucket refill rate for protected API routes |
 | `RATE_LIMIT_BURST` | `120` | Token-bucket burst capacity; `<=0` disables rate limiting |
 | `COGDOC_MAX_UPLOAD_MB` | `50` | Maximum PDF upload size through the API/frontend |
 | `COGDOC_RESEARCH_WORKERS` | `2` | Maximum concurrent background research evidence/report jobs |
 | `COGDOC_RESEARCH_RETRIEVAL_TOP_K` | `8` | Candidate depth retrieved and reranked per research section |
+| `COGDOC_RESEARCH_MAX_PENDING` | `32` | Maximum admitted queued/running Research background attempts before API requests fail with `503` |
+| `COGDOC_RESEARCH_PROVIDER_WORKERS` | `4` | Maximum concurrent process-isolated provider calls within background Research attempts |
+| `COGDOC_RESEARCH_PROVIDER_MAX_PENDING` | `16` | Maximum admitted running/queued provider calls across background Research attempts |
+| `COGDOC_RESEARCH_PROVIDER_CALL_TIMEOUT_SECONDS` | `180` | Per-call provider ceiling, further contracted by the remaining phase or planning deadline |
+| `COGDOC_RESEARCH_LLM_PROCESS_ISOLATION_ENABLED` | `true` | Require recognized standard `ChatOpenAI` Research calls to fail closed if they cannot enter process isolation |
+| `COGDOC_RESEARCH_PROVIDER_KILL_GRACE_SECONDS` | `0.5` | Grace period after terminating an isolated provider child before escalating to kill |
+| `COGDOC_RESEARCH_PROVIDER_IPC_MAX_BYTES` | `2000000` | Maximum serialized result envelope accepted from an isolated provider child |
+| `COGDOC_RESEARCH_EVIDENCE_DEADLINE_SECONDS` | `900` | Durable wall-clock deadline for one evidence attempt |
+| `COGDOC_RESEARCH_REPORT_DEADLINE_SECONDS` | `1800` | Durable wall-clock deadline for one report-generation attempt |
+| `COGDOC_RESEARCH_PLANNING_DEADLINE_SECONDS` | `300` | Wall-clock deadline for one automatic Research planning request |
+| `COGDOC_RESEARCH_PLANNING_WORKERS` | `1` | Dedicated automatic-planning workers, isolated from the shared API offload pool |
+| `COGDOC_RESEARCH_PLANNING_MAX_PENDING` | `8` | Maximum admitted running/queued automatic-planning requests before `503` |
+| `COGDOC_RESEARCH_MAX_RETRIEVAL_QUERIES` | `128` | Per-attempt retrieval-query budget reserved before retrieval |
+| `COGDOC_RESEARCH_MAX_CANDIDATE_DOCS` | `2048` | Per-attempt candidate-document budget reserved before retrieval |
+| `COGDOC_RESEARCH_MAX_LLM_CALLS` | `256` | Per-attempt structured/model-call budget |
+| `COGDOC_RESEARCH_MAX_MODEL_INPUT_CHARS` | `5000000` | Per-attempt aggregate model-input character budget |
+| `LLM_RESEARCH_PLANNER_BACKEND` | `default` | Research-planning backend: follow the request, force `cloud`, or force `local` |
+| `LLM_RESEARCH_PLANNER_MODEL_NAME` | unset | Optional cloud model override for editable research-plan generation |
+| `OLLAMA_RESEARCH_PLANNER_MODEL_NAME` | unset | Optional local model override for editable research-plan generation |
 | `QA_PARENT_CONTEXT_ENABLED` | `true` | Hydrate reranked child hits with bounded siblings from the same detected section; `false` keeps legacy neighbor expansion |
 | `QA_PARENT_CONTEXT_MAX_CHUNKS` | `5` | Maximum child chunks retained per structural parent window, including the anchor |
 | `QA_PARENT_CONTEXT_MAX_CHARS` | `3600` | Soft character budget per structural parent window; the anchor is never dropped |
@@ -699,6 +720,8 @@ CogDoc/
 | `LLM_<NODE>_MODEL_NAME` | unset | Per-node cloud model override |
 | `OLLAMA_<NODE>_MODEL_NAME` | unset | Per-node local model override |
 | `HF_TOKEN` | unset | Optional Hugging Face Hub token |
+
+Standard factory-built `ChatOpenAI` calls used by automatic Research planning and by evidence/report work are reconstructed in fresh spawned child processes. A timeout, durable pause/cancel, or an application-shutdown signal terminates, escalates to kill after the configured grace period, joins, and reaps the local child. `make serve` configures a finite Uvicorn graceful-request shutdown ceiling so active HTTP planning reaches that application signal; custom launchers must configure an equivalent bound. Opaque or nonstandard clients retain a bounded compatibility path with cooperative cancellation; a client recognized as `ChatOpenAI` fails closed when isolation is required but a safe child recipe cannot be built. Killing the local client process cannot guarantee cancellation at an already-contacted remote API or Ollama server, which may continue computation or billing. Retrieval, reranking, embedding, Hugging Face model loading, Torch, and native/Rust work remain in-process and cannot yet be forcibly preempted by this provider isolation layer.
 
 `<NODE>` can be `ROUTER`, `QUERY_REWRITER`, `SOURCE_RESOLVER`, `EVIDENCE_VERIFIER`, `CLAIM_VERIFIER`, `CLAIM_REPAIRER`, `QA_GENERATOR`, `SUMMARY_GENERATOR`, `COMPARE_PROFILE`, or `COMPARE_CONCLUSION`. For independent post-generation review, for example, keep answer generation on cloud while setting `LLM_CLAIM_VERIFIER_BACKEND=local` and `OLLAMA_CLAIM_VERIFIER_MODEL_NAME=<review-model>`; to repair locally too, set `LLM_CLAIM_REPAIRER_BACKEND=local` and `OLLAMA_CLAIM_REPAIRER_MODEL_NAME=<repair-model>`. The corresponding cloud model overrides are `LLM_CLAIM_VERIFIER_MODEL_NAME` and `LLM_CLAIM_REPAIRER_MODEL_NAME`. Citation syntax and source/page membership remain deterministically validated by Rust; the claim verifier adds the optional model-based semantic support decision.
 
@@ -788,9 +811,10 @@ Backup/restore and index rebuild rules are covered in [PRODUCTION_zh-CN.md](docs
 
 - **OCR is an opt-in Tesseract MVP.** It is disabled by default, supports locally installed language packs, and intentionally has no hosted provider. Recognition quality depends on scan quality, selected languages, and DPI.
 - Summary and Compare are fixed-schema MVPs; cloud mode runs independent section/dimension LLM cells concurrently with stable output order, while local Ollama mode stays serial to avoid memory pressure. The default section/dimension sets are fixed unless passed through graph state.
-- Research reports now support closed-set verification, deterministic citations, per-section review, explicit gap acceptance, change requests, bounded version history, selective regeneration, and immutable publication. Selective regeneration only retrieves, verifies, and rewrites `changes_requested` sections; approved sections and accepted gaps are preserved while the global public citation ledger is rebuilt and validated. The published export format is currently Markdown only.
+- Research reports support editable AI planning, atomic evidence requirements, closed-set verification, deterministic citations, mandatory section-local claim and requirement-coverage auditing with one shared bounded repair, per-section review, explicit gap acceptance, bounded version history, selective regeneration, and immutable publication. Atomic requirements are the machine-enforced completion contract; free-form `success_criteria` remains a human review note. Selective regeneration only retrieves, verifies, and rewrites `changes_requested` or legacy unaudited sections; approved sections and accepted gaps are preserved while the global public citation ledger is rebuilt and validated. A frozen provenance contract—including retrieval/verification settings and model routing—blocks stale evidence from generation, review, and publication until an explicit full refresh archives the old report. A local Research job is a privacy constraint: planning, evidence verification, writing, claim/coverage audit, and repair all reject cloud node overrides.
+- Published v2 artifacts hash the exact Markdown, citation ledger, trackable provenance, bounded `verification.json` claim/coverage summaries, evidence identity/hash commitments, version, and generation timestamp. The deterministic ZIP also carries per-file hashes. Legacy Markdown is served only as `legacy-unverified` and cannot produce a bundle; malformed or tampered current/published bodies are withheld from list, detail, and download responses.
 - Local Compare intentionally supports only two documents, uses four core dimensions, and skips the extra conclusion generation step to reduce Ollama memory pressure.
-- With the semantic gate disabled (the default), citation validation proves only physical citation legality (`source` / `page` or knowledge ID), not that the surrounding claim is semantically supported or that every factual sentence is cited. Enabling `CLAIM_VERIFICATION_ENABLED` adds a model-based claim/evidence gate for QA, Summary, and Compare; it fails closed on unsupported/insufficient claims and verifier/repair errors, but still requires calibration against a reviewed domain baseline.
+- With the global semantic gate disabled (the default), citation validation for QA, Summary, and Compare proves only physical citation legality (`source` / `page` or knowledge ID), not that the surrounding claim is semantically supported or that every factual sentence is cited. Enabling `CLAIM_VERIFICATION_ENABLED` adds their model-based claim/evidence gate. Research report generation always enforces fail-closed claim support and atomic-requirement coverage against section-local exact evidence, independently of that rollout switch. Model-based verification still requires calibration against a reviewed domain baseline.
 - The rewrite similarity threshold defaults to `0.5` and should be calibrated on real project data.
 - Local model downloads may require network access or a pre-populated Hugging Face cache.
 

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from collections.abc import Mapping
@@ -107,6 +108,11 @@ class CogDocClient:
         # 后端开启鉴权时带上密钥；缺省读环境变量，未配置则不带头。
         key = api_key if api_key is not None else os.getenv("COGDOC_API_KEY", "")
         self._headers = {"Authorization": f"Bearer {key}"} if key else {}
+        # Session caches must not cross authentication identities, while the
+        # credential itself must never become part of a Streamlit cache key.
+        self.auth_cache_identity = (
+            hashlib.sha256(key.encode("utf-8")).hexdigest() if key else "anonymous"
+        )
 
     # 拼接结果。
     def _url(self, path: str) -> str:
@@ -662,12 +668,14 @@ class CogDocClient:
         *,
         title: str = "",
         section_titles: list[str] | None = None,
+        is_local: bool = False,
     ) -> httpx.Response:
         payload = {
             "kb_id": kb_id,
             "objective": objective,
             "title": title,
             "section_titles": section_titles or [],
+            "is_local": is_local,
         }
         return httpx.post(
             self._url("/v1/research-jobs"),
@@ -687,6 +695,30 @@ class CogDocClient:
             params=params,
             timeout=self.timeout,
             headers=self._headers,
+        )
+
+    def list_research_job_summaries(
+        self,
+        kb_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 20,
+        cursor: str | None = None,
+        if_none_match: str | None = None,
+    ) -> httpx.Response:
+        params: dict[str, str | int] = {"kb_id": kb_id, "limit": limit}
+        if status:
+            params["status"] = status
+        if cursor:
+            params["cursor"] = cursor
+        headers = dict(self._headers)
+        if if_none_match:
+            headers["If-None-Match"] = if_none_match
+        return httpx.get(
+            self._url("/v1/research-jobs/summaries"),
+            params=params,
+            timeout=self.timeout,
+            headers=headers,
         )
 
     def get_research_job(self, job_id: str) -> httpx.Response:
@@ -713,11 +745,42 @@ class CogDocClient:
             headers=self._headers,
         )
 
+    def generate_research_plan(
+        self,
+        job_id: str,
+        *,
+        expected_revision: int,
+        is_local: bool | None = None,
+    ) -> httpx.Response:
+        return httpx.post(
+            self._url(f"/v1/research-jobs/{job_id}/plan/auto"),
+            json={
+                "expected_revision": expected_revision,
+                "is_local": is_local,
+            },
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
     def research_action(self, job_id: str, action: str) -> httpx.Response:
-        if action not in {"start", "pause", "resume", "cancel", "generate"}:
+        if action not in {
+            "start",
+            "pause",
+            "resume",
+            "cancel",
+            "generate",
+            "refresh",
+        }:
             raise ValueError(f"unsupported research action: {action}")
         return httpx.post(
             self._url(f"/v1/research-jobs/{job_id}/{action}"),
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    def get_research_provenance(self, job_id: str) -> httpx.Response:
+        return httpx.get(
+            self._url(f"/v1/research-jobs/{job_id}/provenance"),
             timeout=self.timeout,
             headers=self._headers,
         )
@@ -759,6 +822,13 @@ class CogDocClient:
     def get_published_research_report(self, job_id: str) -> httpx.Response:
         return httpx.get(
             self._url(f"/v1/research-jobs/{job_id}/published-report"),
+            timeout=self.timeout,
+            headers=self._headers,
+        )
+
+    def get_published_research_bundle(self, job_id: str) -> httpx.Response:
+        return httpx.get(
+            self._url(f"/v1/research-jobs/{job_id}/published-bundle"),
             timeout=self.timeout,
             headers=self._headers,
         )

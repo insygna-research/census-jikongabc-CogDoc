@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from cogdoc.tools.citation_ledger import is_valid_evidence_id
+from cogdoc.tools.citation_ledger import citation_source_label, is_valid_evidence_id
 
 _DISPLAY_CITATION_RE = re.compile(r"\[(?:knowledge:[^\]\r\n]+|[^\]\r\n]+:P[0-9]+)\]")
 _CANONICAL_LIKE_EVIDENCE_ID_RE = re.compile(
@@ -73,7 +73,7 @@ def display_citation(entry: Mapping[str, Any]) -> str:
         return f"[knowledge:{knowledge_id}]" if knowledge_id else ""
     if source_type != "document":
         return ""
-    source = str(entry.get("source") or "").strip()
+    source = citation_source_label(entry.get("source"))
     page = _strict_nonnegative_int(entry.get("page"))
     return f"[{source}:P{page}]" if source and page is not None else ""
 

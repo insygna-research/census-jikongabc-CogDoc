@@ -32,6 +32,7 @@ from cogdoc.api.routes import (
 from cogdoc.api.schemas import ErrorCode, build_error_response
 from cogdoc.api.session_store import SessionStore
 from cogdoc.api.webhooks import WebhookDispatcher
+from cogdoc.agents.research_planner import propose_research_plan
 import logging
 from cogdoc.config.settings import get_settings
 from cogdoc.observability.logger import configure_logging, log_event
@@ -46,11 +47,33 @@ from cogdoc.service.process_lock import (
     strict_single_process,
 )
 from cogdoc.service.research_execution import ResearchExecutionManager
+from cogdoc.service.research_observability import ResearchObserver
+from cogdoc.service.research_planning_runtime import ResearchPlanningRuntime
 from cogdoc.service.sweeper import BackgroundSweeper
 from cogdoc.state_runtime import StateRuntime
 
 
 ChatRunner = Callable[..., ChatResult]
+
+
+# A lifespan-local file object would be finalized as soon as the context frame
+# closes, implicitly dropping its flock even when a daemon research worker is
+# still using process-local runtime state.  Keep every acquired handle alive at
+# module scope until a fully drained shutdown releases it.  If shutdown remains
+# undrained, normal descriptor cleanup at process exit releases the lock.
+_RETAINED_SINGLE_INSTANCE_LOCKS: dict[int, object] = {}
+
+
+def _retain_single_instance_lock(lock_fh: object | None) -> None:
+    if lock_fh is not None:
+        _RETAINED_SINGLE_INSTANCE_LOCKS[id(lock_fh)] = lock_fh
+
+
+def _release_retained_single_instance_lock(lock_fh: object | None) -> None:
+    if lock_fh is None:
+        return
+    release_single_instance_lock(lock_fh)
+    _RETAINED_SINGLE_INSTANCE_LOCKS.pop(id(lock_fh), None)
 
 
 # 创建反馈存储。
@@ -102,6 +125,7 @@ def create_app(
     retrieval_eval_draft_store: RetrievalEvalDraftStore | None = None,
     research_job_store: ResearchJobStore | None = None,
     research_execution_manager: ResearchExecutionManager | None = None,
+    research_plan_generator: Callable | None = None,
     state_runtime: StateRuntime | None = None,
     webhook_dispatcher: WebhookDispatcher | None = None,
     derived_knowledge_index_refresher: Callable | None = None,
@@ -132,6 +156,8 @@ def create_app(
             log_event(
                 "startup", "single_instance_unconfirmed", {}, level=logging.WARNING
             )
+        _retain_single_instance_lock(lock_fh)
+        app.state.single_instance_lock_handle = lock_fh
         try:
             # 回放上次进程崩溃遗留的源文件变更，使源目录与当前索引代一致。
             recovered = shared_mutation_journal().recover_all()
@@ -145,9 +171,7 @@ def create_app(
                 )
             # 必须在拿到单实例锁且变更日志恢复之后对账，避免误改其他实例的任务状态。
             app.state.index_jobs.reconcile_orphans()
-            research_manager = getattr(
-                app.state, "research_execution_manager", None
-            )
+            research_manager = getattr(app.state, "research_execution_manager", None)
             if research_manager is not None:
                 research_manager.reconcile_orphans()
             # 重试上次遗留的删库外部资源清理，持久队列在此兜底。
@@ -173,6 +197,8 @@ def create_app(
             yield
         finally:
             app.state.lifecycle_status = "stopping"
+            research_drained = True
+            planning_drained = True
             # 每步独立容错，进程锁放最外层，避免某个关闭异常跳过后续清理。
             try:
                 active_sweeper = getattr(app.state, "sweeper", None)
@@ -191,11 +217,40 @@ def create_app(
                     app.state, "research_execution_manager", None
                 )
                 if research_manager is not None:
-                    research_manager.shutdown(wait=True)
+                    # Research leases are invalidated durably before this
+                    # returns. Never let one opaque synchronous provider call
+                    # hold the FastAPI lifespan open indefinitely.
+                    research_drained = research_manager.shutdown(wait=False)
             except Exception as exc:
+                research_drained = False
                 log_event(
                     "shutdown",
                     "research_execution_shutdown_failed",
+                    {},
+                    level=logging.ERROR,
+                    error_class=type(exc).__name__,
+                )
+            try:
+                # Automatic-planning source/model work has its own bounded
+                # daemon executor. Signal active controls without allowing an
+                # opaque call to hold the lifespan callback open.
+                planning_executor = getattr(
+                    app.state, "research_planning_executor", None
+                )
+                if planning_executor is not None:
+                    result = planning_executor.shutdown(
+                        wait=False,
+                        cancel_futures=True,
+                    )
+                    # Unknown executor implementations must prove they drained;
+                    # ``None`` is not sufficient to release process-local
+                    # runtime state or the cross-process mutation lock.
+                    planning_drained = result is True
+            except Exception as exc:
+                planning_drained = False
+                log_event(
+                    "shutdown",
+                    "research_planning_shutdown_failed",
                     {},
                     level=logging.ERROR,
                     error_class=type(exc).__name__,
@@ -225,7 +280,11 @@ def create_app(
             drained = False
             try:
                 # 所有定时器生产者都停止后再统一取消和等待。
-                drained = cancel_all_timers()
+                drained = (
+                    cancel_all_timers()
+                    and research_drained
+                    and planning_drained
+                )
             except Exception as exc:
                 log_event(
                     "shutdown",
@@ -259,7 +318,8 @@ def create_app(
                 )
             # 仅在后台线程确已排空时才显式释放进程锁，否则留给进程退出自动释放。
             if drained:
-                release_single_instance_lock(lock_fh)
+                _release_retained_single_instance_lock(lock_fh)
+                app.state.single_instance_lock_handle = None
             else:
                 log_event(
                     "shutdown",
@@ -275,6 +335,10 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.lifecycle_status = "created"
+    # Create operational telemetry before background managers so both HTTP and
+    # post-202 research work share one app-local Prometheus registry.
+    app.state.metrics = Metrics()
+    app.state.research_observer = ResearchObserver(app.state.metrics)
     store_overrides = (
         feedback_store,
         feedback_analysis_store,
@@ -339,19 +403,28 @@ def create_app(
         max_workers=offload_workers or get_settings().cogdoc_offload_workers,
         thread_name_prefix="cogdoc-offload",
     )
-    app.state.research_execution_manager = (
-        research_execution_manager
-        or (
-            ResearchExecutionManager.from_runtime(
-                runtime.research_job_store,
-                state_runtime=runtime,
-                kb_exists=app.state.kb_registry.exists,
-                max_workers=get_settings().cogdoc_research_workers,
-                top_k=get_settings().cogdoc_research_retrieval_top_k,
-            )
-            if runtime.research_job_store is not None
-            else None
+    app.state.research_planning_executor = ResearchPlanningRuntime(
+        max_workers=get_settings().cogdoc_research_planning_workers,
+        max_pending=get_settings().cogdoc_research_planning_max_pending,
+        thread_name_prefix="cogdoc-research-planning",
+    )
+    app.state.research_execution_manager = research_execution_manager or (
+        ResearchExecutionManager.from_runtime(
+            runtime.research_job_store,
+            state_runtime=runtime,
+            kb_exists=app.state.kb_registry.exists,
+            max_workers=get_settings().cogdoc_research_workers,
+            top_k=get_settings().cogdoc_research_retrieval_top_k,
         )
+        if runtime.research_job_store is not None
+        else None
+    )
+    bind_observer = getattr(app.state.research_execution_manager, "bind_observer", None)
+    if callable(bind_observer):
+        bind_observer(app.state.research_observer)
+    app.state.research_plan_generator = research_plan_generator or partial(
+        propose_research_plan,
+        observer=app.state.research_observer,
     )
     # 旧 app.state 属性保留为 runtime store 的身份别名，兼容路由与注入测试。
     app.state.feedback_store = runtime.feedback_store
@@ -396,7 +469,6 @@ def create_app(
         rate_limiter=resolved_limiter,
     )
     # 指标中间件在访问控制外层（后加=最外层），故 401/429 也被计入请求统计。
-    app.state.metrics = Metrics()
     app.add_middleware(MetricsMiddleware, metrics=app.state.metrics)
 
     # 处理未预期异常。

@@ -1,6 +1,7 @@
 import math
 import time
 from collections.abc import Mapping
+from threading import Lock
 from fastapi import Request
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -11,6 +12,17 @@ from prometheus_client import (
     generate_latest,
 )
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from cogdoc.service.research_observability import (
+    normalize_research_action,
+    normalize_research_background_outcome,
+    normalize_research_coverage_status,
+    normalize_research_lifecycle_outcome,
+    normalize_research_provider,
+    normalize_research_provider_isolation,
+    normalize_research_provider_outcome,
+    normalize_research_stage,
+    normalize_research_termination_reason,
+)
 
 
 _CLAIM_AUDIT_STATUSES = {
@@ -133,6 +145,72 @@ class Metrics:
             "生成前证据校验器异常计数",
             registry=self.registry,
         )
+        # Research 指标只使用闭集标签。job/kb/execution/section 等关联标识仅进日志与
+        # trace，绝不进入 Prometheus label，避免长任务持续制造高基数时间序列。
+        self.research_lifecycle = Counter(
+            "cogdoc_research_lifecycle_total",
+            "研究任务生命周期操作按动作与结果计数",
+            ["action", "outcome"],
+            registry=self.registry,
+        )
+        self.research_background = Counter(
+            "cogdoc_research_background_total",
+            "研究后台阶段按最终结果计数",
+            ["stage", "outcome"],
+            registry=self.registry,
+        )
+        self.research_background_duration = Histogram(
+            "cogdoc_research_background_duration_seconds",
+            "研究后台阶段执行耗时",
+            ["stage"],
+            buckets=(0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600, 1800, 3600),
+            registry=self.registry,
+        )
+        self.research_background_in_progress = Gauge(
+            "cogdoc_research_background_in_progress",
+            "研究后台阶段当前在途 worker 数",
+            ["stage"],
+            registry=self.registry,
+        )
+        self.research_terminations = Counter(
+            "cogdoc_research_terminations_total",
+            "研究任务因预算或控制信号终止的次数",
+            ["reason"],
+            registry=self.registry,
+        )
+        self.research_section_candidates = Histogram(
+            "cogdoc_research_section_candidate_count",
+            "单个研究章节检索到的去重候选数",
+            buckets=(0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 100, 250),
+            registry=self.registry,
+        )
+        self.research_section_evidence = Histogram(
+            "cogdoc_research_section_evidence_count",
+            "单个研究章节提交的公开证据数",
+            buckets=(0, 1, 2, 3, 5, 8, 12, 20, 50),
+            registry=self.registry,
+        )
+        self.research_coverage_audits = Counter(
+            "cogdoc_research_coverage_audits_total",
+            "研究章节原子需求覆盖审计按结果计数",
+            ["status"],
+            registry=self.registry,
+        )
+        self.research_provider_calls = Counter(
+            "cogdoc_research_provider_calls_total",
+            "研究外部提供方调用按提供方、隔离方式与结果计数",
+            ["provider", "isolation", "outcome"],
+            registry=self.registry,
+        )
+        self.research_provider_call_duration = Histogram(
+            "cogdoc_research_provider_call_duration_seconds",
+            "研究外部提供方单次调用耗时",
+            ["provider", "isolation", "outcome"],
+            buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 180, 300),
+            registry=self.registry,
+        )
+        self._research_in_progress_lock = Lock()
+        self._research_in_progress_counts: dict[str, int] = {}
 
     def observe_claim_audit(self, task_type: str, audit) -> None:
         # 指标是旁路可观测性：即使注入 runner 返回畸形 audit，也不能反向打断回答交付。
@@ -204,6 +282,136 @@ class Metrics:
                 self.evidence_requirement_assessments.labels(verdict).inc()
         if output.get("evidence_verifier_error"):
             self.evidence_verifier_errors.inc()
+
+    def observe_research_lifecycle(self, action, outcome) -> None:
+        """Record one API/control-plane attempt with bounded labels."""
+
+        normalized_action = normalize_research_action(action)
+        normalized_outcome = normalize_research_lifecycle_outcome(outcome)
+        try:
+            self.research_lifecycle.labels(
+                normalized_action,
+                normalized_outcome,
+            ).inc()
+        except Exception:
+            # Metrics are a side channel and must never change the research result.
+            return
+
+    def research_background_started(self, stage) -> None:
+        """Increment the clamped in-progress gauge for a scheduled worker."""
+
+        normalized_stage = normalize_research_stage(stage)
+        try:
+            with self._research_in_progress_lock:
+                count = self._research_in_progress_counts.get(normalized_stage, 0) + 1
+                self._research_in_progress_counts[normalized_stage] = count
+                self.research_background_in_progress.labels(normalized_stage).set(count)
+        except Exception:
+            return
+
+    def research_background_finished(
+        self,
+        stage,
+        outcome,
+        *,
+        duration_ms=None,
+    ) -> None:
+        """Record a worker outcome/duration and balance its in-progress gauge."""
+
+        normalized_stage = normalize_research_stage(stage)
+        normalized_outcome = normalize_research_background_outcome(outcome)
+        duration = _nonnegative_float_or_none(duration_ms)
+        try:
+            self.research_background.labels(
+                normalized_stage,
+                normalized_outcome,
+            ).inc()
+            if duration is not None:
+                self.research_background_duration.labels(normalized_stage).observe(
+                    duration / 1000.0
+                )
+        except Exception:
+            pass
+        try:
+            with self._research_in_progress_lock:
+                count = max(
+                    0,
+                    self._research_in_progress_counts.get(normalized_stage, 0) - 1,
+                )
+                self._research_in_progress_counts[normalized_stage] = count
+                self.research_background_in_progress.labels(normalized_stage).set(count)
+        except Exception:
+            return
+
+    def observe_research_termination(self, reason, *, count=1) -> None:
+        """Record a bounded budget/control termination reason."""
+
+        normalized_reason = normalize_research_termination_reason(reason)
+        amount = min(_nonnegative_int(count), 1_000_000_000)
+        if not amount:
+            return
+        try:
+            self.research_terminations.labels(normalized_reason).inc(amount)
+        except Exception:
+            return
+
+    def observe_research_section(
+        self, *, candidate_count=None, evidence_count=None
+    ) -> None:
+        """Observe bounded section-size distributions without identifier labels."""
+
+        candidates = _nonnegative_int(candidate_count)
+        evidence = _nonnegative_int(evidence_count)
+        try:
+            self.research_section_candidates.observe(candidates)
+            self.research_section_evidence.observe(evidence)
+        except Exception:
+            return
+
+    def observe_research_coverage_audit(self, audit_or_status) -> None:
+        """Record only the coverage status; model detail never becomes a label."""
+
+        try:
+            raw_status = (
+                audit_or_status.get("status")
+                if isinstance(audit_or_status, Mapping)
+                else audit_or_status
+            )
+        except Exception:
+            raw_status = None
+        status = normalize_research_coverage_status(raw_status)
+        try:
+            self.research_coverage_audits.labels(status).inc()
+        except Exception:
+            return
+
+    def observe_research_provider_call(
+        self,
+        provider,
+        isolation,
+        outcome,
+        *,
+        duration_ms=None,
+    ) -> None:
+        """Record one provider attempt using only closed, low-cardinality labels."""
+
+        normalized_provider = normalize_research_provider(provider)
+        normalized_isolation = normalize_research_provider_isolation(isolation)
+        normalized_outcome = normalize_research_provider_outcome(outcome)
+        duration = _nonnegative_float_or_none(duration_ms)
+        try:
+            labels = (
+                normalized_provider,
+                normalized_isolation,
+                normalized_outcome,
+            )
+            self.research_provider_calls.labels(*labels).inc()
+            if duration is not None:
+                self.research_provider_call_duration.labels(*labels).observe(
+                    duration / 1000.0
+                )
+        except Exception:
+            return
 
     # 渲染。
     def render(self) -> bytes:

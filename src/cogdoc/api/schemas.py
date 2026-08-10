@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import unicodedata
 from collections.abc import Mapping
 from enum import Enum
 from typing import Any, Literal
@@ -12,6 +13,10 @@ from cogdoc.tools.retriever.metadata import safe_retrieval_metadata
 
 
 API_SCHEMA_VERSION: Literal["v1"] = "v1"
+
+
+def _research_contract_key(value: str) -> str:
+    return unicodedata.normalize("NFKC", " ".join(value.split())).casefold()
 
 
 # 所有接口模型的基类，统一严格契约与枚举字符串化。
@@ -61,6 +66,8 @@ class ErrorCode(str, Enum):
     RESEARCH_JOB_NOT_FOUND = "RESEARCH_JOB_NOT_FOUND"
     RESEARCH_JOB_REVISION_CONFLICT = "RESEARCH_JOB_REVISION_CONFLICT"
     RESEARCH_JOB_STATE_CONFLICT = "RESEARCH_JOB_STATE_CONFLICT"
+    RESEARCH_EVIDENCE_STALE = "RESEARCH_EVIDENCE_STALE"
+    RESEARCH_CAPACITY_EXHAUSTED = "RESEARCH_CAPACITY_EXHAUSTED"
 
 
 # 带查询和知识库标识的请求基类。
@@ -296,6 +303,7 @@ class ResearchJobCreate(ApiModel):
     objective: str = Field(min_length=1, max_length=4000)
     title: str = Field(default="", max_length=160)
     section_titles: list[str] = Field(default_factory=list, max_length=12)
+    is_local: bool = False
 
     @field_validator("kb_id", "objective", "title")
     @classmethod
@@ -330,20 +338,67 @@ class ResearchJobCreate(ApiModel):
 class ResearchPlanSectionInput(ApiModel):
     title: str = Field(min_length=1, max_length=160)
     research_question: str = Field(min_length=1, max_length=2000)
+    evidence_requirements: list["ResearchEvidenceRequirementInput"] = Field(
+        min_length=1,
+        max_length=3,
+    )
+    success_criteria: str = Field(default="", max_length=1000)
 
     @field_validator("title", "research_question")
     @classmethod
-    def _strip_plan_text(cls, value: str) -> str:
+    def _strip_required_plan_text(cls, value: str) -> str:
         stripped = " ".join(value.split())
         if not stripped:
             raise ValueError("must not be blank")
         return stripped
+
+    @field_validator("success_criteria")
+    @classmethod
+    def _strip_optional_plan_text(cls, value: str) -> str:
+        return " ".join(value.split())
+
+    @model_validator(mode="after")
+    def _unique_requirement_questions(self):
+        keys = [
+            _research_contract_key(requirement.question)
+            for requirement in self.evidence_requirements
+        ]
+        if len(keys) != len(set(keys)):
+            raise ValueError(
+                "research evidence requirement questions must be unique per section"
+            )
+        return self
+
+
+class ResearchEvidenceRequirementInput(ApiModel):
+    question: str = Field(min_length=1, max_length=1000)
+    retrieval_query: str = Field(min_length=1, max_length=1000)
+    recovery_query: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("question", "retrieval_query", "recovery_query")
+    @classmethod
+    def _strip_requirement_text(cls, value: str) -> str:
+        return " ".join(value.split())
+
+    @model_validator(mode="after")
+    def _require_distinct_queries(self):
+        if _research_contract_key(self.retrieval_query) == _research_contract_key(
+            self.recovery_query
+        ):
+            raise ValueError("retrieval_query and recovery_query must be distinct")
+        return self
 
 
 class ResearchPlanUpdate(ApiModel):
     schema_version: Literal["v1"] = API_SCHEMA_VERSION
     expected_revision: int = Field(ge=1, strict=True)
     sections: list[ResearchPlanSectionInput] = Field(min_length=1, max_length=12)
+
+
+class ResearchPlanGenerateRequest(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    expected_revision: int = Field(ge=1, strict=True)
+    is_local: bool | None = None
 
 
 class ResearchReviewDecision(ApiModel):
@@ -357,9 +412,11 @@ class ResearchReviewDecision(ApiModel):
         return " ".join(value.split())
 
     @model_validator(mode="after")
-    def _require_change_note(self):
-        if self.decision == "changes_requested" and not self.note:
-            raise ValueError("changes_requested review requires a non-blank note")
+    def _require_decision_note(self):
+        if self.decision in {"changes_requested", "accepted_gap"} and not self.note:
+            raise ValueError(
+                f"{self.decision} review requires a non-blank note"
+            )
         return self
 
 
@@ -374,19 +431,100 @@ class ResearchReportPublishRequest(ApiModel):
     expected_revision: int = Field(ge=1, strict=True)
 
 
+class _ResearchAuditPublicModel(BaseModel):
+    """Ignore unknown verifier detail so claim text can never enter API output."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class ResearchClaimAuditCounts(_ResearchAuditPublicModel):
+    claim_count: int = Field(default=0, ge=0)
+    supported: int = Field(default=0, ge=0)
+    unsupported: int = Field(default=0, ge=0)
+    insufficient: int = Field(default=0, ge=0)
+    cited: int = Field(default=0, ge=0)
+    skipped_statements: int = Field(default=0, ge=0)
+
+
+class ResearchClaimAuditMetrics(_ResearchAuditPublicModel):
+    claim_support_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    citation_coverage: float | None = Field(default=None, ge=0.0, le=1.0)
+    unsupported_claim_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class ResearchClaimAuditRepair(_ResearchAuditPublicModel):
+    attempted: bool = False
+    attempt_count: int = Field(default=0, ge=0, le=1)
+    succeeded: bool = False
+    error: str = Field(default="", max_length=64)
+
+
+class ResearchClaimAuditVerifier(_ResearchAuditPublicModel):
+    duration_ms: float = Field(default=0.0, ge=0.0, le=3_600_000.0)
+    call_count: int = Field(default=0, ge=0)
+    version: str = Field(default="v1", max_length=16)
+
+
+class ResearchClaimAuditSummary(_ResearchAuditPublicModel):
+    status: str = Field(default="not_run", max_length=32)
+    reason_code: str = Field(default="", max_length=128)
+    counts: ResearchClaimAuditCounts = Field(
+        default_factory=ResearchClaimAuditCounts
+    )
+    metrics: ResearchClaimAuditMetrics = Field(
+        default_factory=ResearchClaimAuditMetrics
+    )
+    repair: ResearchClaimAuditRepair = Field(
+        default_factory=ResearchClaimAuditRepair
+    )
+    verifier: ResearchClaimAuditVerifier = Field(
+        default_factory=ResearchClaimAuditVerifier
+    )
+
+
+class ResearchCoverageAuditAuditor(_ResearchAuditPublicModel):
+    call_count: int = Field(default=0, ge=0, le=2)
+    version: str = Field(default="v1", max_length=16)
+
+
+class ResearchCoverageAuditSummary(_ResearchAuditPublicModel):
+    """Bounded public obligation coverage result; never exposes claim prose."""
+
+    status: str = Field(default="not_run", max_length=32)
+    reason_code: str = Field(default="", max_length=128)
+    requirement_count: int = Field(default=0, ge=0, le=16)
+    covered_count: int = Field(default=0, ge=0, le=16)
+    missing_requirement_ids: list[str] = Field(default_factory=list, max_length=16)
+    repair: ResearchClaimAuditRepair = Field(
+        default_factory=ResearchClaimAuditRepair
+    )
+    auditor: ResearchCoverageAuditAuditor = Field(
+        default_factory=ResearchCoverageAuditAuditor
+    )
+
+
 class ResearchPlanSection(ApiModel):
     section_id: str
     position: int = Field(ge=1, strict=True)
     title: str
     research_question: str
+    evidence_requirements: list["ResearchEvidenceRequirement"] = Field(
+        default_factory=list
+    )
+    success_criteria: str = ""
     status: Literal["pending", "running", "completed", "failed"] = "pending"
     evidence_status: Literal[
         "unsearched", "missing", "partial", "supported", "contradictory"
     ] = "unsearched"
     evidence_requirement_ids: list[str] = Field(default_factory=list)
+    evidence_requirement_results: list[
+        "ResearchVerificationRequirementResult"
+    ] = Field(default_factory=list)
     evidence: list["ResearchEvidenceItem"] = Field(default_factory=list)
     execution_metrics: dict[str, Any] = Field(default_factory=dict)
     citation_ledger: list[CitationLedgerEntry] = Field(default_factory=list)
+    claim_audit: ResearchClaimAuditSummary | None = None
+    coverage_audit: ResearchCoverageAuditSummary | None = None
     revision_instruction: str = ""
     verification_status: str = ""
     verification_reason_code: str = ""
@@ -403,15 +541,36 @@ class ResearchPlanSection(ApiModel):
     reviewed_at: str | None = None
     error: str = ""
 
+    @field_validator("claim_audit", mode="before")
+    @classmethod
+    def _empty_claim_audit_is_not_run(cls, value):
+        return value or None
+
+    @field_validator("coverage_audit", mode="before")
+    @classmethod
+    def _empty_coverage_audit_is_not_run(cls, value):
+        return value or None
+
+
+class ResearchEvidenceRequirement(ApiModel):
+    requirement_id: str
+    question: str
+    retrieval_query: str
+    recovery_query: str
+
 
 class ResearchEvidenceItem(ApiModel):
     chunk_id: str = ""
     source_type: str = "document"
     knowledge_id: str = ""
     source: str = ""
+    source_sha256: str = ""
+    text_hash: str = ""
     page: int | None = None
     page_start: int | None = None
     page_end: int | None = None
+    span_start: int | None = Field(default=None, ge=0, strict=True)
+    span_end: int | None = Field(default=None, ge=0, strict=True)
     section_title: str = ""
     text_preview: str = ""
     search_channel: str = ""
@@ -419,14 +578,129 @@ class ResearchEvidenceItem(ApiModel):
     rrf_score: float | int | None = None
 
 
+class ResearchSourceVersion(ApiModel):
+    source: str
+    sha256: str
+
+
+class ResearchProvenanceSnapshot(ApiModel):
+    schema_version: Literal["research-provenance-v1"] = "research-provenance-v1"
+    kb_id: str = ""
+    index_generation: str = ""
+    index_build_version: str = ""
+    chunk_identity_version: str = ""
+    source_versions: list[ResearchSourceVersion] = Field(default_factory=list)
+    derived_knowledge_revision: str = ""
+    retrieval_tuning_revision: str = ""
+    research_contract_version: str = ""
+    research_contract_revision: str = ""
+    captured_at: str = ""
+
+
+class ResearchVerificationRequirementResult(ApiModel):
+    requirement_id: str
+    status: str = ""
+    reason_code: str = ""
+    evidence_count: int = Field(default=0, ge=0, strict=True)
+
+
+class ResearchVerificationRequirementPlan(ApiModel):
+    requirement_id: str
+    question: str
+    retrieval_query: str
+    recovery_query: str
+
+
+class ResearchVerificationNode(ApiModel):
+    node: str
+    backend: Literal["local", "cloud"]
+    model: str
+    protocol_version: str
+
+
+class ResearchVerificationExecution(ApiModel):
+    job_id: str
+    kb_id: str
+    execution_id: str
+    report_execution_id: str
+    title: str
+    objective: str
+    is_local: bool
+    nodes: list[ResearchVerificationNode] = Field(default_factory=list)
+
+
+class ResearchEvidenceCommitment(ApiModel):
+    chunk_id: str = ""
+    source_type: str = "document"
+    knowledge_id: str = ""
+    source: str = ""
+    source_sha256: str = ""
+    text_hash: str = ""
+    page: int | None = None
+    page_start: int | None = None
+    page_end: int | None = None
+    span_start: int | None = Field(default=None, ge=0, strict=True)
+    span_end: int | None = Field(default=None, ge=0, strict=True)
+    section_title: str = ""
+    search_channel: str = ""
+    rerank_score: float | int | None = None
+    rrf_score: float | int | None = None
+
+
+class ResearchVerificationSection(ApiModel):
+    section_id: str
+    position: int = Field(ge=1, strict=True)
+    title: str
+    research_question: str
+    success_criteria: str = ""
+    revision_instruction: str = ""
+    requirements: list[ResearchVerificationRequirementPlan] = Field(
+        default_factory=list
+    )
+    generation_status: str = ""
+    verification_status: str = ""
+    verification_reason_code: str = ""
+    requirement_results: list[ResearchVerificationRequirementResult] = Field(
+        default_factory=list
+    )
+    claim_audit: ResearchClaimAuditSummary
+    coverage_audit: ResearchCoverageAuditSummary
+    evidence_commitments: list[ResearchEvidenceCommitment] = Field(
+        default_factory=list
+    )
+
+
+class ResearchVerificationSnapshot(ApiModel):
+    schema_version: Literal["research-verification-v2"] = "research-verification-v2"
+    execution: ResearchVerificationExecution
+    aggregate: dict[str, Any] = Field(default_factory=dict)
+    sections: list[ResearchVerificationSection] = Field(default_factory=list)
+
+
 class ResearchReportArtifact(ApiModel):
+    artifact_schema_version: str = ""
     format: Literal["markdown"] = "markdown"
     content: str
     citation_ledger: list[CitationLedgerEntry] = Field(default_factory=list)
     verification_metrics: dict[str, Any] = Field(default_factory=dict)
+    verification: ResearchVerificationSnapshot | None = None
+    provenance: ResearchProvenanceSnapshot | None = None
+    sha256: str = ""
     version: int = Field(default=1, ge=1, strict=True)
     generated_at: str
     published_at: str | None = None
+    published_by: str = ""
+    publication_sha256: str = ""
+
+    @field_validator("provenance", mode="before")
+    @classmethod
+    def _empty_provenance_is_untracked(cls, value):
+        return value or None
+
+    @field_validator("verification", mode="before")
+    @classmethod
+    def _empty_verification_is_untracked(cls, value):
+        return value or None
 
 
 class ResearchReportVersion(ApiModel):
@@ -442,6 +716,8 @@ class ResearchJob(ApiModel):
     kb_id: str
     title: str
     objective: str
+    is_local: bool = False
+    artifact_schema_floor: str = ""
     status: Literal[
         "planned",
         "running",
@@ -468,6 +744,9 @@ class ResearchJob(ApiModel):
         "failed",
     ] = "not_started"
     report_execution_id: str = ""
+    report_execution_nodes: list[ResearchVerificationNode] = Field(
+        default_factory=list
+    )
     report_completed_at: str | None = None
     report: ResearchReportArtifact | None = None
     report_version: int = Field(default=0, ge=0, strict=True)
@@ -478,9 +757,143 @@ class ResearchJob(ApiModel):
     review_history: list[dict[str, Any]] = Field(default_factory=list)
     published_report: ResearchReportArtifact | None = None
     published_at: str | None = None
+    published_by: str = ""
+    publication_sha256: str = ""
     regeneration_section_ids: list[str] = Field(default_factory=list)
     last_regenerated_section_ids: list[str] = Field(default_factory=list)
+    evidence_provenance: ResearchProvenanceSnapshot | None = None
+    execution_control: "ResearchExecutionControlSummary" = Field(
+        default_factory=lambda: ResearchExecutionControlSummary()
+    )
+    provenance_status: Literal["untracked", "current", "stale"] = "untracked"
+    provenance_stale_reasons: list[str] = Field(default_factory=list)
     error: str = ""
+
+    @field_validator("evidence_provenance", mode="before")
+    @classmethod
+    def _empty_evidence_provenance_is_untracked(cls, value):
+        return value or None
+
+
+class ResearchJobSectionCounts(ApiModel):
+    total: int = Field(ge=0, strict=True)
+    pending: int = Field(ge=0, strict=True)
+    running: int = Field(ge=0, strict=True)
+    completed: int = Field(ge=0, strict=True)
+    failed: int = Field(ge=0, strict=True)
+
+    @model_validator(mode="after")
+    def _counts_cover_every_section(self):
+        if self.pending + self.running + self.completed + self.failed != self.total:
+            raise ValueError("research section counts must add up to total")
+        return self
+
+
+class ResearchJobSummary(ApiModel):
+    """Bounded collection projection; it never embeds evidence or report bodies."""
+
+    job_id: str = Field(min_length=1, max_length=128, strict=True)
+    kb_id: str = Field(min_length=1, max_length=128, strict=True)
+    title: str = Field(min_length=1, max_length=160, strict=True)
+    objective_preview: str = Field(min_length=1, max_length=240, strict=True)
+    is_local: bool = Field(default=False, strict=True)
+    status: Literal[
+        "planned",
+        "running",
+        "paused",
+        "evidence_ready",
+        "generating",
+        "completed",
+        "failed",
+        "cancelled",
+    ]
+    revision: int = Field(ge=1, strict=True)
+    created_at: str = Field(min_length=1, max_length=128, strict=True)
+    updated_at: str = Field(min_length=1, max_length=128, strict=True)
+    section_counts: ResearchJobSectionCounts
+    report_status: Literal[
+        "not_started",
+        "generating",
+        "ready",
+        "ready_with_gaps",
+        "published",
+        "failed",
+    ] = "not_started"
+    report_version: int = Field(default=0, ge=0, strict=True)
+    review_status: Literal[
+        "not_started", "pending", "approved", "changes_requested", "published"
+    ] = "not_started"
+    provenance_status: Literal["untracked", "current", "stale"] = "untracked"
+    provenance_stale_reasons: list[str] = Field(default_factory=list, max_length=16)
+    report_history_count: int = Field(default=0, ge=0, strict=True)
+    has_report: bool = Field(default=False, strict=True)
+    has_published_report: bool = Field(default=False, strict=True)
+    report_size_bytes: int = Field(default=0, ge=0, strict=True)
+    published_at: str | None = Field(default=None, max_length=128, strict=True)
+    error: str = Field(default="", max_length=256, strict=True)
+
+    @field_validator("provenance_stale_reasons")
+    @classmethod
+    def _bounded_provenance_reasons(cls, values: list[str]) -> list[str]:
+        if any(not value or len(value) > 256 for value in values):
+            raise ValueError(
+                "research provenance stale reasons must be non-blank bounded strings"
+            )
+        return values
+
+    @model_validator(mode="after")
+    def _artifact_hints_are_consistent(self):
+        if not self.has_report and self.report_size_bytes:
+            raise ValueError("research report size requires an available report")
+        if self.has_published_report and self.published_at is None:
+            raise ValueError("published research report requires published_at")
+        return self
+
+
+class ResearchJobSummaryPage(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    jobs: list[ResearchJobSummary] = Field(default_factory=list, max_length=100)
+    next_cursor: str | None = Field(default=None, max_length=1024, strict=True)
+    has_more: bool = Field(default=False, strict=True)
+
+    @model_validator(mode="after")
+    def _cursor_matches_page_state(self):
+        if self.has_more != bool(self.next_cursor):
+            raise ValueError("research summary next_cursor must match has_more")
+        return self
+
+
+class ResearchResourceBudget(ApiModel):
+    retrieval_queries: int = Field(default=0, ge=0, strict=True)
+    candidate_docs: int = Field(default=0, ge=0, strict=True)
+    llm_calls: int = Field(default=0, ge=0, strict=True)
+    model_input_chars: int = Field(default=0, ge=0, strict=True)
+
+
+class ResearchRunControlSummary(ApiModel):
+    phase: Literal["evidence", "report"]
+    attempt_id: str = Field(default="", max_length=128, strict=True)
+    control_state: Literal[
+        "running",
+        "paused",
+        "cancelled",
+        "expired",
+        "budget_exhausted",
+        "failed",
+        "completed",
+    ]
+    deadline_at: str = Field(default="", max_length=128, strict=True)
+    limits: ResearchResourceBudget = Field(default_factory=ResearchResourceBudget)
+    used: ResearchResourceBudget = Field(default_factory=ResearchResourceBudget)
+    started_at: str = Field(default="", max_length=128, strict=True)
+    heartbeat_at: str = Field(default="", max_length=128, strict=True)
+    finished_at: str | None = Field(default=None, max_length=128, strict=True)
+    terminal_reason: str = Field(default="", max_length=128, strict=True)
+
+
+class ResearchExecutionControlSummary(ApiModel):
+    evidence: ResearchRunControlSummary | None = None
+    report: ResearchRunControlSummary | None = None
 
 
 class ResearchJobResponse(ApiModel):
@@ -491,6 +904,15 @@ class ResearchJobResponse(ApiModel):
 class ResearchJobListResponse(ApiModel):
     schema_version: Literal["v1"] = API_SCHEMA_VERSION
     jobs: list[ResearchJob] = Field(default_factory=list)
+
+
+class ResearchProvenanceResponse(ApiModel):
+    schema_version: Literal["v1"] = API_SCHEMA_VERSION
+    job_id: str
+    status: Literal["untracked", "current", "stale"]
+    stale_reasons: list[str] = Field(default_factory=list)
+    captured: ResearchProvenanceSnapshot | None = None
+    current: ResearchProvenanceSnapshot | None = None
 
 
 # 知识库内的一篇文档，来自清单。

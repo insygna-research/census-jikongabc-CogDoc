@@ -13,16 +13,22 @@ def _request_api_key(request: Request) -> str:
     return request.headers.get("x-api-key", "").strip()
 
 
-def require_eval_reviewer(request: Request) -> str:
-    """Authorize evidence-eval curation and return a non-secret actor identity."""
+async def require_eval_reviewer(request: Request) -> str:
+    """Authorize high-trust review actions and return a non-secret actor identity.
+
+    Keep this lightweight dependency event-loop native.  Declaring it as a
+    synchronous FastAPI dependency sends every review request through AnyIO's
+    worker pool, which can leave an ASGI request waiting forever when a worker
+    completion notification is missed.
+    """
 
     configured = set(getattr(request.app.state, "eval_review_api_keys", set()))
     if not configured:
-        raise HTTPException(status_code=403, detail="证据评测审核接口未启用")
+        raise HTTPException(status_code=403, detail="独立审核接口未启用")
     supplied = _request_api_key(request)
     if not supplied or not any(
         hmac.compare_digest(supplied, expected) for expected in configured
     ):
-        raise HTTPException(status_code=403, detail="需要证据评测审核权限")
+        raise HTTPException(status_code=403, detail="需要独立审核权限")
     fingerprint = hashlib.sha256(supplied.encode("utf-8")).hexdigest()[:16]
     return f"eval-review:{fingerprint}"

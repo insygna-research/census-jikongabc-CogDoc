@@ -33,7 +33,11 @@ def test_initial_state_has_no_active(tmp_path):
 # 验证 build ready switch lifecycle。
 def test_build_ready_switch_lifecycle(tmp_path):
     st = _state(tmp_path)
-    gen = st.begin_generation(embedding_model="m1", index_build_version="v1")
+    gen = st.begin_generation(
+        embedding_model="m1",
+        index_build_version="v1",
+        chunk_identity_version="chunks-v1",
+    )
     assert st.get(gen)["status"] == GENERATION_BUILDING
     with pytest.raises(ValueError):
         st.switch_active(gen)  # building 不能激活
@@ -43,6 +47,7 @@ def test_build_ready_switch_lifecycle(tmp_path):
     active = st.active()
     assert active["id"] == gen and active["status"] == GENERATION_READY
     assert active["expected_count"] == 3
+    assert active["chunk_identity_version"] == "chunks-v1"
 
 
 # 验证 illegal transitions raise。
@@ -216,12 +221,46 @@ def test_returned_documents_are_deep_copied(tmp_path):
 # 验证 state persists across instances。
 def test_state_persists_across_instances(tmp_path):
     st = _state(tmp_path)
-    g = st.begin_generation("m1", "v1")
+    g = st.begin_generation("m1", "v1", "chunks-v1")
     st.mark_ready(g, 0, [])
     st.switch_active(g)
     reopened = _state(tmp_path)
     assert reopened.active()["id"] == g
     assert reopened.active()["expected_count"] == 0  # ready+0 合法空索引
+    assert reopened.active()["chunk_identity_version"] == "chunks-v1"
+
+
+def test_legacy_state_without_chunk_identity_version_remains_readable(tmp_path):
+    import json
+
+    path = tmp_path / "kb" / "state.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "kb_id": "kb",
+                "active_generation": "glegacy",
+                "generations": {
+                    "glegacy": {
+                        "id": "glegacy",
+                        "status": GENERATION_READY,
+                        "embedding_model": "m1",
+                        "index_build_version": "v1",
+                        "base_epoch": 0,
+                        "expected_count": 0,
+                        "documents": [],
+                        "created_at": 1.0,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    active = _state(tmp_path).active()
+    assert active is not None
+    assert active["id"] == "glegacy"
+    assert "chunk_identity_version" not in active
 
 
 # 验证 corrupt state file recovers。

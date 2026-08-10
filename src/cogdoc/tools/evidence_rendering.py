@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from typing import Any
+from xml.sax.saxutils import escape
 
 from cogdoc.tools.citation_ledger import EVIDENCE_ID_PLACEHOLDER
 
@@ -9,10 +10,31 @@ from cogdoc.tools.citation_ledger import EVIDENCE_ID_PLACEHOLDER
 EVIDENCE_BLOCK_SEPARATOR = "\n\n"
 EMPTY_EVIDENCE_CONTEXT = "（未检索到任何相关的参考本地知识库内容。）"
 
+_XML_TEXT_ENTITIES = {"\r": "&#xD;"}
+_XML_ATTRIBUTE_ENTITIES = {
+    '"': "&quot;",
+    "'": "&apos;",
+    "\t": "&#x9;",
+    "\n": "&#xA;",
+    "\r": "&#xD;",
+}
+
 
 def _meta(doc: Mapping[str, Any]) -> Mapping[str, Any]:
     value = doc.get("meta")
     return value if isinstance(value, Mapping) else {}
+
+
+def _xml_text(value: Any) -> str:
+    """Escape model-visible character data without changing plain text."""
+
+    return escape(str(value), _XML_TEXT_ENTITIES)
+
+
+def _xml_attribute(value: Any) -> str:
+    """Escape an attribute with a stable, double-quoted XML representation."""
+
+    return escape(str(value), _XML_ATTRIBUTE_ENTITIES)
 
 
 def render_evidence_block(
@@ -31,7 +53,9 @@ def render_evidence_block(
         if evidence_id_override is not None
         else str(retrieval.get("evidence_id") or "").strip()
     )
-    evidence_id_attribute = f' evidence_id="{evidence_id}"' if evidence_id else ""
+    evidence_id_attribute = (
+        f' evidence_id="{_xml_attribute(evidence_id)}"' if evidence_id else ""
+    )
     body = (
         str(doc.get("text") or "") if text_override is None else text_override
     ).strip()
@@ -45,9 +69,11 @@ def render_evidence_block(
         if chunk_context:
             body = f"来源说明：\n{chunk_context}\n\n内容：\n{body}"
         return (
-            f'<Knowledge knowledge_id="{knowledge_id}" certainty="{certainty}" '
-            f'related_source="{related_source}"{evidence_id_attribute}>\n'
-            f"{body}\n"
+            f'<Knowledge knowledge_id="{_xml_attribute(knowledge_id)}" '
+            f'certainty="{_xml_attribute(certainty)}" '
+            f'related_source="{_xml_attribute(related_source)}"'
+            f"{evidence_id_attribute}>\n"
+            f"{_xml_text(body)}\n"
             "</Knowledge>"
         )
 
@@ -61,9 +87,11 @@ def render_evidence_block(
     if chunk_context:
         body = f"定位上下文：\n{chunk_context}\n\n正文：\n{body}"
     return (
-        f'<Document source="{source}" page="{page}" chunk_id="{chunk_id}"'
+        f'<Document source="{_xml_attribute(source)}" '
+        f'page="{_xml_attribute(page)}" '
+        f'chunk_id="{_xml_attribute(chunk_id)}"'
         f"{evidence_id_attribute}>\n"
-        f"{body}\n"
+        f"{_xml_text(body)}\n"
         "</Document>"
     )
 

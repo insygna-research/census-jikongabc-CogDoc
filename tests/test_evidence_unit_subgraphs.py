@@ -61,7 +61,7 @@ class _LLM:
 
 
 def _support_all_units(schema, messages):
-    payload = json.loads(messages[1]["content"].split("\n", 1)[1].rsplit("\n\n", 1)[0])
+    payload = json.loads(messages[1]["content"])["untrusted_data"]["evidence_units"]
     return schema(
         assessments=[
             {
@@ -76,7 +76,7 @@ def _support_all_units(schema, messages):
 
 
 def _reject_all_units(schema, messages):
-    payload = json.loads(messages[1]["content"].split("\n", 1)[1].rsplit("\n\n", 1)[0])
+    payload = json.loads(messages[1]["content"])["untrusted_data"]["evidence_units"]
     return schema(
         assessments=[
             {

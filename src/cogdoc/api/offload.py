@@ -1,5 +1,7 @@
 import asyncio
 from concurrent.futures import Executor
+import math
+import time
 from typing import Callable, ParamSpec, TypeVar
 
 
@@ -28,5 +30,61 @@ async def run_sync(
                 if concurrent_future.done():
                     return concurrent_future.result()
     except asyncio.CancelledError:
+        wrapped_future.cancel()
+        concurrent_future.cancel()
+        raise
+
+
+async def run_sync_until(
+    executor: Executor,
+    function: Callable[P, T],
+    *args: P.args,
+    deadline_monotonic: float,
+    on_cancel: Callable[[], None] | None = None,
+    on_timeout: Callable[[], None] | None = None,
+    **kwargs: P.kwargs,
+) -> T:
+    """Run work on an executor while enforcing one absolute queue+run deadline."""
+
+    if not math.isfinite(deadline_monotonic):
+        raise ValueError("deadline_monotonic must be finite")
+    concurrent_future = executor.submit(function, *args, **kwargs)
+    wrapped_future = asyncio.wrap_future(concurrent_future)
+    try:
+        while True:
+            remaining = deadline_monotonic - time.monotonic()
+            if remaining <= 0:
+                if on_timeout is not None:
+                    try:
+                        on_timeout()
+                    except Exception:
+                        pass
+                wrapped_future.cancel()
+                concurrent_future.cancel()
+                raise TimeoutError("executor operation deadline exceeded")
+            try:
+                return await asyncio.wait_for(
+                    asyncio.shield(wrapped_future),
+                    timeout=min(_COMPLETION_WATCHDOG_SECONDS, remaining),
+                )
+            except TimeoutError:
+                if concurrent_future.done():
+                    return concurrent_future.result()
+                if time.monotonic() >= deadline_monotonic:
+                    if on_timeout is not None:
+                        try:
+                            on_timeout()
+                        except Exception:
+                            pass
+                    wrapped_future.cancel()
+                    concurrent_future.cancel()
+                    raise TimeoutError("executor operation deadline exceeded")
+    except asyncio.CancelledError:
+        if on_cancel is not None:
+            try:
+                on_cancel()
+            except Exception:
+                pass
+        wrapped_future.cancel()
         concurrent_future.cancel()
         raise

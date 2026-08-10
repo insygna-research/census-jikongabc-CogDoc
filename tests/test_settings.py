@@ -158,15 +158,75 @@ def test_settings_rejects_evidence_span_values_outside_safe_bounds(field, value)
 def test_settings_exposes_bounded_research_execution_controls(monkeypatch):
     monkeypatch.setenv("COGDOC_RESEARCH_WORKERS", "3")
     monkeypatch.setenv("COGDOC_RESEARCH_RETRIEVAL_TOP_K", "12")
+    monkeypatch.setenv("COGDOC_RESEARCH_MAX_PENDING", "9")
+    monkeypatch.setenv("COGDOC_RESEARCH_PROVIDER_WORKERS", "2")
+    monkeypatch.setenv("COGDOC_RESEARCH_PROVIDER_MAX_PENDING", "7")
+    monkeypatch.setenv("COGDOC_RESEARCH_PROVIDER_CALL_TIMEOUT_SECONDS", "45")
+    monkeypatch.setenv("COGDOC_RESEARCH_LLM_PROCESS_ISOLATION_ENABLED", "false")
+    monkeypatch.setenv("COGDOC_RESEARCH_PROVIDER_KILL_GRACE_SECONDS", "0.2")
+    monkeypatch.setenv("COGDOC_RESEARCH_PROVIDER_IPC_MAX_BYTES", "4096")
+    monkeypatch.setenv("COGDOC_RESEARCH_EVIDENCE_DEADLINE_SECONDS", "120")
+    monkeypatch.setenv("COGDOC_RESEARCH_REPORT_DEADLINE_SECONDS", "240")
+    monkeypatch.setenv("COGDOC_RESEARCH_PLANNING_DEADLINE_SECONDS", "60")
+    monkeypatch.setenv("COGDOC_RESEARCH_PLANNING_WORKERS", "2")
+    monkeypatch.setenv("COGDOC_RESEARCH_PLANNING_MAX_PENDING", "5")
+    monkeypatch.setenv("COGDOC_RESEARCH_MAX_RETRIEVAL_QUERIES", "18")
+    monkeypatch.setenv("COGDOC_RESEARCH_MAX_CANDIDATE_DOCS", "72")
+    monkeypatch.setenv("COGDOC_RESEARCH_MAX_LLM_CALLS", "20")
+    monkeypatch.setenv("COGDOC_RESEARCH_MAX_MODEL_INPUT_CHARS", "42000")
 
     settings = get_settings()
 
     assert settings.cogdoc_research_workers == 3
     assert settings.cogdoc_research_retrieval_top_k == 12
+    assert settings.cogdoc_research_max_pending == 9
+    assert settings.cogdoc_research_provider_workers == 2
+    assert settings.cogdoc_research_provider_max_pending == 7
+    assert settings.cogdoc_research_provider_call_timeout_seconds == 45
+    assert settings.cogdoc_research_llm_process_isolation_enabled is False
+    assert settings.cogdoc_research_provider_kill_grace_seconds == 0.2
+    assert settings.cogdoc_research_provider_ipc_max_bytes == 4096
+    assert settings.cogdoc_research_evidence_deadline_seconds == 120
+    assert settings.cogdoc_research_report_deadline_seconds == 240
+    assert settings.cogdoc_research_planning_deadline_seconds == 60
+    assert settings.cogdoc_research_planning_workers == 2
+    assert settings.cogdoc_research_planning_max_pending == 5
+    assert settings.cogdoc_research_max_retrieval_queries == 18
+    assert settings.cogdoc_research_max_candidate_docs == 72
+    assert settings.cogdoc_research_max_llm_calls == 20
+    assert settings.cogdoc_research_max_model_input_chars == 42000
     with pytest.raises(ValueError):
         Settings(_env_file=None, cogdoc_research_workers=0)
     with pytest.raises(ValueError):
         Settings(_env_file=None, cogdoc_research_retrieval_top_k=51)
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, cogdoc_research_max_pending=0)
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, cogdoc_research_provider_workers=0)
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, cogdoc_research_provider_max_pending=0)
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, cogdoc_research_provider_call_timeout_seconds=0)
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, cogdoc_research_provider_kill_grace_seconds=0)
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, cogdoc_research_provider_ipc_max_bytes=100)
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, cogdoc_research_report_deadline_seconds=0)
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, cogdoc_research_planning_deadline_seconds=0)
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, cogdoc_research_planning_workers=0)
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, cogdoc_research_planning_max_pending=0)
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, cogdoc_research_max_retrieval_queries=0)
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, cogdoc_research_max_candidate_docs=0)
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, cogdoc_research_max_llm_calls=0)
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, cogdoc_research_max_model_input_chars=999)
 
 
 # 验证节点可以独立选择后端和模型。
@@ -211,6 +271,23 @@ def test_settings_resolves_claim_gate_node_backends(monkeypatch):
     assert (
         settings.model_name_for_node("claim_repairer", is_local=repairer_local)
         == "claim-repair"
+    )
+
+
+# 验证研究规划器可以独立于查询改写器选择模型。
+def test_settings_resolves_research_planner_backend(monkeypatch):
+    monkeypatch.setenv("LLM_RESEARCH_PLANNER_BACKEND", "local")
+    monkeypatch.setenv("OLLAMA_RESEARCH_PLANNER_MODEL_NAME", "plan-review:7b")
+
+    settings = get_settings()
+    is_local = settings.is_local_for_node(
+        "research_planner", request_is_local=False
+    )
+
+    assert is_local is True
+    assert (
+        settings.model_name_for_node("research_planner", is_local=is_local)
+        == "plan-review:7b"
     )
 
 

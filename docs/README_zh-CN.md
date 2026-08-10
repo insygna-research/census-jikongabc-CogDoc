@@ -28,7 +28,7 @@
 
 - **多知识库 · 多对话 · 分层记忆** — 完整展示历史持久化用于回放；通过引用校验的近期回合组成有界短期记忆，被淘汰回合转为会话级摘要和决策，只有带明确记忆信号的稳定事实才进入跨会话长期记忆，错误答案不会进入 Agent 记忆。
 
-- **持久化研究证据工作台** — 从研究目标创建可编辑大纲，每章复用生产混合检索链执行，展示有界证据预览，并支持安全暂停、恢复和取消。候选命中在语义校验器明确提升前只标记为 `partial`；服务重启会把中断任务协调为 `paused`。
+- **可复现证据的 Deep Research 工作台** — AI 生成或人工编辑带原子证据需求的大纲，每个需求复用生产混合检索链执行，并通过持久 attempt lease 安全暂停、恢复和取消。准入、阶段截止时间、检索/文档/LLM/输入预算以及旧 worker 的迟到提交均有界且 fail-closed。报告声明会被独立审计，每个原子需求还必须由已支持且有引用的声明覆盖；两道门共享最多一次修复，仍不充分则 fail-closed。每次执行都会冻结索引、来源、派生知识、调权与检索契约版本；证据过期后必须刷新才能审阅或发布，发布同时提供完整性校验过的 Markdown 与确定性验证包。带 keyset 分页和 ETag 的轻量摘要索引使任务轮询不再随报告和证据体积增长。
 
 - **网页端、CLI 与 Debug 入口** — 斜杠命令 CLI、基于 FastAPI 的 Streamlit 网页端，以及聚焦 trace 诊断的 `make debug` 控制台。
 
@@ -164,10 +164,12 @@ Streamlit 前端只是 FastAPI 服务上的瘦客户端——你也可以直接�
 | `GET /v1/retrieval-eval-drafts/export` | 导出已通过且未过期的 training/release-gate 数据；QA 专用格式会显式报告被排除的 Summary/Compare 草稿 |
 | `POST /v1/research-jobs`、`GET /v1/research-jobs` | 创建或列出持久化研究计划 |
 | `GET /v1/research-jobs/{id}`、`PUT /v1/research-jobs/{id}/plan` | 查询或带版本冲突保护地修订研究大纲 |
+| `POST /v1/research-jobs/{id}/plan/auto` | 生成每章含 1–3 个原子证据需求的可编辑大纲 |
 | `POST /v1/research-jobs/{id}/start`、`/pause`、`/resume`、`/cancel` | 控制持久化的逐章节证据检索 |
+| `GET /v1/research-jobs/{id}/provenance`、`POST /v1/research-jobs/{id}/refresh` | 查看冻结的证据输入，或归档旧报告并全量刷新过期证据 |
 | `POST /v1/research-jobs/{id}/generate`、`GET /v1/research-jobs/{id}/report` | 对章节证据执行闭集校验、生成带引用正文并下载 Markdown 报告 |
 | `PUT /v1/research-jobs/{id}/review`、`POST /v1/research-jobs/{id}/publish` | 带 revision 冲突保护地逐章审阅正文或证据缺口，并只发布完成全部审阅的报告 |
-| `GET /v1/research-jobs/{id}/published-report` | 下载冻结的已发布 Markdown 快照 |
+| `GET /v1/research-jobs/{id}/published-report`、`/published-bundle` | 下载通过完整性校验的 Markdown 快照或确定性 ZIP 验证包 |
 | `GET /healthz`、`GET /readyz`、`GET /metrics` | 健康、就绪、Prometheus 指标 |
 
 `/v1/chat/stream` 始终会流式发送生命周期和节点进度事件。QA、Summary 和
@@ -176,7 +178,7 @@ Compare 的中间模型文本可能包含内部 Evidence ID，且尚未通过终
 通过单个 `token` 事件收到最终答案。其他任务保留实时模型 token，除非全局声明校验门禁要求缓冲。
 
 若配置了 `COGDOC_API_KEYS`，`/v1` 请求会被鉴权并限流；不配 key 时 `/v1` 对外开放（服务启动时会打告警日志）。
-证据评测的列表、审核和导出接口必须另外配置独立的 `COGDOC_EVAL_REVIEW_API_KEYS` 才会启用。审核者身份由服务端对 key 取指纹得到，不落盘原始 key，也不接受客户端自报 actor。
+证据评测的列表/审核/导出以及 Research 报告的审阅/发布接口，必须另外配置独立的 `COGDOC_EVAL_REVIEW_API_KEYS` 才会启用；接受证据缺口时必须填写非空理由。审核者和发布者身份由服务端对 key 取指纹得到，不落盘原始 key，也不接受客户端自报 actor。
 
 ### 分层记忆
 
@@ -653,12 +655,31 @@ python scripts/migrate_state.py --verify-only   # 校验导入结果
 | `COGDOC_FEEDBACK_STORE` | `jsonl` | 反馈存储后端；设为 `sqlite` 时使用数据库并导出逐行对象副本 |
 | `COGDOC_DERIVED_KNOWLEDGE_INDEX_AUTO_REFRESH` | `false` | 知识审核变更后在后台重建派生知识向量索引 |
 | `COGDOC_API_KEYS` | 未设置 | 逗号分隔的 API key；为空则关闭 API 鉴权 |
-| `COGDOC_EVAL_REVIEW_API_KEYS` | 未设置 | 证据评测列表/审核/导出的独立管理 key；为空时这些接口保持关闭 |
+| `COGDOC_EVAL_REVIEW_API_KEYS` | 未设置 | 证据评测管理及 Research 审阅/发布的独立管理 key；为空时这些接口保持关闭 |
 | `RATE_LIMIT_PER_MINUTE` | `120` | 受保护 API 路由的令牌桶补充速率 |
 | `RATE_LIMIT_BURST` | `120` | 令牌桶突发容量；`<=0` 表示关闭限流 |
 | `COGDOC_MAX_UPLOAD_MB` | `50` | 网页/API 上传 PDF 的单文件大小上限 |
 | `COGDOC_RESEARCH_WORKERS` | `2` | 后台 Research 证据与报告任务最大并发数 |
 | `COGDOC_RESEARCH_RETRIEVAL_TOP_K` | `8` | 每个研究章节的候选召回与重排深度 |
+| `COGDOC_RESEARCH_MAX_PENDING` | `32` | Research 后台 attempt 的已准入排队/运行总上限；超限 API 返回 `503` |
+| `COGDOC_RESEARCH_PROVIDER_WORKERS` | `4` | 后台 Research attempt 内可并发运行的进程隔离 provider 调用上限 |
+| `COGDOC_RESEARCH_PROVIDER_MAX_PENDING` | `16` | 后台 Research attempt 中已准入运行/排队的 provider 调用总上限 |
+| `COGDOC_RESEARCH_PROVIDER_CALL_TIMEOUT_SECONDS` | `180` | 单次 provider 调用上限；还会被阶段或规划的剩余截止时间进一步收紧 |
+| `COGDOC_RESEARCH_LLM_PROCESS_ISOLATION_ENABLED` | `true` | 要求已识别的标准 `ChatOpenAI` Research 调用在无法进入进程隔离时 fail-closed |
+| `COGDOC_RESEARCH_PROVIDER_KILL_GRACE_SECONDS` | `0.5` | 隔离子进程收到 terminate 后、升级为 kill 前的宽限时间 |
+| `COGDOC_RESEARCH_PROVIDER_IPC_MAX_BYTES` | `2000000` | 从隔离 provider 子进程接收的序列化结果信封大小上限 |
+| `COGDOC_RESEARCH_EVIDENCE_DEADLINE_SECONDS` | `900` | 单次证据 attempt 的持久墙钟截止时间 |
+| `COGDOC_RESEARCH_REPORT_DEADLINE_SECONDS` | `1800` | 单次报告生成 attempt 的持久墙钟截止时间 |
+| `COGDOC_RESEARCH_PLANNING_DEADLINE_SECONDS` | `300` | 单次自动生成 Research 规划的墙钟截止时间 |
+| `COGDOC_RESEARCH_PLANNING_WORKERS` | `1` | 自动规划专用 worker 数，不占用共享 API offload 池 |
+| `COGDOC_RESEARCH_PLANNING_MAX_PENDING` | `8` | 自动规划请求的运行/排队准入上限；超限返回 `503` |
+| `COGDOC_RESEARCH_MAX_RETRIEVAL_QUERIES` | `128` | 每个 attempt 在检索前原子预扣的查询预算 |
+| `COGDOC_RESEARCH_MAX_CANDIDATE_DOCS` | `2048` | 每个 attempt 在检索前原子预扣的候选文档预算 |
+| `COGDOC_RESEARCH_MAX_LLM_CALLS` | `256` | 每个 attempt 的结构化/模型调用预算 |
+| `COGDOC_RESEARCH_MAX_MODEL_INPUT_CHARS` | `5000000` | 每个 attempt 的模型输入累计字符预算 |
+| `LLM_RESEARCH_PLANNER_BACKEND` | `default` | 研究规划后端：跟随请求，或强制 `cloud` / `local` |
+| `LLM_RESEARCH_PLANNER_MODEL_NAME` | 未设置 | 生成可编辑研究大纲时使用的云端模型覆盖 |
+| `OLLAMA_RESEARCH_PLANNER_MODEL_NAME` | 未设置 | 生成可编辑研究大纲时使用的本地模型覆盖 |
 | `QA_PARENT_CONTEXT_ENABLED` | `true` | 为 rerank 命中的 child 补充同章节有界 sibling；设为 `false` 时保留旧邻块扩展 |
 | `QA_PARENT_CONTEXT_MAX_CHUNKS` | `5` | 每个结构父级窗口最多保留的 child 数（含 anchor） |
 | `QA_PARENT_CONTEXT_MAX_CHARS` | `3600` | 每个结构父级窗口的软字符预算；anchor 永不被丢弃 |
@@ -697,6 +718,8 @@ python scripts/migrate_state.py --verify-only   # 校验导入结果
 | `LLM_<NODE>_MODEL_NAME` | 未设置 | 节点级云端模型覆盖 |
 | `OLLAMA_<NODE>_MODEL_NAME` | 未设置 | 节点级本地模型覆盖 |
 | `HF_TOKEN` | 未设置 | 可选 Hugging Face Hub token |
+
+自动 Research 规划及证据/报告任务使用的标准工厂 `ChatOpenAI` 调用，会在全新的 spawn 子进程中重建。发生超时、持久化暂停/取消或收到应用关闭信号时，监督器会终止本地子进程，在宽限期后升级为 kill，并完成 join 与回收。`make serve` 会为 Uvicorn 配置有限的活动请求优雅关闭上限，使正在执行的 HTTP 规划能够进入应用关闭信号；自定义启动器必须配置等价边界。不透明或非标准客户端仍走有界兼容路径，只能协作式取消；若客户端已被识别为 `ChatOpenAI`，但在要求隔离时无法安全构造子进程调用，则 fail-closed。终止本地客户端进程并不保证撤销已经送达远端 API 或 Ollama 服务的请求，远端可能继续计算或计费。检索、重排、嵌入、Hugging Face 模型加载、Torch 及 native/Rust 工作目前仍在进程内，尚不能被这层 provider 隔离强制抢占。
 
 `<NODE>` 可取 `ROUTER`、`QUERY_REWRITER`、`SOURCE_RESOLVER`、`EVIDENCE_VERIFIER`、`CLAIM_VERIFIER`、`CLAIM_REPAIRER`、`QA_GENERATOR`、`SUMMARY_GENERATOR`、`COMPARE_PROFILE` 或 `COMPARE_CONCLUSION`。例如，可让答案生成继续使用云端，同时设置 `LLM_CLAIM_VERIFIER_BACKEND=local` 和 `OLLAMA_CLAIM_VERIFIER_MODEL_NAME=<校验模型>`；若修复也走本地，再设置 `LLM_CLAIM_REPAIRER_BACKEND=local` 和 `OLLAMA_CLAIM_REPAIRER_MODEL_NAME=<修复模型>`。对应的云端模型覆盖为 `LLM_CLAIM_VERIFIER_MODEL_NAME` 和 `LLM_CLAIM_REPAIRER_MODEL_NAME`。引用格式及来源/页码合法性仍由 Rust 确定性校验；claim verifier 额外提供可选的模型语义支持度判断。
 
@@ -790,9 +813,10 @@ python scripts/migrate_state.py --verify-only   # 校验导入结果
 
 - **OCR 是默认关闭的 Tesseract MVP。** 仅支持本机已安装的语言包，不提供托管 OCR provider；识别质量取决于扫描质量、语言选择和 DPI。
 - Summary 与 Compare 是固定 schema MVP：云端模式会并发执行相互独立的章节/维度 LLM cell，并保持输出顺序稳定；本地 Ollama 模式为避免内存压力仍走串行。默认章节/维度集合固定，除非通过 graph state 传入自定义配置。
-- Research 报告现已支持闭集校验、确定性引用、逐章审阅、显式接受证据缺口、退回修订、有界版本历史、选择性重新生成和冻结发布。选择性重生成只会检索、校验并改写 `changes_requested` 章节；已批准章节和已接受缺口原样保留，同时重新构建并校验全文公开引用账本。已发布导出格式暂时仅支持 Markdown。
+- Research 报告现已支持可编辑 AI 规划、原子证据需求、闭集校验、确定性引用、强制的章节局部声明审计与需求覆盖审计、一次共享的有限修复、逐章审阅、显式接受证据缺口、有界版本历史、选择性重新生成和冻结发布。原子需求是机器强制的完成契约；自由文本 `success_criteria` 只作为人工验收说明。选择性重生成只会检索、校验并改写 `changes_requested` 或旧版未审计章节；已批准章节和已接受缺口原样保留，同时重新构建并校验全文公开引用账本。冻结的 provenance（含检索/校验配置与模型路由）会阻止过期证据继续生成、审阅或发布，显式全量刷新会先归档旧报告。本地 Research 任务是隐私硬约束：规划、证据校验、写作、声明/覆盖审计与修复均拒绝云端节点覆盖。
+- v2 发布物的 SHA-256 会精确绑定 Markdown、引用账本、可追踪 provenance、有界 `verification.json` 声明/覆盖摘要、证据身份/文本哈希承诺、版本与生成时间；确定性 ZIP 另含逐文件哈希。旧版 Markdown 只能以 `legacy-unverified` 下载且不能生成验证包；畸形或被篡改的当前/已发布正文不会出现在列表、详情或下载响应中。
 - 本地 Compare 有意限制为 2 篇文档、4 个核心维度，并跳过额外结论生成，以降低 Ollama 内存压力。
-- 语义门禁关闭（默认）时，Citation 校验只证明引用的 `source` / `page` 或知识 ID 物理合法，不证明周围声明获得语义支持，也不保证每条事实句都有引用。开启 `CLAIM_VERIFICATION_ENABLED` 后，QA、Summary、Compare 会增加模型驱动的声明/证据门禁；遇到 `unsupported` / `insufficient` 声明或校验/修复异常时 fail-closed，但仍应使用领域人工基线做标定。
+- 全局语义门禁关闭（默认）时，QA、Summary、Compare 的 Citation 校验只证明引用的 `source` / `page` 或知识 ID 物理合法，不证明周围声明获得语义支持，也不保证每条事实句都有引用；开启 `CLAIM_VERIFICATION_ENABLED` 后才会增加它们的模型门禁。Research 报告生成不受该灰度开关影响，始终只使用章节局部精确证据执行 fail-closed 声明支持与原子需求覆盖审计。模型校验仍应使用领域人工基线做标定。
 - Rewrite 相似度阈值默认 `0.5`，后续应基于真实数据标定。
 - 本地模型下载依赖网络或已有 Hugging Face 缓存。
 

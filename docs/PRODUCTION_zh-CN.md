@@ -78,9 +78,21 @@ COGDOC_STATE_BACKEND=sqlite
 
 随后启动服务，检查 `/readyz`、会话历史、未完成/已完成索引任务、反馈数量、派生知识，以及一条代表性的检索反馈查询。在整个回滚窗口内保留 `state.db.pre-unified-*.bak` 和原始 JSONL；它们是恢复工件，不能在迁移后立即清理。
 
-Research 证据执行以章节为恢复粒度。若服务在任务处于 `running` 时退出，启动过程会把执行中的章节重置为 `pending`，并把任务协调到 `paused`，必须由运维或用户显式恢复。报告生成会重新走闭集 Evidence Unit 校验，只有 `supported` 的 grounding ID 能进入章节生成；无证据、冲突、校验失败和生成失败都会成为报告中的显式缺口。若服务在 `generating` 时退出，任务会回到 `evidence_ready` 等待显式重试。状态库只保存有界证据预览、定位、公开引用账本和渲染后的 Markdown 报告，不保存完整来源 chunk。
+Research 证据执行以章节为恢复粒度。若服务在任务处于 `running` 时退出，启动过程会把执行中的章节重置为 `pending`，并把任务协调到 `paused`，必须由运维或用户显式恢复。报告生成会把每个原子需求重新送入闭集 Evidence Unit 校验，只有 `supported` 的 grounding ID 能进入章节生成；生成后的声明只依据本章精确证据接受审计，独立的需求覆盖审计还要求每个原子需求都由已支持且有引用的声明回答。声明与覆盖失败共享最多一次有界修复，修复后必须重新通过引用、声明和覆盖三道门。无证据、冲突、遗漏需求、校验失败、语义审计失败和生成失败都会成为报告中的显式缺口。若服务在 `generating` 时退出，任务会回到 `evidence_ready` 等待显式重试，并保留选择性重生成范围。状态库只保存有界证据预览、定位、公开引用账本、声明/覆盖审计摘要和渲染后的 Markdown 报告，不保存完整来源 chunk 或模型声明文本。
 
-Research 发布是独立的乐观并发状态转换。已生成章节必须标记为 `approved`，被阻断章节必须显式标记为 `accepted_gap`；任何 `changes_requested` 决定都必须附带修订要求，且只能通过同一检索与校验链路重新生成。系统最多归档十个完整报告版本，审阅历史最多保留 100 个事件。只有退回章节会消耗检索、校验和生成资源；保留章节与新章节的局部账本会重新编号、换算偏移并合成为经过校验的全局账本。发布会冻结独立不可变快照，已发布任务拒绝继续修改计划。
+每次证据/报告 attempt 都持久化 attempt ID、可轮换 lease、阶段截止时间，以及检索查询、候选文档、模型调用和模型输入累计字符的原子预算。恢复执行必定轮换 lease，因此正在排空或迟到的 worker 不能继续预扣资源，也不能提交旧输出。已准入的排队/运行总量受 `COGDOC_RESEARCH_MAX_PENDING` 限制；超过上限的启动/生成请求返回带 `Retry-After` 的 `503`。暂停和取消会原子作废证据与报告 lease、通知活动 worker，并取消尚未开始的 future。截止时间或预算耗尽会持久化并 fail-closed。
+
+自动规划的来源读取与模型工作使用独立的有界 daemon executor（`COGDOC_RESEARCH_PLANNING_WORKERS` / `COGDOC_RESEARCH_PLANNING_MAX_PENDING`），不占用共享 API offload 池；前后的短状态库操作仍使用共享池。绝对截止时间覆盖排队、来源读取和模型执行。进入 lifespan 关闭后，服务会通知所有已注册规划控制器、取消排队任务；若不透明的进程内来源读取仍未排空，则延后关闭 runtime 和释放进程锁。`make serve` 还通过 `UVICORN_GRACEFUL_SHUTDOWN_SECONDS`（默认 `15`）设置 Uvicorn 活动请求的优雅关闭上限；使用其他启动器时必须配置等价的有限上限，否则 Uvicorn 可能在进入 lifespan 关闭前无限等待活动 HTTP handler。原始 socket 断开不是所有 ASGI 服务器都会转成 handler 取消信号，因此这种情况下仍以专用容量和规划绝对截止时间作为外层边界。
+
+自动规划及证据/报告生成中的标准工厂 `ChatOpenAI` 调用，会在全新的 spawn 子进程中重建，并关闭传输层重试。监督器会用规划或持久阶段的剩余截止时间收紧单次调用时限；子进程存活时轮询进程内停止信号与单调截止时间，在准入前和子进程回收后执行权威持久检查，并始终 join 和回收子进程。超时、暂停、取消或关闭会先发送 terminate，超过 `COGDOC_RESEARCH_PROVIDER_KILL_GRACE_SECONDS` 后升级为 kill。应按后台 Research attempt 可用的 provider 容量设置 `COGDOC_RESEARCH_PROVIDER_WORKERS` 与 `COGDOC_RESEARCH_PROVIDER_MAX_PENDING`，让 `COGDOC_RESEARCH_PROVIDER_CALL_TIMEOUT_SECONDS` 小于上游负载均衡器超时，并把 `COGDOC_RESEARCH_PROVIDER_IPC_MAX_BYTES` 视为 fail-closed 的响应信封上限。若已识别的 `ChatOpenAI` 客户端无法转换为安全子进程调用，在 `COGDOC_RESEARCH_LLM_PROCESS_ISOLATION_ENABLED=true` 时会 fail-closed；不透明或非标准客户端仍走有界 daemon 兼容路径，只能在检查点协作式停止。优雅关闭会在结束应用 lifespan 前作废全部活动 lease，兼容路径的迟到结果无法提交。
+
+超时计时从 spawn 前开始，包含 provider 槽位等待与子进程生命周期。Python 本地 spawn bootstrap 和有界 IPC 信封解码属于可信的准入/序列化边界：其耗时会计入 deadline，但解释器无法异步抢占这些短同步操作本身。工厂调用会先转成有大小上限的纯字节配方，再进入 spawn，以保持该边界可预测。
+
+这层隔离只终止本地 HTTP 客户端进程。已经收到请求的远端 API 或 Ollama 服务可能继续计算和计费，因此仍需 provider 侧请求 ID、预算及账单告警。检索、重排、嵌入、Hugging Face 模型加载、Torch kernel 与 native/Rust 调用仍在进程内；Research 控制器会在这些调用前后检查截止时间，但无法强制抢占阻塞中的调用。不得把本版本描述为任意 provider 沙箱或全流水线隔离。
+
+集合视图应轮询 `GET /v1/research-jobs/summaries`，而不是兼容保留的完整列表接口。摘要接口使用有界 keyset 分页（`limit` 与 opaque `cursor`），返回 ETag、支持 `If-None-Match` 命中后的 `304`，且不包含章节、证据、报告和历史正文。只有用户显式选中后才获取一个任务详情及其报告。应监控 `cogdoc_research_lifecycle_total`、`cogdoc_research_background_total`、`cogdoc_research_background_in_progress`、`cogdoc_research_terminations_total`、章节候选/证据直方图以及覆盖/声明审计计数器；指标标签均为低基数闭集，任务 ID 只进入结构化日志字段。
+
+Research 发布是受独立 `COGDOC_EVAL_REVIEW_API_KEYS` 审核凭据保护的乐观并发状态转换；服务端只保存审核者/发布者的 key 指纹。每次证据执行都会冻结索引 generation/build/chunk identity、来源 SHA-256、已批准派生知识版本、检索调权版本以及检索/校验契约版本；任何漂移都会把证据标为 stale，并阻止生成、审阅与发布。显式刷新会先归档旧报告，清空所有章节的证据与审计结果，再基于新快照执行全量检索。已生成章节必须标记为 `approved`，被阻断章节必须显式标记为 `accepted_gap` 并填写非空理由；任何 `changes_requested` 决定都必须附带修订要求，且只能通过同一检索与校验链路重新生成。系统最多归档十个完整报告版本，审阅历史最多保留 100 个事件。只有退回或旧版未审计章节会消耗检索、校验和生成资源；保留章节与新章节的局部账本会重新编号、换算偏移并合成为经过校验的全局账本。v2 artifact SHA-256 精确绑定 Markdown、严格引用账本、可追踪 provenance、有界聚合/逐章声明与需求覆盖审计、证据身份/文本哈希承诺、报告版本和生成时间；独立 publication SHA-256 再把该 artifact 与精确审阅历史、逐章决定、发布时间和审核 key 指纹绑定。确定性 ZIP 包含 `report.md`、`citation-ledger.json`、`provenance.json`、`verification.json` 及逐文件哈希 manifest。旧版已发布 Markdown 仍可通过 `X-CogDoc-Integrity: legacy-unverified` 下载，但不能生成验证包；任何畸形或被篡改的 artifact 都不会返回正文。
 
 dry-run、apply 或 verify 任一步失败时，保持服务停止且不要切换后端。保存命令输出的 JSON 错误，确认没有遗留迁移进程占用实例锁，检查数据目录的剩余空间和权限，并修复 malformed/duplicate canonical records 后重新从 dry-run 开始。禁止手工提升临时数据库。
 

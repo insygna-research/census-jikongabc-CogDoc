@@ -66,7 +66,7 @@ def test_evidence_payload_uses_generator_renderer_before_truncation():
     row = json.loads(evidence_verifier._evidence_payload([doc], max_chars))[0]
 
     assert row["text"] == rendered[:max_chars]
-    assert "章节路径：Methods > Training" in row["text"]
+    assert "章节路径：Methods &gt; Training" in row["text"]
     assert "定位上下文：" in row["text"]
     assert evidence_verifier.Generator._build_context_string([doc]) == rendered
 
@@ -577,9 +577,9 @@ def test_runtime_qa_plan_uses_generic_closed_set_verifier_and_gate(monkeypatch):
     )
 
     def invoke_structured(_llm, schema, messages):
-        payload = json.loads(
-            messages[1]["content"].split("\n", 1)[1].rsplit("\n\n", 1)[0]
-        )
+        payload = json.loads(messages[1]["content"])["untrusted_data"][
+            "evidence_units"
+        ]
         return schema(
             assessments=[
                 {

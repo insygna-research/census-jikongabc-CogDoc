@@ -4,6 +4,8 @@ from typing import Iterable, TypeVar
 from pydantic import BaseModel
 
 from cogdoc.config.settings import get_settings
+from cogdoc.research_control import ResearchProviderError
+from cogdoc.research_provider import invoke_research_model
 
 
 STRUCTURED_OUTPUT_METHODS = ("json_mode", "json_schema", "function_calling", "raw_json")
@@ -128,7 +130,8 @@ def _parse_schema(
 def _invoke_raw_json(
     llm, schema: type[StructuredModel], messages: Iterable
 ) -> StructuredModel:
-    response = llm.invoke(list(messages))
+    messages = list(messages)
+    response = invoke_research_model(llm, messages)
     content = _message_content(response)
     return _parse_schema(schema, _extract_json_object(content))
 
@@ -158,7 +161,13 @@ def invoke_structured(
                 return output
 
             structured_llm = llm.with_structured_output(schema, method=method)
-            output = structured_llm.invoke(messages)
+            output = invoke_research_model(
+                structured_llm,
+                messages,
+                timeout_source=llm,
+                schema=schema,
+                structured_method=method,
+            )
             if isinstance(output, schema):
                 _METHOD_CACHE[cache_key] = method
                 return output
@@ -173,6 +182,11 @@ def invoke_structured(
             parsed = _parse_schema(schema, json.loads(_message_content(output)))
             _METHOD_CACHE[cache_key] = method
             return parsed
+        except ResearchProviderError:
+            # A bounded provider timeout/capacity failure is terminal for this
+            # model turn. Trying three alternate response protocols would only
+            # amplify load while the original transport may still be unwinding.
+            raise
         except Exception as exc:
             errors.append(f"{method}: {exc}")
 

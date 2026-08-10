@@ -125,6 +125,18 @@ def test_trace_client_methods_call_expected_endpoints(monkeypatch):
     }
 
 
+def test_client_cache_identity_is_stable_but_never_contains_api_key():
+    first = CogDocClient("http://api", api_key="secret-a")
+    same = CogDocClient("http://api", api_key="secret-a")
+    other = CogDocClient("http://api", api_key="secret-b")
+    anonymous = CogDocClient("http://api", api_key="")
+
+    assert first.auth_cache_identity == same.auth_cache_identity
+    assert first.auth_cache_identity != other.auth_cache_identity
+    assert "secret" not in first.auth_cache_identity
+    assert anonymous.auth_cache_identity == "anonymous"
+
+
 def test_research_client_methods_call_expected_endpoints(monkeypatch):
     calls = []
 
@@ -146,7 +158,11 @@ def test_research_client_methods_call_expected_endpoints(monkeypatch):
     client = CogDocClient("http://api", api_key="secret")
 
     client.create_research_job(
-        "kb", "研究目标", title="标题", section_titles=["证据"]
+        "kb",
+        "研究目标",
+        title="标题",
+        section_titles=["证据"],
+        is_local=True,
     )
     client.list_research_jobs("kb", status="planned", limit=12)
     client.get_research_job("rj_1")
@@ -155,8 +171,13 @@ def test_research_client_methods_call_expected_endpoints(monkeypatch):
         expected_revision=2,
         sections=[{"title": "证据", "research_question": "有哪些证据？"}],
     )
+    client.generate_research_plan(
+        "rj_1", expected_revision=3, is_local=True
+    )
     client.research_action("rj_1", "pause")
     client.research_action("rj_1", "generate")
+    client.research_action("rj_1", "refresh")
+    client.get_research_provenance("rj_1")
     client.get_research_report("rj_1")
     client.review_research_report(
         "rj_1",
@@ -167,9 +188,11 @@ def test_research_client_methods_call_expected_endpoints(monkeypatch):
     )
     client.publish_research_report("rj_1", expected_revision=8)
     client.get_published_research_report("rj_1")
+    client.get_published_research_bundle("rj_1")
 
     assert calls[0][0:2] == ("post", "http://api/v1/research-jobs")
     assert calls[0][2]["json"]["section_titles"] == ["证据"]
+    assert calls[0][2]["json"]["is_local"] is True
     assert calls[1][0:2] == ("get", "http://api/v1/research-jobs")
     assert calls[1][2]["params"] == {
         "kb_id": "kb",
@@ -180,19 +203,39 @@ def test_research_client_methods_call_expected_endpoints(monkeypatch):
     assert calls[3][0:2] == ("put", "http://api/v1/research-jobs/rj_1/plan")
     assert calls[3][2]["json"]["expected_revision"] == 2
     assert calls[3][2]["headers"] == {"Authorization": "Bearer secret"}
-    assert calls[4][0:2] == ("post", "http://api/v1/research-jobs/rj_1/pause")
+    assert calls[4][0:2] == (
+        "post",
+        "http://api/v1/research-jobs/rj_1/plan/auto",
+    )
+    assert calls[4][2]["json"] == {"expected_revision": 3, "is_local": True}
     assert calls[5][0:2] == (
+        "post",
+        "http://api/v1/research-jobs/rj_1/pause",
+    )
+    assert calls[6][0:2] == (
         "post",
         "http://api/v1/research-jobs/rj_1/generate",
     )
-    assert calls[6][0:2] == ("get", "http://api/v1/research-jobs/rj_1/report")
-    assert calls[7][0:2] == ("put", "http://api/v1/research-jobs/rj_1/review")
-    assert calls[7][2]["json"]["expected_revision"] == 7
-    assert calls[8][0:2] == ("post", "http://api/v1/research-jobs/rj_1/publish")
-    assert calls[8][2]["json"] == {"expected_revision": 8}
-    assert calls[9][0:2] == (
+    assert calls[7][0:2] == (
+        "post",
+        "http://api/v1/research-jobs/rj_1/refresh",
+    )
+    assert calls[8][0:2] == (
+        "get",
+        "http://api/v1/research-jobs/rj_1/provenance",
+    )
+    assert calls[9][0:2] == ("get", "http://api/v1/research-jobs/rj_1/report")
+    assert calls[10][0:2] == ("put", "http://api/v1/research-jobs/rj_1/review")
+    assert calls[10][2]["json"]["expected_revision"] == 7
+    assert calls[11][0:2] == ("post", "http://api/v1/research-jobs/rj_1/publish")
+    assert calls[11][2]["json"] == {"expected_revision": 8}
+    assert calls[12][0:2] == (
         "get",
         "http://api/v1/research-jobs/rj_1/published-report",
+    )
+    assert calls[13][0:2] == (
+        "get",
+        "http://api/v1/research-jobs/rj_1/published-bundle",
     )
     with pytest.raises(ValueError, match="unsupported research action"):
         client.research_action("rj_1", "delete")

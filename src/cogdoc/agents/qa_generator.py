@@ -8,6 +8,8 @@ from cogdoc.agents.conversation_memory import (
     CHAT_HISTORY_MESSAGE_LIMIT,
     format_recent_chat_history,
 )
+from cogdoc.research_control import current_research_control
+from cogdoc.research_provider import mark_research_process_isolation_compatible
 from cogdoc.tools.evidence_rendering import render_evidence_context
 from cogdoc.tools.citation_ledger import ensure_evidence_ids
 
@@ -53,11 +55,11 @@ class Generator:
     ) -> ChatOpenAI:
         # 客户端键必须包含后端、地址和模型名。
         settings = get_settings()
+        research_mode = current_research_control() is not None
         if is_local:
             base_url = settings.ollama_base_url
             api_key = settings.ollama_api_key
             model_name = custom_model_name or settings.ollama_model_name
-            client_key = f"local_{base_url}_{model_name}"
             # 本地超时更长、重试更少。
             timeout = settings.ollama_timeout_seconds
             max_retries = settings.ollama_max_retries
@@ -65,7 +67,6 @@ class Generator:
             base_url = settings.llm_base_url
             api_key = settings.llm_api_key
             model_name = custom_model_name or settings.llm_model_name
-            client_key = f"cloud_{base_url}_{model_name}"
             # 云端超时与重试按后端服务级别可配。
             timeout = settings.llm_timeout_seconds
             max_retries = settings.llm_max_retries
@@ -75,8 +76,19 @@ class Generator:
                     "or create a local .env file from .env.example."
                 )
 
+        # Research has its own durable deadline and protocol-level fallback.
+        # Transport retries would multiply one request timeout underneath those
+        # controls, so each isolated call gets exactly one transport attempt.
+        if research_mode:
+            max_retries = 0
+        mode = "research" if research_mode else "interactive"
+        client_key = (
+            f"{mode}_{'local' if is_local else 'cloud'}_{base_url}_{model_name}_"
+            f"{timeout}_{max_retries}"
+        )
+
         if client_key not in cls._clients:
-            cls._clients[client_key] = ChatOpenAI(
+            client = ChatOpenAI(
                 model=model_name,
                 api_key=cast(Any, api_key),
                 base_url=base_url,
@@ -84,6 +96,9 @@ class Generator:
                 timeout=timeout,
                 max_retries=max_retries,
             )
+            if research_mode:
+                mark_research_process_isolation_compatible(client)
+            cls._clients[client_key] = client
         return cls._clients[client_key]
 
     # 获取节点客户端；这是其他 agent 复用模型路由的公开入口。

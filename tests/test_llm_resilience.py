@@ -1,3 +1,5 @@
+from threading import Event
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 from cogdoc.api.app import create_app
@@ -5,6 +7,7 @@ from cogdoc.api.error_mapping import classify_error_code, status_for_code
 from cogdoc.api.schemas import ErrorCode
 from cogdoc.api.session_store import SessionStore
 from cogdoc.service.chat_service import ChatServiceError
+from cogdoc.research_control import ResearchRunController, bind_research_control
 
 
 # 声明异步测试使用的后端。
@@ -70,6 +73,48 @@ def test_get_client_reads_timeout_and_retries_from_settings(monkeypatch):
     gen_module.Generator._get_client(is_local=True)
     assert captured["timeout"] == 222.0
     assert captured["max_retries"] == 5
+    gen_module.Generator._clients.clear()
+
+
+def test_research_client_disables_transport_retries_and_uses_separate_cache(
+    monkeypatch,
+):
+    import cogdoc.agents.qa_generator as gen_module
+    from types import SimpleNamespace
+
+    gen_module.Generator._clients.clear()
+    monkeypatch.setattr(
+        gen_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            ollama_base_url="http://x/v1",
+            ollama_api_key="k",
+            ollama_model_name="m",
+            ollama_timeout_seconds=222.0,
+            ollama_max_retries=5,
+        ),
+    )
+    calls = []
+    monkeypatch.setattr(
+        gen_module,
+        "ChatOpenAI",
+        lambda **kwargs: calls.append(dict(kwargs)) or object(),
+    )
+    control = ResearchRunController(
+        job_id="rj",
+        phase="report",
+        attempt_id="attempt",
+        lease_id="lease",
+        reserve_callback=lambda _costs: None,
+        stop_event=Event(),
+    )
+
+    with bind_research_control(control):
+        gen_module.Generator._get_client(is_local=True)
+    gen_module.Generator._get_client(is_local=True)
+
+    assert [call["max_retries"] for call in calls] == [0, 5]
+    assert len(gen_module.Generator._clients) == 2
     gen_module.Generator._clients.clear()
 
 

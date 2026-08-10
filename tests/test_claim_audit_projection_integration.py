@@ -80,11 +80,7 @@ def _support_projected_claims(monkeypatch, captured_claims: list[dict]) -> None:
 
     def fake_invoke(_llm, schema, messages):
         assert schema is ClaimAssessmentBatch
-        user_content = messages[1]["content"]
-        claims_json = user_content.split("【候选声明 JSON】\n", 1)[1].split(
-            "\n\n【允许证据 JSON】", 1
-        )[0]
-        claims = json.loads(claims_json)
+        claims = json.loads(messages[1]["content"])["untrusted_data"]["claims"]
         captured_claims.extend(claims)
         return ClaimAssessmentBatch(
             assessments=[

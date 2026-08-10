@@ -1,6 +1,7 @@
 import hashlib
 import json
 
+import anyio.to_thread
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -114,6 +115,32 @@ def _gold_annotations():
             }
         ]
     }
+
+
+@pytest.mark.anyio
+async def test_review_auth_stays_off_anyio_worker_pool(tmp_path, monkeypatch):
+    import cogdoc.api.routes.retrieval_eval_drafts as route
+
+    monkeypatch.setattr(route, "current_index_provenance", lambda kb_id: _snapshot())
+    app, store = _make_app(tmp_path)
+    store.ensure(_pending())
+
+    async def reject_worker_offload(*args, **kwargs):
+        raise AssertionError("review authentication must not use AnyIO workers")
+
+    monkeypatch.setattr(anyio.to_thread, "run_sync", reject_worker_offload)
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get(
+                "/v1/retrieval-eval-drafts",
+                headers={"Authorization": "Bearer review-key"},
+            )
+        assert response.status_code == 200
+        assert len(response.json()["drafts"]) == 1
+    finally:
+        _close_app(app)
 
 
 @pytest.mark.anyio

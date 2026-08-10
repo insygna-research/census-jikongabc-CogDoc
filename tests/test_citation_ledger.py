@@ -13,6 +13,7 @@ from cogdoc.tools.citation_ledger import (
     format_evidence_id,
     render_display_citations,
 )
+from cogdoc.tools.public_citation_ledger import validate_public_citation_ledger
 
 
 def _doc(
@@ -214,6 +215,21 @@ def test_render_display_citations_tracks_exact_occurrences_for_same_page() -> No
                 expected[occurrence["answer_start"] : occurrence["answer_end"]]
                 == "[guide.pdf:P2]"
             )
+
+
+def test_display_citation_escapes_filename_syntax_characters() -> None:
+    _, ledger = assign_evidence_ids(
+        [_doc("syntax-source", source="policy].pdf", page=2)]
+    )
+
+    rendered = render_display_citations("结论。[E001]", ledger)
+
+    assert rendered.answer == "结论。[policy%5D.pdf:P2]"
+    assert rendered.entries[0]["source"] == "policy].pdf"
+    validation = validate_public_citation_ledger(
+        rendered.answer, list(rendered.entries)
+    )
+    assert validation.is_valid is True
 
 
 def test_public_ledger_never_contains_sensitive_evidence_text() -> None:

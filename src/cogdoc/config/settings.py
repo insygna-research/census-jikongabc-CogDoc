@@ -52,7 +52,7 @@ class Settings(BaseSettings):
 
     # 访问控制：密钥逗号分隔，留空则关闭鉴权。
     cogdoc_api_keys: str = Field(default="", validation_alias="COGDOC_API_KEYS")
-    # 评测审核是高权限写操作；未配置独立密钥时审核/导出接口保持关闭。
+    # 评测与 Research 发布审核是高权限操作；未配置时相关接口保持关闭。
     cogdoc_eval_review_api_keys: str = Field(
         default="", validation_alias="COGDOC_EVAL_REVIEW_API_KEYS"
     )
@@ -75,6 +75,103 @@ class Settings(BaseSettings):
         ge=1,
         le=50,
         validation_alias="COGDOC_RESEARCH_RETRIEVAL_TOP_K",
+    )
+    # Deep Research uses a bounded submission queue plus durable, per-phase
+    # execution budgets.  Provider request timeouts remain a lower-level guard;
+    # these limits bound the complete background attempt.
+    cogdoc_research_max_pending: int = Field(
+        default=32,
+        ge=1,
+        le=1000,
+        validation_alias="COGDOC_RESEARCH_MAX_PENDING",
+    )
+    cogdoc_research_provider_workers: int = Field(
+        default=4,
+        ge=1,
+        le=64,
+        validation_alias="COGDOC_RESEARCH_PROVIDER_WORKERS",
+    )
+    cogdoc_research_provider_max_pending: int = Field(
+        default=16,
+        ge=1,
+        le=1000,
+        validation_alias="COGDOC_RESEARCH_PROVIDER_MAX_PENDING",
+    )
+    cogdoc_research_provider_call_timeout_seconds: float = Field(
+        default=180.0,
+        ge=0.01,
+        le=3600.0,
+        validation_alias="COGDOC_RESEARCH_PROVIDER_CALL_TIMEOUT_SECONDS",
+    )
+    cogdoc_research_llm_process_isolation_enabled: bool = Field(
+        default=True,
+        validation_alias="COGDOC_RESEARCH_LLM_PROCESS_ISOLATION_ENABLED",
+    )
+    cogdoc_research_provider_kill_grace_seconds: float = Field(
+        default=0.5,
+        ge=0.01,
+        le=10.0,
+        validation_alias="COGDOC_RESEARCH_PROVIDER_KILL_GRACE_SECONDS",
+    )
+    cogdoc_research_provider_ipc_max_bytes: int = Field(
+        default=2_000_000,
+        ge=1024,
+        le=100_000_000,
+        validation_alias="COGDOC_RESEARCH_PROVIDER_IPC_MAX_BYTES",
+    )
+    cogdoc_research_evidence_deadline_seconds: float = Field(
+        default=900.0,
+        ge=1.0,
+        le=86400.0,
+        validation_alias="COGDOC_RESEARCH_EVIDENCE_DEADLINE_SECONDS",
+    )
+    cogdoc_research_report_deadline_seconds: float = Field(
+        default=1800.0,
+        ge=1.0,
+        le=86400.0,
+        validation_alias="COGDOC_RESEARCH_REPORT_DEADLINE_SECONDS",
+    )
+    cogdoc_research_planning_deadline_seconds: float = Field(
+        default=300.0,
+        ge=1.0,
+        le=3600.0,
+        validation_alias="COGDOC_RESEARCH_PLANNING_DEADLINE_SECONDS",
+    )
+    cogdoc_research_planning_workers: int = Field(
+        default=1,
+        ge=1,
+        le=8,
+        validation_alias="COGDOC_RESEARCH_PLANNING_WORKERS",
+    )
+    cogdoc_research_planning_max_pending: int = Field(
+        default=8,
+        ge=1,
+        le=100,
+        validation_alias="COGDOC_RESEARCH_PLANNING_MAX_PENDING",
+    )
+    cogdoc_research_max_retrieval_queries: int = Field(
+        default=128,
+        ge=1,
+        le=10000,
+        validation_alias="COGDOC_RESEARCH_MAX_RETRIEVAL_QUERIES",
+    )
+    cogdoc_research_max_candidate_docs: int = Field(
+        default=2048,
+        ge=1,
+        le=100000,
+        validation_alias="COGDOC_RESEARCH_MAX_CANDIDATE_DOCS",
+    )
+    cogdoc_research_max_llm_calls: int = Field(
+        default=256,
+        ge=1,
+        le=10000,
+        validation_alias="COGDOC_RESEARCH_MAX_LLM_CALLS",
+    )
+    cogdoc_research_max_model_input_chars: int = Field(
+        default=5_000_000,
+        ge=1000,
+        le=100_000_000,
+        validation_alias="COGDOC_RESEARCH_MAX_MODEL_INPUT_CHARS",
     )
 
     # 分层记忆预算：展示历史不受这些限制，只有送入模型的工作上下文会被裁剪。
@@ -177,6 +274,9 @@ class Settings(BaseSettings):
     llm_query_rewriter_model_name: str = Field(
         default="", validation_alias="LLM_QUERY_REWRITER_MODEL_NAME"
     )
+    llm_research_planner_model_name: str = Field(
+        default="", validation_alias="LLM_RESEARCH_PLANNER_MODEL_NAME"
+    )
     llm_source_resolver_model_name: str = Field(
         default="", validation_alias="LLM_SOURCE_RESOLVER_MODEL_NAME"
     )
@@ -206,6 +306,9 @@ class Settings(BaseSettings):
     )
     llm_query_rewriter_backend: str = Field(
         default="default", validation_alias="LLM_QUERY_REWRITER_BACKEND"
+    )
+    llm_research_planner_backend: str = Field(
+        default="default", validation_alias="LLM_RESEARCH_PLANNER_BACKEND"
     )
     llm_source_resolver_backend: str = Field(
         default="default", validation_alias="LLM_SOURCE_RESOLVER_BACKEND"
@@ -252,6 +355,9 @@ class Settings(BaseSettings):
     )
     ollama_query_rewriter_model_name: str = Field(
         default="", validation_alias="OLLAMA_QUERY_REWRITER_MODEL_NAME"
+    )
+    ollama_research_planner_model_name: str = Field(
+        default="", validation_alias="OLLAMA_RESEARCH_PLANNER_MODEL_NAME"
     )
     ollama_source_resolver_model_name: str = Field(
         default="", validation_alias="OLLAMA_SOURCE_RESOLVER_MODEL_NAME"
